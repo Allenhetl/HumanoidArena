@@ -13,7 +13,6 @@ from dds.sharedmemorymanager import SharedMemoryManager
 import time
 import threading
 from isaaclab.utils.buffers import CircularBuffer,DelayBuffer
-import os
 import ast
 project_root = os.environ.get("PROJECT_ROOT")
 class DDSRLActionProvider(ActionProvider):
@@ -26,8 +25,9 @@ class DDSRLActionProvider(ActionProvider):
         self.enable_dex3 = args_cli.enable_dex3_dds
         self.enable_inspire = args_cli.enable_inspire_dds
         self.wh = args_cli.enable_wholebody_dds
-        self.policy_path = f"{project_root}/"+args_cli.model_path
-        self.policy_path = '/home/hcl4070-1/Desktop/taowen/projects/TWIST2/assets/ckpts/twist2_1017_20k.onnx'
+        self.policy_path = self._resolve_policy_path(args_cli.model_path)
+        if not os.path.exists(self.policy_path):
+            raise FileNotFoundError(f"[{self.name}] Policy file not found: {self.policy_path}")
         self.env = env
         # Initialize DDS communication
         self.robot_dds = None
@@ -57,6 +57,12 @@ class DDSRLActionProvider(ActionProvider):
         self._twist2_history = torch.zeros(self.history_len, self.n_obs_single, device=self.env.device, dtype=torch.float32)
         self._twist2_last_action = torch.zeros(1, 29, device=self.env.device, dtype=torch.float32)
         self._twist2_obs_buf = torch.zeros(1, self.total_obs_size, device=self.env.device, dtype=torch.float32)
+        self._twist2_hand_dim = 7
+        self._twist2_neck_dim = 2
+        self._twist2_action_hand_left = torch.zeros(1, self._twist2_hand_dim, device=self.env.device, dtype=torch.float32)
+        self._twist2_action_hand_right = torch.zeros(1, self._twist2_hand_dim, device=self.env.device, dtype=torch.float32)
+        self._twist2_action_neck = torch.zeros(1, self._twist2_neck_dim, device=self.env.device, dtype=torch.float32)
+        self._twist2_hand_valid = False
 
         # Indices used in TWIST2
         self._twist2_ankle_idx = [4, 5, 10, 11]
@@ -95,6 +101,8 @@ class DDSRLActionProvider(ActionProvider):
             self._inspire_special_target_idx_t = torch.tensor(self._inspire_special_target_indices, dtype=torch.long, device=device)
             self._inspire_special_source_idx_t = torch.tensor(self._inspire_special_source_indices, dtype=torch.long, device=device)
             self._inspire_special_scales_t = self._inspire_special_scales.to(device)
+        if hasattr(self, "twist2_action_indices"):
+            self._twist2_action_idx_t = torch.tensor(self.twist2_action_indices, dtype=torch.long, device=device)
 
         self._full_action_buf = torch.zeros(len(self.all_joint_names), device=device, dtype=torch.float32)
         self._positions_buf = torch.empty(29, device=device, dtype=torch.float32)
@@ -362,6 +370,15 @@ class DDSRLActionProvider(ActionProvider):
         self.clip_actions = 100
         self.action_scale = 0.25
         self.sim_step_counter = 0
+        cfg = getattr(self.env, "cfg", None)
+        self._twist2_decimation = int(getattr(cfg, "decimation", 4))
+
+    def _resolve_policy_path(self, model_path: str) -> str:
+        if os.path.isabs(model_path):
+            return model_path
+        if project_root:
+            return os.path.join(project_root, model_path)
+        return model_path
 
     def load_policy(self,path):
         ext = os.path.splitext(path)[1].lower()
@@ -397,28 +414,71 @@ class DDSRLActionProvider(ActionProvider):
         print(f"[{self.name}] ONNX policy loaded with providers: {model.get_providers()}")
         return run_inference
 
-    def _twist2_fetch_mimic(self) -> torch.Tensor:
-        """Fetch TWIST2 mimic (35-dim) from Redis. Falls back to zeros if unavailable."""
+    def _twist2_parse_list(self, value, expected_len: int) -> list:
+        if value is None:
+            return [0.0] * expected_len
+        try:
+            if isinstance(value, (bytes, bytearray)):
+                value = value.decode("utf-8")
+            data = json.loads(value)
+        except Exception:
+            return [0.0] * expected_len
+        if not isinstance(data, list):
+            return [0.0] * expected_len
+        if len(data) < expected_len:
+            data = data + [0.0] * (expected_len - len(data))
+        elif len(data) > expected_len:
+            data = data[:expected_len]
+        return data
+
+    def _twist2_fetch_actions(self) -> torch.Tensor:
+        """Fetch TWIST2 actions (body + hand + neck) from Redis."""
         if self.redis_pipeline is None:
+            self._twist2_hand_valid = False
             return torch.zeros(1, self.n_mimic_obs, device=self.env.device, dtype=torch.float32)
         try:
-            self.redis_pipeline.get("action_body_unitree_g1_with_hands")
+            keys = [
+                "action_body_unitree_g1_with_hands",
+                "action_hand_left_unitree_g1_with_hands",
+                "action_hand_right_unitree_g1_with_hands",
+                "action_neck_unitree_g1_with_hands",
+            ]
+            for key in keys:
+                self.redis_pipeline.get(key)
             res = self.redis_pipeline.execute()
-            if not res or res[0] is None:
-                return torch.zeros(1, self.n_mimic_obs, device=self.env.device, dtype=torch.float32)
-            arr = json.loads(res[0])
-            # Ensure length = 35
-            if isinstance(arr, list):
-                if len(arr) < self.n_mimic_obs:
-                    arr = arr + [0.0] * (self.n_mimic_obs - len(arr))
-                elif len(arr) > self.n_mimic_obs:
-                    arr = arr[: self.n_mimic_obs]
-            else:
-                arr = [0.0] * self.n_mimic_obs
-            return torch.tensor(arr, device=self.env.device, dtype=torch.float32).unsqueeze(0)
+            action_body_raw = res[0] if len(res) > 0 else None
+            action_left_raw = res[1] if len(res) > 1 else None
+            action_right_raw = res[2] if len(res) > 2 else None
+            action_neck_raw = res[3] if len(res) > 3 else None
+
+            action_body = self._twist2_parse_list(action_body_raw, self.n_mimic_obs)
+            action_left = self._twist2_parse_list(action_left_raw, self._twist2_hand_dim)
+            action_right = self._twist2_parse_list(action_right_raw, self._twist2_hand_dim)
+            action_neck = self._twist2_parse_list(action_neck_raw, self._twist2_neck_dim)
+
+            self._twist2_hand_valid = action_left_raw is not None and action_right_raw is not None
+            self._twist2_action_hand_left.copy_(torch.tensor(action_left, device=self.env.device, dtype=torch.float32).unsqueeze(0))
+            self._twist2_action_hand_right.copy_(torch.tensor(action_right, device=self.env.device, dtype=torch.float32).unsqueeze(0))
+            self._twist2_action_neck.copy_(torch.tensor(action_neck, device=self.env.device, dtype=torch.float32).unsqueeze(0))
+
+            return torch.tensor(action_body, device=self.env.device, dtype=torch.float32).unsqueeze(0)
         except Exception as e:
-            print(f"[{self.name}] Redis mimic fetch failed: {e}")
+            print(f"[{self.name}] Redis action fetch failed: {e}")
+            self._twist2_hand_valid = False
             return torch.zeros(1, self.n_mimic_obs, device=self.env.device, dtype=torch.float32)
+
+    def _twist2_publish_state(self, state_body, state_hand_left, state_hand_right, state_neck) -> None:
+        if self.redis_pipeline is None:
+            return
+        try:
+            self.redis_pipeline.set("state_body_unitree_g1_with_hands", json.dumps(state_body))
+            self.redis_pipeline.set("state_hand_left_unitree_g1_with_hands", json.dumps(state_hand_left))
+            self.redis_pipeline.set("state_hand_right_unitree_g1_with_hands", json.dumps(state_hand_right))
+            self.redis_pipeline.set("state_neck_unitree_g1_with_hands", json.dumps(state_neck))
+            self.redis_pipeline.set("t_state", int(time.time() * 1000))
+            self.redis_pipeline.execute()
+        except Exception as e:
+            print(f"[{self.name}] Redis state publish failed: {e}")
 
     def _twist2_roll_pitch_from_projected_gravity(self, g_b: torch.Tensor) -> torch.Tensor:
         """Approximate (roll, pitch) from projected gravity in body frame. g_b: [N,3]."""
@@ -427,24 +487,49 @@ class DDSRLActionProvider(ActionProvider):
         pitch = torch.atan2(-gx, torch.sqrt(gy * gy + gz * gz + 1e-8))
         return torch.stack([roll, pitch], dim=-1)
 
-    def compute_current_observations(self):
-        # TWIST2 mimic from Redis
-        action_mimic = self._twist2_fetch_mimic()  # [1,35]
+    def _twist2_roll_pitch_from_quaternion(self, quat: torch.Tensor) -> torch.Tensor:
+        """Compute (roll, pitch) from quaternion (w, x, y, z)."""
+        w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+        t0 = 2.0 * (w * x + y * z)
+        t1 = 1.0 - 2.0 * (x * x + y * y)
+        roll = torch.atan2(t0, t1)
+        t2 = 2.0 * (w * y - z * x)
+        t2 = torch.clamp(t2, -1.0, 1.0)
+        pitch = torch.asin(t2)
+        return torch.stack([roll, pitch], dim=-1)
 
+    def compute_current_observations(self):
         # Proprio from Isaac
-        self.ang_vel = self.env.scene["robot"].data.root_ang_vel_b  # [1,3]
-        self.projected_gravity = self.env.scene["robot"].data.projected_gravity_b  # [1,3]
+        root_state = self.env.scene["robot"].data.root_state_w
+        self.ang_vel = root_state[:, 10:13]  # [1,3]
+        quat = root_state[:, 3:7]
         self.joint_pos = self.env.scene["robot"].data.joint_pos
         self.joint_vel = self.env.scene["robot"].data.joint_vel
 
-        # roll/pitch (approx) from projected gravity
-        rp = self._twist2_roll_pitch_from_projected_gravity(self.projected_gravity)
+        # roll/pitch from quaternion (TWIST2 convention)
+        rp = self._twist2_roll_pitch_from_quaternion(quat)
 
         # TWIST2 29-dof vectors in the correct order
         idx = self.twist2_action_indices
         dof_pos = self.joint_pos[:, idx]
         dof_vel = self.joint_vel[:, idx]
         dof_pos_delta = dof_pos - self.twist2_default_pos
+
+        # Publish state to Redis for teleop/data record
+        state_body = torch.cat([self.ang_vel, rp, dof_pos], dim=-1)
+        if self.enable_dex3 and hasattr(self, "_left_hand_target_idx_t"):
+            left_state = self.joint_pos.index_select(1, self._left_hand_target_idx_t)
+            right_state = self.joint_pos.index_select(1, self._right_hand_target_idx_t)
+            state_hand_left = left_state.squeeze(0).tolist()
+            state_hand_right = right_state.squeeze(0).tolist()
+        else:
+            state_hand_left = [0.0] * self._twist2_hand_dim
+            state_hand_right = [0.0] * self._twist2_hand_dim
+        state_neck = [0.0] * self._twist2_neck_dim
+        self._twist2_publish_state(state_body.squeeze(0).tolist(), state_hand_left, state_hand_right, state_neck)
+
+        # TWIST2 mimic from Redis (and hand actions)
+        action_mimic = self._twist2_fetch_actions()  # [1,35]
 
         # zero ankle velocities (TWIST2 convention)
         if len(self._twist2_ankle_idx) > 0:
@@ -509,39 +594,53 @@ class DDSRLActionProvider(ActionProvider):
             # Fill defaults first
             full_action.copy_(self.env.scene["robot"].data.default_joint_pos.squeeze(0))
             # Overwrite the 29 controlled joints
-            full_action.index_copy_(0, torch.tensor(self.twist2_action_indices, device=self.env.device, dtype=torch.long), target_29.squeeze(0))
+            if hasattr(self, "_twist2_action_idx_t"):
+                full_action.index_copy_(0, self._twist2_action_idx_t, target_29.squeeze(0))
+            else:
+                full_action.index_copy_(0, torch.tensor(self.twist2_action_indices, device=self.env.device, dtype=torch.long), target_29.squeeze(0))
 
             # 夹爪/手指（若有）
-            if self.gripper_dds and hasattr(self, "_gripper_source_idx_t"):
-                gripper_cmd = self.gripper_dds.get_gripper_command()
-                if gripper_cmd:
-                    left_gripper_cmd = gripper_cmd.get('left_gripper_cmd', {})
-                    right_gripper_cmd = gripper_cmd.get('right_gripper_cmd', {})
-                    left_gripper_positions = left_gripper_cmd.get('positions', [])
-                    right_gripper_positions = right_gripper_cmd.get('positions', [])
-                    gripper_positions = right_gripper_positions + left_gripper_positions
-                    if len(gripper_positions) >= 2:
-                        self._gripper_buf.copy_(torch.tensor(gripper_positions[:2], dtype=torch.float32, device=self.env.device))
-                        gp_vals = self._gripper_buf.index_select(0, self._gripper_source_idx_t)
-                        full_action.index_copy_(0, self._gripper_target_idx_t, gp_vals)
-            elif self.dex3_dds and hasattr(self, "_left_hand_source_idx_t"):
-                hand_cmds = self.dex3_dds.get_hand_commands()
-                if hand_cmds:
-                    left_hand_cmd = hand_cmds.get('left_hand_cmd', {})
-                    right_hand_cmd = hand_cmds.get('right_hand_cmd', {})
-                    if left_hand_cmd and right_hand_cmd:
-                        left_positions = left_hand_cmd.get('positions', [])
-                        right_positions = right_hand_cmd.get('positions', [])
-                        if len(left_positions) >= len(self._left_hand_buf) and len(right_positions) >= len(self._right_hand_buf):
-                            self._left_hand_buf.copy_(torch.tensor(left_positions[:len(self._left_hand_buf)], dtype=torch.float32, device=self.env.device))
-                            self._right_hand_buf.copy_(torch.tensor(right_positions[:len(self._right_hand_buf)], dtype=torch.float32, device=self.env.device))
-                            l_vals = self._left_hand_buf.index_select(0, self._left_hand_source_idx_t)
-                            r_vals = self._right_hand_buf.index_select(0, self._right_hand_source_idx_t)
-                            full_action.index_copy_(0, self._left_hand_target_idx_t, l_vals)
-                            full_action.index_copy_(0, self._right_hand_target_idx_t, r_vals)
-            elif self.inspire_dds and hasattr(self, "_inspire_source_idx_t"):
-                inspire_cmds = self.inspire_dds.get_inspire_hand_command()
-                if inspire_cmds and 'positions' in inspire_cmds:
+            hand_from_redis = False
+            if self.enable_dex3 and self._twist2_hand_valid and hasattr(self, "_left_hand_source_idx_t"):
+                self._left_hand_buf.copy_(self._twist2_action_hand_left.squeeze(0))
+                self._right_hand_buf.copy_(self._twist2_action_hand_right.squeeze(0))
+                l_vals = self._left_hand_buf.index_select(0, self._left_hand_source_idx_t)
+                r_vals = self._right_hand_buf.index_select(0, self._right_hand_source_idx_t)
+                full_action.index_copy_(0, self._left_hand_target_idx_t, l_vals)
+                full_action.index_copy_(0, self._right_hand_target_idx_t, r_vals)
+                hand_from_redis = True
+
+            if not hand_from_redis:
+                if self.gripper_dds and hasattr(self, "_gripper_source_idx_t"):
+                    gripper_cmd = self.gripper_dds.get_gripper_command()
+                    if gripper_cmd:
+                        left_gripper_cmd = gripper_cmd.get('left_gripper_cmd', {})
+                        right_gripper_cmd = gripper_cmd.get('right_gripper_cmd', {})
+                        left_gripper_positions = left_gripper_cmd.get('positions', [])
+                        right_gripper_positions = right_gripper_cmd.get('positions', [])
+                        gripper_positions = right_gripper_positions + left_gripper_positions
+                        if len(gripper_positions) >= 2:
+                            self._gripper_buf.copy_(torch.tensor(gripper_positions[:2], dtype=torch.float32, device=self.env.device))
+                            gp_vals = self._gripper_buf.index_select(0, self._gripper_source_idx_t)
+                            full_action.index_copy_(0, self._gripper_target_idx_t, gp_vals)
+                elif self.dex3_dds and hasattr(self, "_left_hand_source_idx_t"):
+                    hand_cmds = self.dex3_dds.get_hand_commands()
+                    if hand_cmds:
+                        left_hand_cmd = hand_cmds.get('left_hand_cmd', {})
+                        right_hand_cmd = hand_cmds.get('right_hand_cmd', {})
+                        if left_hand_cmd and right_hand_cmd:
+                            left_positions = left_hand_cmd.get('positions', [])
+                            right_positions = right_hand_cmd.get('positions', [])
+                            if len(left_positions) >= len(self._left_hand_buf) and len(right_positions) >= len(self._right_hand_buf):
+                                self._left_hand_buf.copy_(torch.tensor(left_positions[:len(self._left_hand_buf)], dtype=torch.float32, device=self.env.device))
+                                self._right_hand_buf.copy_(torch.tensor(right_positions[:len(self._right_hand_buf)], dtype=torch.float32, device=self.env.device))
+                                l_vals = self._left_hand_buf.index_select(0, self._left_hand_source_idx_t)
+                                r_vals = self._right_hand_buf.index_select(0, self._right_hand_source_idx_t)
+                                full_action.index_copy_(0, self._left_hand_target_idx_t, l_vals)
+                                full_action.index_copy_(0, self._right_hand_target_idx_t, r_vals)
+                elif self.inspire_dds and hasattr(self, "_inspire_source_idx_t"):
+                    inspire_cmds = self.inspire_dds.get_inspire_hand_command()
+                    if inspire_cmds and 'positions' in inspire_cmds:
                         inspire_cmds_positions = inspire_cmds['positions']
                         if len(inspire_cmds_positions) >= 12:
                             self._inspire_buf.copy_(torch.tensor(inspire_cmds_positions[:12], dtype=torch.float32, device=self.env.device))
@@ -551,7 +650,7 @@ class DDSRLActionProvider(ActionProvider):
                             full_action.index_copy_(0, self._inspire_special_target_idx_t, special_vals)
 
             # 同步仿真多步
-            for _ in range(4):
+            for _ in range(self._twist2_decimation):
                 self.env.scene["robot"].set_joint_position_target(full_action)
                 self.env.scene.write_data_to_sim()
                 self.env.sim.step(render=False)
