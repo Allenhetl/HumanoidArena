@@ -7,8 +7,8 @@
     --image_transport xrobot \
     --image_xrobot_host 172.20.10.2 \
     --image_xrobot_port 12345 \
-    --image_xrobot_width 2160 \
-    --image_xrobot_height 810 \
-    --image_xrobot_bitrate 20000 \
-    --image_fps 5 \
+    --image_xrobot_width 640 \
+    --image_xrobot_height 480 \
+    --image_xrobot_bitrate 4194304 \
+    --image_fps 30 \
     --image_xrobot_ffmpeg /usr/bin/ffmpeg

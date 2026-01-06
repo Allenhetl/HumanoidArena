@@ -15,7 +15,6 @@ project_root = os.path.dirname(os.path.abspath(__file__))
 os.environ["PROJECT_ROOT"] = project_root
 
 import argparse
-import contextlib
 import time
 import sys
 import signal
@@ -91,6 +90,7 @@ parser.add_argument("--profile_interval", type=int, default=500, help="performan
 
 parser.add_argument("--model_path", type=str, default="/home/hcl4070-1/Desktop/taowen/projects/TWIST2/assets/ckpts/twist2_1017_20k.onnx", help="model path")
 parser.add_argument("--enable_wholebody_dds", action="store_true", default=False, help="enable wh dds")
+parser.add_argument("--setpgrp", action="store_true", default=False, help="detach to a new process group")
 
 # add AppLauncher parameters
 AppLauncher.add_app_launcher_args(parser)
@@ -127,7 +127,7 @@ from action_provider.create_action_provider import create_action_provider
 from tools.get_stiffness import get_robot_stiffness_from_env
 from tools.get_reward import get_step_reward_value,get_current_rewards
 
-def setup_signal_handlers(controller,dds_manager=None):
+def setup_signal_handlers(controller, dds_manager=None, image_server=None, simulation_app=None):
     """set signal handlers"""
     def signal_handler(signum, frame):
         print(f"\nreceived signal {signum}, stopping controller...")
@@ -136,10 +136,20 @@ def setup_signal_handlers(controller,dds_manager=None):
         except Exception as e:
             print(f"Failed to stop controller: {e}")
         try:
+            if image_server is not None:
+                image_server._close()
+        except Exception as e:
+            print(f"Failed to stop image server: {e}")
+        try:
             if dds_manager is not None:
                 dds_manager.stop_all_communication()
         except Exception as e:
             print(f"Failed to stop DDS: {e}")
+        try:
+            if simulation_app is not None:
+                simulation_app.close()
+        except Exception as e:
+            print(f"Failed to close simulation app: {e}")
     
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -151,19 +161,20 @@ def main():
     import os
     import atexit
     try:
-        os.setpgrp()
-        current_pgid = os.getpgrp()
-        print(f"Setting process group: {current_pgid}")
+        if args_cli.setpgrp:
+            os.setpgrp()
+            current_pgid = os.getpgrp()
+            print(f"Setting process group: {current_pgid}")
         
-        def cleanup_process_group():
-            try:
-                print(f"Cleaning up process group: {current_pgid}")
-                import signal
-                os.killpg(current_pgid, signal.SIGTERM)
-            except Exception as e:
-                print(f"Failed to clean up process group: {e}")
+            def cleanup_process_group():
+                try:
+                    print(f"Cleaning up process group: {current_pgid}")
+                    import signal
+                    os.killpg(current_pgid, signal.SIGTERM)
+                except Exception as e:
+                    print(f"Failed to clean up process group: {e}")
         
-        atexit.register(cleanup_process_group)
+            atexit.register(cleanup_process_group)
         
     except Exception as e:
         print(f"Failed to set process group: {e}")
@@ -345,9 +356,9 @@ def main():
 
     # set signal handlers
     if not args_cli.replay_data:
-        setup_signal_handlers(controller,dds_manager)
+        setup_signal_handlers(controller, dds_manager, server, simulation_app)
     else:
-        setup_signal_handlers(controller)
+        setup_signal_handlers(controller, None, None, simulation_app)
     print("Note: The DDS in Sim transmits messages on channel 1. Please ensure that other DDS instances use the same channel for message exchange by setting: ChannelFactoryInitialize(1).")
     try:
         # start controller - start asynchronous components
@@ -362,126 +373,133 @@ def main():
         last_loop_time = time.time()
         recent_loop_times = []  # for calculating moving average frequency
 
-        # use torch.inference_mode() and exception suppression
-        with contextlib.suppress(KeyboardInterrupt), torch.inference_mode():
-            while simulation_app.is_running() and controller.is_running:
-                current_time = time.time()
-                loop_count += 1
-                if not args_cli.replay_data:
-                    try:
-                        env_state = env.scene.get_state()
-                        env_state_json =  sim_state_to_json(env_state)
-                        sim_state = {"init_state":env_state_json,"task_name":args_cli.task}
-                    except Exception as e:
-                        print(f"Failed to get env state: {e}")
-                        raise e
-                    try:
-                    # sim_state = json.dumps(sim_state)
-                        sim_state_dds.write_sim_state_data(sim_state)
-                    except Exception as e:
-                        print(f"Failed to write sim state: {e}")
-                        raise e
-                    # print(f"reset_pose_dds: {reset_pose_dds}")
-                    try:
-                        reset_pose_cmd = reset_pose_dds.get_reset_pose_command()
-                    except Exception as e:
-                        print(f"Failed to get reset pose command: {e}")
-                        raise e
-                    # # print(f"reset_pose_cmd: {reset_pose_cmd}")
-                    # Compute current reward values manually if needed for debugging
-                    try:
-                        current_reward = get_step_reward_value(env)
-                        print(f"reward: {current_reward}")
-                    except Exception as e:
-                        print(f"奖励计算失败: {e}")
-                        pass
-                    
-                    if reset_pose_cmd is not None:
+        # use torch.inference_mode() and handle KeyboardInterrupt
+        try:
+            with torch.inference_mode():
+                while simulation_app.is_running() and controller.is_running:
+                    current_time = time.time()
+                    loop_count += 1
+                    if not args_cli.replay_data:
                         try:
-                            reset_category = reset_pose_cmd.get("reset_category")
-                            # print(f"reset_category: {reset_category}")
-                            if (args_cli.enable_wholebody_dds and (reset_category == '1' or reset_category == '2')) or (not args_cli.enable_wholebody_dds and reset_category == '1'):
-                                print("reset object")
-                                env_cfg.event_manager.trigger("reset_object_self", env)
-                                reset_pose_dds.write_reset_pose_command(-1)
-                            elif reset_category == '2' and not args_cli.enable_wholebody_dds:
-                                print("reset all")
-                                env_cfg.event_manager.trigger("reset_all_self", env)
-                                reset_pose_dds.write_reset_pose_command(-1)
+                            env_state = env.scene.get_state()
+                            env_state_json = sim_state_to_json(env_state)
+                            sim_state = {"init_state": env_state_json, "task_name": args_cli.task}
                         except Exception as e:
-                            print(f"Failed to write reset pose command: {e}")
-                            raise e
-                else:
-                    if action_provider.get_start_loop() and data_idx<len(data_json_list):
-                        print(f"data_idx: {data_idx}")
-                        try:
-                            sim_state,task_name = action_provider.load_data(data_json_list[data_idx])
-                            if task_name!=args_cli.task:
-                                raise ValueError(f" The {task_name} in the dataset is different from the {args_cli.task} being executed .")
-                        except Exception as e:
-                            print(f"Failed to load data: {e}")
+                            print(f"Failed to get env state: {e}")
                             raise e
                         try:
-                            env.reset_to(sim_state, torch.tensor([0], device=env.device), is_relative=True)
-                            env.sim.reset()
-                            time.sleep(1)
-                            action_provider.start_replay()
-                            data_idx+=1
+                            # sim_state = json.dumps(sim_state)
+                            sim_state_dds.write_sim_state_data(sim_state)
                         except Exception as e:
-                            print(f"Failed to start replay: {e}")
+                            print(f"Failed to write sim state: {e}")
                             raise e
-                # print(f"env_state: {env_state}")
-                # calculate instantaneous loop time
-                loop_dt = current_time - last_loop_time
-                last_loop_time = current_time
-                recent_loop_times.append(loop_dt)
-                
-                # keep recent 100 loop times
-                if len(recent_loop_times) > 100:
-                    recent_loop_times.pop(0)
-                
-                # execute control step (in main thread, support rendering)
-                controller.step()
+                        # print(f"reset_pose_dds: {reset_pose_dds}")
+                        try:
+                            reset_pose_cmd = reset_pose_dds.get_reset_pose_command()
+                        except Exception as e:
+                            print(f"Failed to get reset pose command: {e}")
+                            raise e
+                        # # print(f"reset_pose_cmd: {reset_pose_cmd}")
+                        # Compute current reward values manually if needed for debugging
+                        try:
+                            current_reward = get_step_reward_value(env)
+                            print(f"reward: {current_reward}")
+                        except Exception as e:
+                            print(f"奖励计算失败: {e}")
+                            pass
 
-                # print statistics and loop frequency periodically
-                if current_time - last_stats_time >= args_cli.stats_interval:
-                    # calculate while loop execution frequency
-                    elapsed_time = current_time - loop_start_time
-                    loop_frequency = loop_count / elapsed_time if elapsed_time > 0 else 0
-                    
-                    # calculate moving average frequency (based on recent loop times)
-                    if recent_loop_times:
-                        avg_loop_time = sum(recent_loop_times) / len(recent_loop_times)
-                        moving_avg_frequency = 1.0 / avg_loop_time if avg_loop_time > 0 else 0
-                        min_loop_time = min(recent_loop_times)
-                        max_loop_time = max(recent_loop_times)
-                        max_freq = 1.0 / min_loop_time if min_loop_time > 0 else 0
-                        min_freq = 1.0 / max_loop_time if max_loop_time > 0 else 0
+                        if reset_pose_cmd is not None:
+                            try:
+                                reset_category = reset_pose_cmd.get("reset_category")
+                                # print(f"reset_category: {reset_category}")
+                                if (args_cli.enable_wholebody_dds and (reset_category == '1' or reset_category == '2')) or (
+                                    not args_cli.enable_wholebody_dds and reset_category == '1'
+                                ):
+                                    print("reset object")
+                                    env_cfg.event_manager.trigger("reset_object_self", env)
+                                    reset_pose_dds.write_reset_pose_command(-1)
+                                elif reset_category == '2' and not args_cli.enable_wholebody_dds:
+                                    print("reset all")
+                                    env_cfg.event_manager.trigger("reset_all_self", env)
+                                    reset_pose_dds.write_reset_pose_command(-1)
+                            except Exception as e:
+                                print(f"Failed to write reset pose command: {e}")
+                                raise e
                     else:
-                        moving_avg_frequency = 0
-                        min_freq = max_freq = 0
-                    
-                    print(f"\n=== While loop execution frequency statistics ===")
-                    print(f"loop execution count: {loop_count}")
-                    print(f"running time: {elapsed_time:.2f} seconds")
-                    print(f"overall average frequency: {loop_frequency:.2f} Hz")
-                    print(f"moving average frequency: {moving_avg_frequency:.2f} Hz (last {len(recent_loop_times)} times)")
-                    print(f"frequency range: {min_freq:.2f} - {max_freq:.2f} Hz")
-                    print(f"average loop time: {(elapsed_time/loop_count*1000):.2f} ms")
-                    if recent_loop_times:
-                        print(f"recent loop time: {(avg_loop_time*1000):.2f} ms")
-                    print(f"=============================")
-                    
-                    # print_stats(controller)
-                    last_stats_time = current_time
-       
-                # check environment state
-                if env.sim.is_stopped():
-                    print("\nenvironment stopped")
-                    break
-                # rate_limiter.sleep(env)
-    except KeyboardInterrupt:
-        print("\nuser interrupted program")
+                        if action_provider.get_start_loop() and data_idx < len(data_json_list):
+                            print(f"data_idx: {data_idx}")
+                            try:
+                                sim_state, task_name = action_provider.load_data(data_json_list[data_idx])
+                                if task_name != args_cli.task:
+                                    raise ValueError(
+                                        f" The {task_name} in the dataset is different from the {args_cli.task} being executed ."
+                                    )
+                            except Exception as e:
+                                print(f"Failed to load data: {e}")
+                                raise e
+                            try:
+                                env.reset_to(sim_state, torch.tensor([0], device=env.device), is_relative=True)
+                                env.sim.reset()
+                                time.sleep(1)
+                                action_provider.start_replay()
+                                data_idx += 1
+                            except Exception as e:
+                                print(f"Failed to start replay: {e}")
+                                raise e
+                    # print(f"env_state: {env_state}")
+                    # calculate instantaneous loop time
+                    loop_dt = current_time - last_loop_time
+                    last_loop_time = current_time
+                    recent_loop_times.append(loop_dt)
+
+                    # keep recent 100 loop times
+                    if len(recent_loop_times) > 100:
+                        recent_loop_times.pop(0)
+
+                    # execute control step (in main thread, support rendering)
+                    controller.step()
+
+                    # print statistics and loop frequency periodically
+                    if current_time - last_stats_time >= args_cli.stats_interval:
+                        # calculate while loop execution frequency
+                        elapsed_time = current_time - loop_start_time
+                        loop_frequency = loop_count / elapsed_time if elapsed_time > 0 else 0
+
+                        # calculate moving average frequency (based on recent loop times)
+                        if recent_loop_times:
+                            avg_loop_time = sum(recent_loop_times) / len(recent_loop_times)
+                            moving_avg_frequency = 1.0 / avg_loop_time if avg_loop_time > 0 else 0
+                            min_loop_time = min(recent_loop_times)
+                            max_loop_time = max(recent_loop_times)
+                            max_freq = 1.0 / min_loop_time if min_loop_time > 0 else 0
+                            min_freq = 1.0 / max_loop_time if max_loop_time > 0 else 0
+                        else:
+                            moving_avg_frequency = 0
+                            min_freq = max_freq = 0
+
+                        print(f"\n=== While loop execution frequency statistics ===")
+                        print(f"loop execution count: {loop_count}")
+                        print(f"running time: {elapsed_time:.2f} seconds")
+                        print(f"overall average frequency: {loop_frequency:.2f} Hz")
+                        print(
+                            f"moving average frequency: {moving_avg_frequency:.2f} Hz (last {len(recent_loop_times)} times)"
+                        )
+                        print(f"frequency range: {min_freq:.2f} - {max_freq:.2f} Hz")
+                        print(f"average loop time: {(elapsed_time/loop_count*1000):.2f} ms")
+                        if recent_loop_times:
+                            print(f"recent loop time: {(avg_loop_time*1000):.2f} ms")
+                        print(f"=============================")
+
+                        # print_stats(controller)
+                        last_stats_time = current_time
+
+                    # check environment state
+                    if env.sim.is_stopped():
+                        print("\nenvironment stopped")
+                        break
+                    # rate_limiter.sleep(env)
+        except KeyboardInterrupt:
+            print("\nuser interrupted program")
     
     except Exception as e:
         print(f"\nprogram exception: {e}")
