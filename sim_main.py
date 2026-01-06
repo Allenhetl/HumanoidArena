@@ -51,12 +51,45 @@ parser.add_argument("--replay_data",  action="store_true", default=False, help="
 parser.add_argument("--modify_light",  action="store_true", default=False, help="modify light")
 parser.add_argument("--modify_camera",  action="store_true", default=False,    help="modify camera")
 
+# image streaming parameters
+parser.add_argument(
+    "--image_transport",
+    type=str,
+    default="zmq",
+    choices=["zmq", "redis", "dds", "xrobot"],
+    help="image transport for streaming (zmq/redis/dds/xrobot)",
+)
+parser.add_argument("--image_fps", type=int, default=30, help="image streaming fps cap")
+parser.add_argument("--image_zmq_port", type=int, default=5555, help="ZMQ port for image streaming")
+parser.add_argument("--image_redis_host", type=str, default="localhost", help="Redis host for image streaming")
+parser.add_argument("--image_redis_port", type=int, default=6379, help="Redis port for image streaming")
+parser.add_argument("--image_redis_db", type=int, default=0, help="Redis db for image streaming")
+parser.add_argument(
+    "--image_redis_key_prefix",
+    type=str,
+    default="isaac_image",
+    help="Redis key prefix for image streaming",
+)
+parser.add_argument(
+    "--image_redis_channel",
+    type=str,
+    default="",
+    help="Redis pubsub channel (optional) for image streaming",
+)
+parser.add_argument("--image_dds_topic", type=str, default="rt/isaac_image", help="DDS topic for image streaming")
+parser.add_argument("--image_xrobot_host", type=str, default="172.20.10.2", help="XRobot/Pico IP for image streaming")
+parser.add_argument("--image_xrobot_port", type=int, default=12345, help="XRobot/Pico port for image streaming")
+parser.add_argument("--image_xrobot_bitrate", type=int, default=4000000, help="XRobot/Pico H264 bitrate (bps)")
+parser.add_argument("--image_xrobot_width", type=int, default=256, help="XRobot/Pico output width (0=use source)")
+parser.add_argument("--image_xrobot_height", type=int, default=256, help="XRobot/Pico output height (0=use source)")
+parser.add_argument("--image_xrobot_ffmpeg", type=str, default="", help="ffmpeg path for XRobot streaming")
+
 # performance analysis parameters
 parser.add_argument("--step_hz", type=int, default=500, help="control frequency")
 parser.add_argument("--enable_profiling", action="store_true", default=True, help="enable performance analysis")
 parser.add_argument("--profile_interval", type=int, default=500, help="performance analysis report interval (steps)")
 
-parser.add_argument("--model_path", type=str, default="assets/model/policy.onnx", help="model path")
+parser.add_argument("--model_path", type=str, default="/home/hcl4070-1/Desktop/taowen/projects/TWIST2/assets/ckpts/twist2_1017_20k.onnx", help="model path")
 parser.add_argument("--enable_wholebody_dds", action="store_true", default=False, help="enable wh dds")
 
 # add AppLauncher parameters
@@ -234,7 +267,24 @@ def main():
     if not args_cli.replay_data:
         print("========= create image server =========")
         try:
-            server = ImageServer(fps=30, Unit_Test=False)
+            server = ImageServer(
+                fps=args_cli.image_fps,
+                port=args_cli.image_zmq_port,
+                Unit_Test=False,
+                transport=args_cli.image_transport,
+                redis_host=args_cli.image_redis_host,
+                redis_port=args_cli.image_redis_port,
+                redis_db=args_cli.image_redis_db,
+                redis_key_prefix=args_cli.image_redis_key_prefix,
+                redis_channel=args_cli.image_redis_channel,
+                dds_topic=args_cli.image_dds_topic,
+                xrobot_host=args_cli.image_xrobot_host,
+                xrobot_port=args_cli.image_xrobot_port,
+                xrobot_bitrate=args_cli.image_xrobot_bitrate,
+                xrobot_width=args_cli.image_xrobot_width or None,
+                xrobot_height=args_cli.image_xrobot_height or None,
+                xrobot_ffmpeg=args_cli.image_xrobot_ffmpeg or None,
+            )
         except Exception as e:
             print(f"Failed to create image server: {e}")
             return

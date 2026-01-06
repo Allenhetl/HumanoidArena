@@ -1,18 +1,377 @@
 # Copyright (c) 2025, Unitree Robotics Co., Ltd. All Rights Reserved.
 # License: Apache License, Version 2.0  
 """
-A ZMQ-based image server that reads multi-image data from shared memory and publishes it
+An image server that reads multi-image data from shared memory and publishes it.
+Supports ZMQ (default), Redis, DDS, or XRobot remote vision (H264 over TCP).
 """
 
-import cv2
-import zmq
-import time
+import base64
+import json
+import shutil
+import socket
+import struct
+import subprocess
 import threading
+import time
+from typing import Dict, Optional
+
+import cv2
 from image_server.shared_memory_utils import MultiImageReader
 
 
+class _ImagePublisher:
+    def publish(self, jpg_bytes: bytes, meta: Dict[str, int]) -> None:
+        raise NotImplementedError
+
+    def close(self) -> None:
+        pass
+
+
+class _ZmqImagePublisher(_ImagePublisher):
+    def __init__(self, port: int):
+        import zmq
+
+        self.context = zmq.Context()
+        self.socket = self.context.socket(zmq.PUB)
+        self.socket.bind(f"tcp://*:{port}")
+
+    def publish(self, jpg_bytes: bytes, meta: Dict[str, int]) -> None:
+        self.socket.send(jpg_bytes)
+
+    def close(self) -> None:
+        self.socket.close()
+        self.context.term()
+
+
+class _RedisImagePublisher(_ImagePublisher):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        db: int,
+        key_prefix: str,
+        channel: str,
+    ):
+        import redis
+
+        self.client = redis.Redis(host=host, port=port, db=db)
+        self.pipeline = self.client.pipeline()
+        self.key_jpg = f"{key_prefix}:jpg"
+        self.key_meta = f"{key_prefix}:meta"
+        self.key_ts = f"{key_prefix}:ts_ms"
+        self.channel = channel or ""
+
+    def publish(self, jpg_bytes: bytes, meta: Dict[str, int]) -> None:
+        try:
+            ts_ms = meta.get("timestamp_ms", int(time.time() * 1000))
+            self.pipeline.set(self.key_jpg, jpg_bytes)
+            self.pipeline.set(self.key_meta, json.dumps(meta))
+            self.pipeline.set(self.key_ts, ts_ms)
+            if self.channel:
+                self.pipeline.publish(self.channel, str(ts_ms))
+            self.pipeline.execute()
+        except Exception as exc:
+            print(f"[Image Server] Redis publish failed: {exc}")
+
+
+class _DdsImagePublisher(_ImagePublisher):
+    def __init__(self, topic: str):
+        try:
+            from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher
+            from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
+            from unitree_sdk2py.idl.default import std_msgs_msg_dds__String_
+        except Exception as exc:
+            raise RuntimeError(f"DDS imports failed: {exc}") from exc
+
+        try:
+            ChannelFactoryInitialize(1)
+        except Exception:
+            pass
+
+        self.publisher = ChannelPublisher(topic, String_)
+        self.publisher.Init()
+        self.msg = std_msgs_msg_dds__String_()
+
+    def publish(self, jpg_bytes: bytes, meta: Dict[str, int]) -> None:
+        payload = {
+            "meta": meta,
+            "data": base64.b64encode(jpg_bytes).decode("ascii"),
+        }
+        self.msg.data = json.dumps(payload)
+        self.publisher.Write(self.msg)
+
+
+class _XRobotImagePublisher(_ImagePublisher):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        fps: int,
+        bitrate: int,
+        target_width: Optional[int],
+        target_height: Optional[int],
+        ffmpeg_path: Optional[str],
+    ):
+        self.host = host
+        self.port = port
+        self.fps = fps
+        self.bitrate = bitrate
+        self.target_width = target_width
+        self.target_height = target_height
+        self.ffmpeg_path = ffmpeg_path or shutil.which("ffmpeg")
+        if not self.ffmpeg_path:
+            raise RuntimeError("ffmpeg not found in PATH; set --image_xrobot_ffmpeg")
+
+        self.sock: Optional[socket.socket] = None
+        self.proc: Optional[subprocess.Popen] = None
+        self.reader_thread: Optional[threading.Thread] = None
+        self.running = False
+        self.nal_buffer = bytearray()
+        self.au_buffer = bytearray()
+        self.last_connect_attempt = 0.0
+        self.connect_interval = 2.0
+        self.current_size = None
+
+    def publish_frame(self, frame) -> None:
+        if frame is None:
+            return
+        frame = self._maybe_resize(frame)
+        height, width = frame.shape[:2]
+        if not self._ensure_stream(width, height):
+            return
+        try:
+            if self.proc and self.proc.stdin:
+                self.proc.stdin.write(frame.tobytes())
+        except Exception as exc:
+            print(f"[Image Server] XRobot ffmpeg write failed: {exc}")
+            self._reset()
+
+    def close(self) -> None:
+        self._reset()
+
+    def _ensure_stream(self, width: int, height: int) -> bool:
+        if self.current_size != (width, height):
+            self._reset()
+            self.current_size = (width, height)
+        if not self._ensure_socket():
+            return False
+        if self.proc is None:
+            self._start_ffmpeg(width, height)
+        return self.proc is not None
+
+    def _ensure_socket(self) -> bool:
+        if self.sock and self._socket_ok():
+            return True
+        now = time.time()
+        if now - self.last_connect_attempt < self.connect_interval:
+            return False
+        self.last_connect_attempt = now
+        try:
+            self.sock = socket.create_connection((self.host, self.port), timeout=2.0)
+            self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            self.sock.settimeout(None)
+            print(f"[Image Server] XRobot connected to {self.host}:{self.port}")
+            return True
+        except Exception as exc:
+            print(f"[Image Server] XRobot connect failed: {exc}")
+            self.sock = None
+            return False
+
+    def _socket_ok(self) -> bool:
+        try:
+            return self.sock is not None and self.sock.fileno() >= 0
+        except Exception:
+            return False
+
+    def _start_ffmpeg(self, width: int, height: int) -> None:
+        bitrate = max(100_000, int(self.bitrate))
+        fps = max(1, int(self.fps))
+        gop = fps
+        cmd = [
+            self.ffmpeg_path,
+            "-loglevel",
+            "error",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "bgr24",
+            "-s",
+            f"{width}x{height}",
+            "-r",
+            str(fps),
+            "-i",
+            "-",
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-tune",
+            "zerolatency",
+            "-g",
+            str(gop),
+            "-keyint_min",
+            str(gop),
+            "-bf",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-b:v",
+            str(bitrate),
+            "-maxrate",
+            str(bitrate),
+            "-bufsize",
+            str(bitrate * 2),
+            "-x264-params",
+            "repeat-headers=1:aud=1",
+            "-f",
+            "h264",
+            "-",
+        ]
+        try:
+            self.proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                bufsize=0,
+            )
+        except Exception as exc:
+            print(f"[Image Server] XRobot ffmpeg start failed: {exc}")
+            self.proc = None
+            return
+
+        self.running = True
+        self.reader_thread = threading.Thread(target=self._read_loop, daemon=True)
+        self.reader_thread.start()
+
+    def _read_loop(self) -> None:
+        if not self.proc or not self.proc.stdout:
+            return
+        while self.running:
+            chunk = self.proc.stdout.read(4096)
+            if not chunk:
+                if self.proc.poll() is not None:
+                    break
+                time.sleep(0.01)
+                continue
+            self.nal_buffer.extend(chunk)
+            self._drain_nals()
+
+    def _drain_nals(self) -> None:
+        while True:
+            start = self._find_start_code(self.nal_buffer, 0)
+            if start < 0:
+                if len(self.nal_buffer) > 4:
+                    del self.nal_buffer[:-4]
+                return
+            next_start = self._find_start_code(self.nal_buffer, start + 3)
+            if next_start < 0:
+                if start > 0:
+                    del self.nal_buffer[:start]
+                return
+            nal = bytes(self.nal_buffer[start:next_start])
+            del self.nal_buffer[:next_start]
+            nal_type = self._get_nal_type(nal)
+            if nal_type == 9:  # AUD, flush previous access unit
+                if self.au_buffer:
+                    self._send_packet(bytes(self.au_buffer))
+                    self.au_buffer.clear()
+                self.au_buffer.extend(nal)
+            else:
+                self.au_buffer.extend(nal)
+                if len(self.au_buffer) > 1_500_000:
+                    self._send_packet(bytes(self.au_buffer))
+                    self.au_buffer.clear()
+
+    def _find_start_code(self, data: bytearray, start: int) -> int:
+        i = start
+        end = len(data) - 3
+        while i <= end:
+            if data[i] == 0 and data[i + 1] == 0:
+                if data[i + 2] == 1:
+                    return i
+                if i + 3 < len(data) and data[i + 2] == 0 and data[i + 3] == 1:
+                    return i
+            i += 1
+        return -1
+
+    def _get_nal_type(self, nal: bytes) -> int:
+        if len(nal) < 5:
+            return -1
+        if nal[0:3] == b"\x00\x00\x01":
+            return nal[3] & 0x1F
+        if len(nal) >= 6 and nal[0:4] == b"\x00\x00\x00\x01":
+            return nal[4] & 0x1F
+        return -1
+
+    def _send_packet(self, payload: bytes) -> None:
+        if not self._socket_ok():
+            return
+        try:
+            header = struct.pack(">I", len(payload))
+            self.sock.sendall(header + payload)
+        except Exception as exc:
+            print(f"[Image Server] XRobot send failed: {exc}")
+            self._reset()
+
+    def _maybe_resize(self, frame):
+        if self.target_width and self.target_height:
+            if (frame.shape[1], frame.shape[0]) != (self.target_width, self.target_height):
+                return cv2.resize(frame, (self.target_width, self.target_height))
+        return frame
+
+    def _reset(self) -> None:
+        self.running = False
+        if self.proc:
+            try:
+                if self.proc.stdin:
+                    self.proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                self.proc.terminate()
+            except Exception:
+                pass
+            self.proc = None
+        if (
+            self.reader_thread
+            and self.reader_thread.is_alive()
+            and self.reader_thread is not threading.current_thread()
+        ):
+            self.reader_thread.join(timeout=1.0)
+        self.reader_thread = None
+        if self.sock:
+            try:
+                self.sock.close()
+            except Exception:
+                pass
+        self.sock = None
+        self.nal_buffer.clear()
+        self.au_buffer.clear()
+
+
 class ImageServer:
-    def __init__(self, fps=30, port=5555, Unit_Test=False):
+    def __init__(
+        self,
+        fps=30,
+        port=5555,
+        Unit_Test=False,
+        transport: str = "zmq",
+        redis_host: str = "localhost",
+        redis_port: int = 6379,
+        redis_db: int = 0,
+        redis_key_prefix: str = "isaac_image",
+        redis_channel: str = "",
+        dds_topic: str = "rt/isaac_image",
+        xrobot_host: str = "127.0.0.1",
+        xrobot_port: int = 12345,
+        xrobot_bitrate: int = 4_000_000,
+        xrobot_width: Optional[int] = None,
+        xrobot_height: Optional[int] = None,
+        xrobot_ffmpeg: Optional[str] = None,
+    ):
         """
         Multi-image server - read multi-image data from shared memory and publish it
         """
@@ -21,6 +380,7 @@ class ImageServer:
         self.fps = fps
         self.port = port
         self.Unit_Test = Unit_Test
+        self.transport = transport
         self.running = False
         self.publish_thread = None
         self.frame_count = 0
@@ -28,18 +388,72 @@ class ImageServer:
         # Initialize multi-image shared memory reader
         self.multi_image_reader = MultiImageReader()
 
-        # Set ZeroMQ context and socket
-        self.context = zmq.Context()
-        self.socket = self.context.socket(zmq.PUB)
-        self.socket.bind(f"tcp://*:{self.port}")
+        # Set publisher transport
+        self.publisher = self._create_publisher(
+            transport=transport,
+            port=port,
+            redis_host=redis_host,
+            redis_port=redis_port,
+            redis_db=redis_db,
+            redis_key_prefix=redis_key_prefix,
+            redis_channel=redis_channel,
+            dds_topic=dds_topic,
+            xrobot_host=xrobot_host,
+            xrobot_port=xrobot_port,
+            xrobot_bitrate=xrobot_bitrate,
+            xrobot_width=xrobot_width,
+            xrobot_height=xrobot_height,
+            xrobot_ffmpeg=xrobot_ffmpeg,
+        )
 
         if self.Unit_Test:
             self._init_performance_metrics()
 
-        print(f"[Image Server] Multi-image server initialized on port {self.port}")
+        print(f"[Image Server] Multi-image server initialized ({self.transport})")
         
         # start the publishing thread
         self.start_publishing()
+
+    def _create_publisher(
+        self,
+        transport: str,
+        port: int,
+        redis_host: str,
+        redis_port: int,
+        redis_db: int,
+        redis_key_prefix: str,
+        redis_channel: str,
+        dds_topic: str,
+        xrobot_host: str,
+        xrobot_port: int,
+        xrobot_bitrate: int,
+        xrobot_width: Optional[int],
+        xrobot_height: Optional[int],
+        xrobot_ffmpeg: Optional[str],
+    ) -> _ImagePublisher:
+        if transport == "zmq":
+            return _ZmqImagePublisher(port)
+        if transport == "redis":
+            return _RedisImagePublisher(
+                host=redis_host,
+                port=redis_port,
+                db=redis_db,
+                key_prefix=redis_key_prefix,
+                channel=redis_channel,
+            )
+        if transport == "dds":
+            return _DdsImagePublisher(dds_topic)
+        if transport == "xrobot":
+            return _XRobotImagePublisher(
+                host=xrobot_host,
+                port=xrobot_port,
+                fps=self.fps,
+                bitrate=xrobot_bitrate,
+                target_width=xrobot_width,
+                target_height=xrobot_height,
+                ffmpeg_path=xrobot_ffmpeg,
+            )
+        raise ValueError(f"Unsupported image transport: {transport}")
 
     def _init_performance_metrics(self):
         self.frame_count = 0
@@ -64,7 +478,9 @@ class ImageServer:
         print("[Image Server] Starting send_process from shared memory...")
         
         try:
-            while True:
+            if not self.running:
+                self.running = True
+            while self.running:
                 # read the concatenated images from shared memory
                 concatenated_image = self.multi_image_reader.read_concatenated_image()
                 
@@ -80,20 +496,30 @@ class ImageServer:
                 #     print("[Image Server] User pressed quit key")
                 #     break
                 
-                # encode the images
-                ret, buffer = cv2.imencode('.jpg', concatenated_image)
-                if not ret:
-                    print("[Image Server] Frame imencode is failed.")
-                    continue
+                if self.transport == "xrobot":
+                    self.publisher.publish_frame(concatenated_image)
+                else:
+                    # encode the images
+                    ret, buffer = cv2.imencode('.jpg', concatenated_image)
+                    if not ret:
+                        print("[Image Server] Frame imencode is failed.")
+                        continue
 
-                jpg_bytes = buffer.tobytes()
+                    jpg_bytes = buffer.tobytes()
 
-                # build the message
-                message = jpg_bytes
-
-                # send the message
-                self.socket.send(message)
+                    # send the message
+                    height, width, channels = concatenated_image.shape
+                    meta = {
+                        "timestamp_ms": int(time.time() * 1000),
+                        "height": int(height),
+                        "width": int(width),
+                        "channels": int(channels),
+                        "format": "jpg",
+                    }
+                    self.publisher.publish(jpg_bytes, meta)
                 self.frame_count += 1
+                if self.fps and self.fps > 0:
+                    time.sleep(1.0 / self.fps)
 
         except KeyboardInterrupt:
             print("[Image Server] Interrupted by user.")
@@ -128,8 +554,8 @@ class ImageServer:
             self.multi_image_reader.close()
             
         # close the network connection
-        self.socket.close()
-        self.context.term()
+        if hasattr(self, "publisher") and self.publisher:
+            self.publisher.close()
         print("[Image Server] Multi-image server closed")
 
     def __del__(self):
