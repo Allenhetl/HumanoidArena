@@ -264,10 +264,23 @@ def main():
 
 
     # create simplified control configuration
-    try:    
+    try:
+        use_wholebody = "Wholebody" in args_cli.task or args_cli.enable_wholebody_dds
+        if use_wholebody:
+            args_cli.action_source = "dds_wholebody"
+            args_cli.enable_wholebody_dds = True
+            physics_dt = getattr(env, "physics_dt", None) or env_cfg.sim.dt
+            policy_hz = int(round(1.0 / (physics_dt * env_cfg.decimation)))
+            if args_cli.step_hz != policy_hz:
+                print(f"⚠️  Overriding step_hz {args_cli.step_hz} -> {policy_hz} to match TWIST2 policy rate")
+            step_hz = policy_hz
+        else:
+            step_hz = args_cli.step_hz
+
         control_config = ControlConfig(
-            step_hz=args_cli.step_hz,
-            replay_mode=args_cli.replay_data
+            step_hz=step_hz,
+            replay_mode=args_cli.replay_data,
+            use_rl_action_mode=use_wholebody,
         )
     except Exception as e:
         print(f"Failed to create control configuration: {e}")
@@ -327,11 +340,7 @@ def main():
     print(f"\ncreate action provider: {args_cli.action_source}...")
     try:
         print(f"args_cli.task: {args_cli.task}")
-        if "Wholebody" in args_cli.task or args_cli.enable_wholebody_dds:
-            args_cli.action_source = "dds_wholebody"
-            args_cli.enable_wholebody_dds = True
-            control_config.use_rl_action_mode = True
-        action_provider = create_action_provider(env,args_cli)
+        action_provider = create_action_provider(env, args_cli)
         if action_provider is None:
             print("action provider creation failed, exiting")
             return

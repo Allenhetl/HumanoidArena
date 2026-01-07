@@ -63,6 +63,20 @@ class DDSRLActionProvider(ActionProvider):
         self._twist2_action_hand_right = torch.zeros(1, self._twist2_hand_dim, device=self.env.device, dtype=torch.float32)
         self._twist2_action_neck = torch.zeros(1, self._twist2_neck_dim, device=self.env.device, dtype=torch.float32)
         self._twist2_hand_valid = False
+        self._twist2_action_timeout_ms = 300
+
+        # TWIST2 default mimic obs (unitree_g1_with_hands), used when teleop is inactive
+        default_mimic = [
+            0.0, 0.0, 0.8, 0.0, 0.0, 0.0,
+            -0.2, 0.0, 0.0, 0.4, -0.2, 0.0,
+            -0.2, 0.0, 0.0, 0.4, -0.2, 0.0,
+            0.0, 0.0, 0.0,
+            0.0, 0.4, 0.0, 1.2, 0.0, 0.0, 0.0,
+            0.0, -0.4, 0.0, 1.2, 0.0, 0.0, 0.0,
+        ]
+        self._twist2_default_mimic_obs = torch.tensor(
+            default_mimic, device=self.env.device, dtype=torch.float32
+        ).unsqueeze(0)
 
         # Indices used in TWIST2
         self._twist2_ankle_idx = [4, 5, 10, 11]
@@ -435,13 +449,14 @@ class DDSRLActionProvider(ActionProvider):
         """Fetch TWIST2 actions (body + hand + neck) from Redis."""
         if self.redis_pipeline is None:
             self._twist2_hand_valid = False
-            return torch.zeros(1, self.n_mimic_obs, device=self.env.device, dtype=torch.float32)
+            return self._twist2_default_mimic_obs.clone()
         try:
             keys = [
                 "action_body_unitree_g1_with_hands",
                 "action_hand_left_unitree_g1_with_hands",
                 "action_hand_right_unitree_g1_with_hands",
                 "action_neck_unitree_g1_with_hands",
+                "t_action",
             ]
             for key in keys:
                 self.redis_pipeline.get(key)
@@ -450,22 +465,38 @@ class DDSRLActionProvider(ActionProvider):
             action_left_raw = res[1] if len(res) > 1 else None
             action_right_raw = res[2] if len(res) > 2 else None
             action_neck_raw = res[3] if len(res) > 3 else None
+            t_action_raw = res[4] if len(res) > 4 else None
 
             action_body = self._twist2_parse_list(action_body_raw, self.n_mimic_obs)
             action_left = self._twist2_parse_list(action_left_raw, self._twist2_hand_dim)
             action_right = self._twist2_parse_list(action_right_raw, self._twist2_hand_dim)
             action_neck = self._twist2_parse_list(action_neck_raw, self._twist2_neck_dim)
 
-            self._twist2_hand_valid = action_left_raw is not None and action_right_raw is not None
+            t_action = None
+            if t_action_raw is not None:
+                try:
+                    if isinstance(t_action_raw, (bytes, bytearray)):
+                        t_action_raw = t_action_raw.decode("utf-8")
+                    t_action = int(t_action_raw)
+                except Exception:
+                    t_action = None
+            now_ms = int(time.time() * 1000)
+            is_fresh = t_action is not None and (now_ms - t_action) <= self._twist2_action_timeout_ms
+
+            if not is_fresh:
+                action_body = self._twist2_default_mimic_obs.squeeze(0).tolist()
+            elif not any(abs(v) > 1e-6 for v in action_body):
+                action_body = self._twist2_default_mimic_obs.squeeze(0).tolist()
+
+            self._twist2_hand_valid = is_fresh and action_left_raw is not None and action_right_raw is not None
             self._twist2_action_hand_left.copy_(torch.tensor(action_left, device=self.env.device, dtype=torch.float32).unsqueeze(0))
             self._twist2_action_hand_right.copy_(torch.tensor(action_right, device=self.env.device, dtype=torch.float32).unsqueeze(0))
             self._twist2_action_neck.copy_(torch.tensor(action_neck, device=self.env.device, dtype=torch.float32).unsqueeze(0))
-
             return torch.tensor(action_body, device=self.env.device, dtype=torch.float32).unsqueeze(0)
         except Exception as e:
             print(f"[{self.name}] Redis action fetch failed: {e}")
             self._twist2_hand_valid = False
-            return torch.zeros(1, self.n_mimic_obs, device=self.env.device, dtype=torch.float32)
+            return self._twist2_default_mimic_obs.clone()
 
     def _twist2_publish_state(self, state_body, state_hand_left, state_hand_right, state_neck) -> None:
         if self.redis_pipeline is None:
