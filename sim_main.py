@@ -129,8 +129,14 @@ from tools.get_reward import get_step_reward_value,get_current_rewards
 
 def setup_signal_handlers(controller, dds_manager=None, image_server=None, simulation_app=None):
     """set signal handlers"""
+    _handling = {"in_progress": False}
     def signal_handler(signum, frame):
         print(f"\nreceived signal {signum}, stopping controller...")
+        # Prevent running cleanup multiple times (Ctrl-C can be pressed repeatedly)
+        if _handling["in_progress"]:
+            print("signal handler already running; forcing exit")
+            os._exit(0)
+        _handling["in_progress"] = True
         try:
             controller.stop()
         except Exception as e:
@@ -150,6 +156,12 @@ def setup_signal_handlers(controller, dds_manager=None, image_server=None, simul
                 simulation_app.close()
         except Exception as e:
             print(f"Failed to close simulation app: {e}")
+        # If any background threads (DDS / OmniKit) keep the process alive, force exit.
+        try:
+            import os as _os
+            _os._exit(0)
+        except Exception:
+            raise SystemExit(0)
     
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)

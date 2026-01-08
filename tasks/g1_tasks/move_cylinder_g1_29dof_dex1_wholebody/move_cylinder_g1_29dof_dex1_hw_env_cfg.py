@@ -141,10 +141,10 @@ class MoveCylinderG129Dex1WholebodyEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self):
         """Post initialization."""
         # general settings
-        self.decimation = 4
+        self.decimation = 20
         self.episode_length_s = 20.0
         # simulation settings
-        self.sim.dt = 0.005
+        self.sim.dt = 0.001
         self.scene.contact_forces.update_period = self.sim.dt
         self.sim.render_interval = self.decimation
         self.sim.physx.bounce_threshold_velocity = 0.01

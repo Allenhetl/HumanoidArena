@@ -12,13 +12,16 @@ from dds.dds_master import dds_manager
 from dds.sharedmemorymanager import SharedMemoryManager
 import time
 import threading
-from isaaclab.utils.buffers import CircularBuffer,DelayBuffer
+from isaaclab.utils.buffers import CircularBuffer, DelayBuffer
 import ast
+
 project_root = os.environ.get("PROJECT_ROOT")
+
+
 class DDSRLActionProvider(ActionProvider):
     """Action provider based on DDS"""
 
-    def __init__(self,env, args_cli):
+    def __init__(self, env, args_cli):
         super().__init__("DDSActionProvider")
         self.enable_robot = args_cli.robot_type
         self.enable_gripper = args_cli.enable_dex1_dds
@@ -54,29 +57,18 @@ class DDSRLActionProvider(ActionProvider):
         self.total_obs_size = self.n_obs_single * (self.history_len + 1) + self.n_mimic_obs  # 1402
 
         # Buffers
-        self._twist2_history = torch.zeros(self.history_len, self.n_obs_single, device=self.env.device, dtype=torch.float32)
+        self._twist2_history = torch.zeros(self.history_len, self.n_obs_single, device=self.env.device,
+                                           dtype=torch.float32)
         self._twist2_last_action = torch.zeros(1, 29, device=self.env.device, dtype=torch.float32)
         self._twist2_obs_buf = torch.zeros(1, self.total_obs_size, device=self.env.device, dtype=torch.float32)
         self._twist2_hand_dim = 7
         self._twist2_neck_dim = 2
-        self._twist2_action_hand_left = torch.zeros(1, self._twist2_hand_dim, device=self.env.device, dtype=torch.float32)
-        self._twist2_action_hand_right = torch.zeros(1, self._twist2_hand_dim, device=self.env.device, dtype=torch.float32)
+        self._twist2_action_hand_left = torch.zeros(1, self._twist2_hand_dim, device=self.env.device,
+                                                    dtype=torch.float32)
+        self._twist2_action_hand_right = torch.zeros(1, self._twist2_hand_dim, device=self.env.device,
+                                                     dtype=torch.float32)
         self._twist2_action_neck = torch.zeros(1, self._twist2_neck_dim, device=self.env.device, dtype=torch.float32)
         self._twist2_hand_valid = False
-        self._twist2_action_timeout_ms = 300
-
-        # TWIST2 default mimic obs (unitree_g1_with_hands), used when teleop is inactive
-        default_mimic = [
-            0.0, 0.0, 0.8, 0.0, 0.0, 0.0,
-            -0.2, 0.0, 0.0, 0.4, -0.2, 0.0,
-            -0.2, 0.0, 0.0, 0.4, -0.2, 0.0,
-            0.0, 0.0, 0.0,
-            0.0, 0.4, 0.0, 1.2, 0.0, 0.0, 0.0,
-            0.0, -0.4, 0.0, 1.2, 0.0, 0.0, 0.0,
-        ]
-        self._twist2_default_mimic_obs = torch.tensor(
-            default_mimic, device=self.env.device, dtype=torch.float32
-        ).unsqueeze(0)
 
         # Indices used in TWIST2
         self._twist2_ankle_idx = [4, 5, 10, 11]
@@ -98,22 +90,30 @@ class DDSRLActionProvider(ActionProvider):
         if self.enable_dex3:
             self._left_hand_target_indices = [self.joint_to_index[name] for name in self.left_hand_joint_mapping.keys()]
             self._left_hand_source_indices = [idx for idx in self.left_hand_joint_mapping.values()]
-            self._right_hand_target_indices = [self.joint_to_index[name] for name in self.right_hand_joint_mapping.keys()]
+            self._right_hand_target_indices = [self.joint_to_index[name] for name in
+                                               self.right_hand_joint_mapping.keys()]
             self._right_hand_source_indices = [idx for idx in self.right_hand_joint_mapping.values()]
             self._left_hand_target_idx_t = torch.tensor(self._left_hand_target_indices, dtype=torch.long, device=device)
             self._left_hand_source_idx_t = torch.tensor(self._left_hand_source_indices, dtype=torch.long, device=device)
-            self._right_hand_target_idx_t = torch.tensor(self._right_hand_target_indices, dtype=torch.long, device=device)
-            self._right_hand_source_idx_t = torch.tensor(self._right_hand_source_indices, dtype=torch.long, device=device)
+            self._right_hand_target_idx_t = torch.tensor(self._right_hand_target_indices, dtype=torch.long,
+                                                         device=device)
+            self._right_hand_source_idx_t = torch.tensor(self._right_hand_source_indices, dtype=torch.long,
+                                                         device=device)
         if self.enable_inspire:
-            self._inspire_target_indices = [self.joint_to_index[name] for name in self.inspire_hand_joint_mapping.keys()]
+            self._inspire_target_indices = [self.joint_to_index[name] for name in
+                                            self.inspire_hand_joint_mapping.keys()]
             self._inspire_source_indices = [idx for idx in self.inspire_hand_joint_mapping.values()]
-            self._inspire_special_target_indices = [self.joint_to_index[name] for name in self.special_joint_mapping.keys()]
+            self._inspire_special_target_indices = [self.joint_to_index[name] for name in
+                                                    self.special_joint_mapping.keys()]
             self._inspire_special_source_indices = [spec[0] for spec in self.special_joint_mapping.values()]
-            self._inspire_special_scales = torch.tensor([spec[1] for spec in self.special_joint_mapping.values()], dtype=torch.float32)
+            self._inspire_special_scales = torch.tensor([spec[1] for spec in self.special_joint_mapping.values()],
+                                                        dtype=torch.float32)
             self._inspire_target_idx_t = torch.tensor(self._inspire_target_indices, dtype=torch.long, device=device)
             self._inspire_source_idx_t = torch.tensor(self._inspire_source_indices, dtype=torch.long, device=device)
-            self._inspire_special_target_idx_t = torch.tensor(self._inspire_special_target_indices, dtype=torch.long, device=device)
-            self._inspire_special_source_idx_t = torch.tensor(self._inspire_special_source_indices, dtype=torch.long, device=device)
+            self._inspire_special_target_idx_t = torch.tensor(self._inspire_special_target_indices, dtype=torch.long,
+                                                              device=device)
+            self._inspire_special_source_idx_t = torch.tensor(self._inspire_special_source_indices, dtype=torch.long,
+                                                              device=device)
             self._inspire_special_scales_t = self._inspire_special_scales.to(device)
         if hasattr(self, "twist2_action_indices"):
             self._twist2_action_idx_t = torch.tensor(self.twist2_action_indices, dtype=torch.long, device=device)
@@ -152,18 +152,18 @@ class DDSRLActionProvider(ActionProvider):
         """Setup joint mapping"""
         if self.wh:
             self.action_joint_names = [
-            'left_hip_pitch_joint',
-            'right_hip_pitch_joint',
-            'left_hip_roll_joint',
-            'right_hip_roll_joint',
-            'left_hip_yaw_joint',
-            'right_hip_yaw_joint',
-            'left_knee_joint',
-            'right_knee_joint',
-            'left_ankle_pitch_joint',
-            'right_ankle_pitch_joint',
-            'left_ankle_roll_joint',
-            'right_ankle_roll_joint'
+                'left_hip_pitch_joint',
+                'right_hip_pitch_joint',
+                'left_hip_roll_joint',
+                'right_hip_roll_joint',
+                'left_hip_yaw_joint',
+                'right_hip_yaw_joint',
+                'left_knee_joint',
+                'right_knee_joint',
+                'left_ankle_pitch_joint',
+                'right_ankle_pitch_joint',
+                'left_ankle_roll_joint',
+                'right_ankle_roll_joint'
             ]
             self.waist_joint_mapping = [
                 'waist_yaw_joint',
@@ -171,21 +171,21 @@ class DDSRLActionProvider(ActionProvider):
                 'waist_pitch_joint',
             ]
             self.arm_joint_names = [
-            "left_shoulder_pitch_joint",
-            "left_shoulder_roll_joint",
-            "left_shoulder_yaw_joint",
-            "left_elbow_joint",
-            "left_wrist_roll_joint",
-            "left_wrist_pitch_joint",
-            "left_wrist_yaw_joint",
-            # right arm (7)
-            "right_shoulder_pitch_joint",
-            "right_shoulder_roll_joint",
-            "right_shoulder_yaw_joint",
-            "right_elbow_joint",
-            "right_wrist_roll_joint",
-            "right_wrist_pitch_joint",
-            "right_wrist_yaw_joint",
+                "left_shoulder_pitch_joint",
+                "left_shoulder_roll_joint",
+                "left_shoulder_yaw_joint",
+                "left_elbow_joint",
+                "left_wrist_roll_joint",
+                "left_wrist_pitch_joint",
+                "left_wrist_yaw_joint",
+                # right arm (7)
+                "right_shoulder_pitch_joint",
+                "right_shoulder_roll_joint",
+                "right_shoulder_yaw_joint",
+                "right_elbow_joint",
+                "right_wrist_roll_joint",
+                "right_wrist_pitch_joint",
+                "right_wrist_yaw_joint",
             ]
 
             # TWIST2 29-dof action order (MuJoCo actuator order)
@@ -222,35 +222,35 @@ class DDSRLActionProvider(ActionProvider):
             ]
 
             self.old_action_joints_names = [
-            'left_hip_pitch_joint',
-            'right_hip_pitch_joint',
-            'waist_yaw_joint',
-            'left_hip_roll_joint',
-            'right_hip_roll_joint',
-            'waist_roll_joint',
-            'left_hip_yaw_joint',
-            'right_hip_yaw_joint',
-            'waist_pitch_joint',
-            'left_knee_joint',
-            'right_knee_joint',
-            'left_shoulder_pitch_joint',
-            'right_shoulder_pitch_joint',
-            'left_ankle_pitch_joint',
-            'right_ankle_pitch_joint',
-            'left_shoulder_roll_joint',
-            'right_shoulder_roll_joint',
-            'left_ankle_roll_joint',
-            'right_ankle_roll_joint',
-            'left_shoulder_yaw_joint',
-            'right_shoulder_yaw_joint',
-            'left_elbow_joint',
-            'right_elbow_joint',
-            'left_wrist_roll_joint',
-            'right_wrist_roll_joint',
-            'left_wrist_pitch_joint',
-            'right_wrist_pitch_joint',
-            'left_wrist_yaw_joint',
-            'right_wrist_yaw_joint',]
+                'left_hip_pitch_joint',
+                'right_hip_pitch_joint',
+                'waist_yaw_joint',
+                'left_hip_roll_joint',
+                'right_hip_roll_joint',
+                'waist_roll_joint',
+                'left_hip_yaw_joint',
+                'right_hip_yaw_joint',
+                'waist_pitch_joint',
+                'left_knee_joint',
+                'right_knee_joint',
+                'left_shoulder_pitch_joint',
+                'right_shoulder_pitch_joint',
+                'left_ankle_pitch_joint',
+                'right_ankle_pitch_joint',
+                'left_shoulder_roll_joint',
+                'right_shoulder_roll_joint',
+                'left_ankle_roll_joint',
+                'right_ankle_roll_joint',
+                'left_shoulder_yaw_joint',
+                'right_shoulder_yaw_joint',
+                'left_elbow_joint',
+                'right_elbow_joint',
+                'left_wrist_roll_joint',
+                'right_wrist_roll_joint',
+                'left_wrist_pitch_joint',
+                'right_wrist_pitch_joint',
+                'left_wrist_yaw_joint',
+                'right_wrist_yaw_joint', ]
         if self.enable_robot == "g129":
             self.arm_joint_mapping = {
                 "left_shoulder_pitch_joint": 0,
@@ -277,50 +277,50 @@ class DDSRLActionProvider(ActionProvider):
             }
         if self.enable_dex3:
             self.left_hand_joint_mapping = {
-                "left_hand_thumb_0_joint":0,
-                "left_hand_thumb_1_joint":1,
-                "left_hand_thumb_2_joint":2,
-                "left_hand_middle_0_joint":3,
-                "left_hand_middle_1_joint":4,
-                "left_hand_index_0_joint":5,
-                "left_hand_index_1_joint":6}
+                "left_hand_thumb_0_joint": 0,
+                "left_hand_thumb_1_joint": 1,
+                "left_hand_thumb_2_joint": 2,
+                "left_hand_middle_0_joint": 3,
+                "left_hand_middle_1_joint": 4,
+                "left_hand_index_0_joint": 5,
+                "left_hand_index_1_joint": 6}
             self.right_hand_joint_mapping = {
-                "right_hand_thumb_0_joint":0,
-                "right_hand_thumb_1_joint":1,
-                "right_hand_thumb_2_joint":2,
-                "right_hand_middle_0_joint":3,
-                "right_hand_middle_1_joint":4,
-                "right_hand_index_0_joint":5,
-                "right_hand_index_1_joint":6}
+                "right_hand_thumb_0_joint": 0,
+                "right_hand_thumb_1_joint": 1,
+                "right_hand_thumb_2_joint": 2,
+                "right_hand_middle_0_joint": 3,
+                "right_hand_middle_1_joint": 4,
+                "right_hand_index_0_joint": 5,
+                "right_hand_index_1_joint": 6}
         if self.enable_inspire:
             self.inspire_hand_joint_mapping = {
-                "R_pinky_proximal_joint":0,
-                "R_ring_proximal_joint":1,
-                "R_middle_proximal_joint":2,
-                "R_index_proximal_joint":3,
-                "R_thumb_proximal_pitch_joint":4,
-                "R_thumb_proximal_yaw_joint":5,
-                "L_pinky_proximal_joint":6,
-                "L_ring_proximal_joint":7,
-                "L_middle_proximal_joint":8,
-                "L_index_proximal_joint":9,
-                "L_thumb_proximal_pitch_joint":10,
-                "L_thumb_proximal_yaw_joint":11,
+                "R_pinky_proximal_joint": 0,
+                "R_ring_proximal_joint": 1,
+                "R_middle_proximal_joint": 2,
+                "R_index_proximal_joint": 3,
+                "R_thumb_proximal_pitch_joint": 4,
+                "R_thumb_proximal_yaw_joint": 5,
+                "L_pinky_proximal_joint": 6,
+                "L_ring_proximal_joint": 7,
+                "L_middle_proximal_joint": 8,
+                "L_index_proximal_joint": 9,
+                "L_thumb_proximal_pitch_joint": 10,
+                "L_thumb_proximal_yaw_joint": 11,
             }
             self.special_joint_mapping = {
-                "L_index_intermediate_joint":[9,1],
-                "L_middle_intermediate_joint":[8,1],
-                "L_pinky_intermediate_joint":[6,1],
-                "L_ring_intermediate_joint":[7,1],
-                "L_thumb_intermediate_joint":[10,1.5],
-                "L_thumb_distal_joint":[10,2.4],
+                "L_index_intermediate_joint": [9, 1],
+                "L_middle_intermediate_joint": [8, 1],
+                "L_pinky_intermediate_joint": [6, 1],
+                "L_ring_intermediate_joint": [7, 1],
+                "L_thumb_intermediate_joint": [10, 1.5],
+                "L_thumb_distal_joint": [10, 2.4],
 
-                "R_index_intermediate_joint":[3,1],
-                "R_middle_intermediate_joint":[2,1],
-                "R_pinky_intermediate_joint":[0,1],
-                "R_ring_intermediate_joint":[1,1],
-                "R_thumb_intermediate_joint":[4,1.5],
-                "R_thumb_distal_joint":[4,2.4],
+                "R_index_intermediate_joint": [3, 1],
+                "R_middle_intermediate_joint": [2, 1],
+                "R_pinky_intermediate_joint": [0, 1],
+                "R_ring_intermediate_joint": [1, 1],
+                "R_thumb_intermediate_joint": [4, 1.5],
+                "R_thumb_distal_joint": [4, 2.4],
             }
         self.all_joint_names = self.env.scene["robot"].data.joint_names
         self.joint_to_index = {name: i for i, name in enumerate(self.all_joint_names)}
@@ -333,7 +333,7 @@ class DDSRLActionProvider(ActionProvider):
             self.twist2_default_pos = self.env.scene["robot"].data.default_joint_pos[:, self.twist2_action_indices]
         self.arm_action_pose = [self.joint_to_index[name] for name in self.arm_joint_mapping.keys()]
         self.arm_action_pose_indices = [self.arm_joint_mapping[name] for name in self.arm_joint_mapping.keys()]
-        self.action_to_indices=[]
+        self.action_to_indices = []
         for action_joint in self.action_joint_names:
             if action_joint in self.all_joint_names:
                 self.action_to_indices.append(self.all_joint_names.index(action_joint))
@@ -346,7 +346,7 @@ class DDSRLActionProvider(ActionProvider):
             else:
                 raise ValueError(f"waist joint '{waist_joint}' not in all joint list")
 
-        self.arm_to_all_indices=[]
+        self.arm_to_all_indices = []
         for arm_joint in self.arm_joint_names:
             if arm_joint in self.all_joint_names:
                 self.arm_to_all_indices.append(self.all_joint_names.index(arm_joint))
@@ -363,8 +363,8 @@ class DDSRLActionProvider(ActionProvider):
             else:
                 raise ValueError(f"action joint '{old_action_joint}' not in all joint list")
         self.arm_action = []
-        self.obs_scales = {"ang_vel":1.0, "projected_gravity":1.0, "commands":1.0,
-                           "joint_pos":1.0, "joint_vel":1.0, "actions":1.0}
+        self.obs_scales = {"ang_vel": 1.0, "projected_gravity": 1.0, "commands": 1.0,
+                           "joint_pos": 1.0, "joint_vel": 1.0, "actions": 1.0}
         self.ang_vel = self.env.scene["robot"].data.root_ang_vel_b
         self.projected_gravity = self.env.scene["robot"].data.projected_gravity_b
         self.joint_pos = self.env.scene["robot"].data.joint_pos
@@ -372,14 +372,15 @@ class DDSRLActionProvider(ActionProvider):
         self.actor_obs_buffer = CircularBuffer(
             max_len=10, batch_size=1, device=self.env.device
         )
-        self.num_envs =1
+        self.num_envs = 1
         self.clip_obs = 100
-        self.num_actions_all = self.env.scene["robot"].data.default_joint_pos[:,self.old_action_indices].shape[1]
+        self.num_actions_all = self.env.scene["robot"].data.default_joint_pos[:, self.old_action_indices].shape[1]
         self.action_buffer = DelayBuffer(
             5, self.num_envs, device=self.env.device
         )
         self.action_buffer.compute(
-            torch.zeros(self.num_envs, self.num_actions_all, dtype=torch.float, device=self.env.device, requires_grad=False)
+            torch.zeros(self.num_envs, self.num_actions_all, dtype=torch.float, device=self.env.device,
+                        requires_grad=False)
         )
         self.clip_actions = 100
         self.action_scale = 0.25
@@ -394,14 +395,14 @@ class DDSRLActionProvider(ActionProvider):
             return os.path.join(project_root, model_path)
         return model_path
 
-    def load_policy(self,path):
+    def load_policy(self, path):
         ext = os.path.splitext(path)[1].lower()
-        if ext==".onnx":
+        if ext == ".onnx":
             return self.load_onnx_policy(path)
-        elif ext==".pt":
+        elif ext == ".pt":
             return self.load_jit_pt_policy(path)
 
-    def load_jit_pt_policy(self,path):
+    def load_jit_pt_policy(self, path):
         return torch.jit.load(path)
 
     def load_onnx_policy(self, path):
@@ -449,14 +450,13 @@ class DDSRLActionProvider(ActionProvider):
         """Fetch TWIST2 actions (body + hand + neck) from Redis."""
         if self.redis_pipeline is None:
             self._twist2_hand_valid = False
-            return self._twist2_default_mimic_obs.clone()
+            return torch.zeros(1, self.n_mimic_obs, device=self.env.device, dtype=torch.float32)
         try:
             keys = [
                 "action_body_unitree_g1_with_hands",
                 "action_hand_left_unitree_g1_with_hands",
                 "action_hand_right_unitree_g1_with_hands",
                 "action_neck_unitree_g1_with_hands",
-                "t_action",
             ]
             for key in keys:
                 self.redis_pipeline.get(key)
@@ -465,38 +465,25 @@ class DDSRLActionProvider(ActionProvider):
             action_left_raw = res[1] if len(res) > 1 else None
             action_right_raw = res[2] if len(res) > 2 else None
             action_neck_raw = res[3] if len(res) > 3 else None
-            t_action_raw = res[4] if len(res) > 4 else None
 
             action_body = self._twist2_parse_list(action_body_raw, self.n_mimic_obs)
             action_left = self._twist2_parse_list(action_left_raw, self._twist2_hand_dim)
             action_right = self._twist2_parse_list(action_right_raw, self._twist2_hand_dim)
             action_neck = self._twist2_parse_list(action_neck_raw, self._twist2_neck_dim)
 
-            t_action = None
-            if t_action_raw is not None:
-                try:
-                    if isinstance(t_action_raw, (bytes, bytearray)):
-                        t_action_raw = t_action_raw.decode("utf-8")
-                    t_action = int(t_action_raw)
-                except Exception:
-                    t_action = None
-            now_ms = int(time.time() * 1000)
-            is_fresh = t_action is not None and (now_ms - t_action) <= self._twist2_action_timeout_ms
+            self._twist2_hand_valid = action_left_raw is not None and action_right_raw is not None
+            self._twist2_action_hand_left.copy_(
+                torch.tensor(action_left, device=self.env.device, dtype=torch.float32).unsqueeze(0))
+            self._twist2_action_hand_right.copy_(
+                torch.tensor(action_right, device=self.env.device, dtype=torch.float32).unsqueeze(0))
+            self._twist2_action_neck.copy_(
+                torch.tensor(action_neck, device=self.env.device, dtype=torch.float32).unsqueeze(0))
 
-            if not is_fresh:
-                action_body = self._twist2_default_mimic_obs.squeeze(0).tolist()
-            elif not any(abs(v) > 1e-6 for v in action_body):
-                action_body = self._twist2_default_mimic_obs.squeeze(0).tolist()
-
-            self._twist2_hand_valid = is_fresh and action_left_raw is not None and action_right_raw is not None
-            self._twist2_action_hand_left.copy_(torch.tensor(action_left, device=self.env.device, dtype=torch.float32).unsqueeze(0))
-            self._twist2_action_hand_right.copy_(torch.tensor(action_right, device=self.env.device, dtype=torch.float32).unsqueeze(0))
-            self._twist2_action_neck.copy_(torch.tensor(action_neck, device=self.env.device, dtype=torch.float32).unsqueeze(0))
             return torch.tensor(action_body, device=self.env.device, dtype=torch.float32).unsqueeze(0)
         except Exception as e:
             print(f"[{self.name}] Redis action fetch failed: {e}")
             self._twist2_hand_valid = False
-            return self._twist2_default_mimic_obs.clone()
+            return torch.zeros(1, self.n_mimic_obs, device=self.env.device, dtype=torch.float32)
 
     def _twist2_publish_state(self, state_body, state_hand_left, state_hand_right, state_neck) -> None:
         if self.redis_pipeline is None:
@@ -628,7 +615,8 @@ class DDSRLActionProvider(ActionProvider):
             if hasattr(self, "_twist2_action_idx_t"):
                 full_action.index_copy_(0, self._twist2_action_idx_t, target_29.squeeze(0))
             else:
-                full_action.index_copy_(0, torch.tensor(self.twist2_action_indices, device=self.env.device, dtype=torch.long), target_29.squeeze(0))
+                full_action.index_copy_(0, torch.tensor(self.twist2_action_indices, device=self.env.device,
+                                                        dtype=torch.long), target_29.squeeze(0))
 
             # 夹爪/手指（若有）
             hand_from_redis = False
@@ -651,7 +639,8 @@ class DDSRLActionProvider(ActionProvider):
                         right_gripper_positions = right_gripper_cmd.get('positions', [])
                         gripper_positions = right_gripper_positions + left_gripper_positions
                         if len(gripper_positions) >= 2:
-                            self._gripper_buf.copy_(torch.tensor(gripper_positions[:2], dtype=torch.float32, device=self.env.device))
+                            self._gripper_buf.copy_(
+                                torch.tensor(gripper_positions[:2], dtype=torch.float32, device=self.env.device))
                             gp_vals = self._gripper_buf.index_select(0, self._gripper_source_idx_t)
                             full_action.index_copy_(0, self._gripper_target_idx_t, gp_vals)
                 elif self.dex3_dds and hasattr(self, "_left_hand_source_idx_t"):
@@ -662,9 +651,14 @@ class DDSRLActionProvider(ActionProvider):
                         if left_hand_cmd and right_hand_cmd:
                             left_positions = left_hand_cmd.get('positions', [])
                             right_positions = right_hand_cmd.get('positions', [])
-                            if len(left_positions) >= len(self._left_hand_buf) and len(right_positions) >= len(self._right_hand_buf):
-                                self._left_hand_buf.copy_(torch.tensor(left_positions[:len(self._left_hand_buf)], dtype=torch.float32, device=self.env.device))
-                                self._right_hand_buf.copy_(torch.tensor(right_positions[:len(self._right_hand_buf)], dtype=torch.float32, device=self.env.device))
+                            if len(left_positions) >= len(self._left_hand_buf) and len(right_positions) >= len(
+                                    self._right_hand_buf):
+                                self._left_hand_buf.copy_(
+                                    torch.tensor(left_positions[:len(self._left_hand_buf)], dtype=torch.float32,
+                                                 device=self.env.device))
+                                self._right_hand_buf.copy_(
+                                    torch.tensor(right_positions[:len(self._right_hand_buf)], dtype=torch.float32,
+                                                 device=self.env.device))
                                 l_vals = self._left_hand_buf.index_select(0, self._left_hand_source_idx_t)
                                 r_vals = self._right_hand_buf.index_select(0, self._right_hand_source_idx_t)
                                 full_action.index_copy_(0, self._left_hand_target_idx_t, l_vals)
@@ -674,10 +668,12 @@ class DDSRLActionProvider(ActionProvider):
                     if inspire_cmds and 'positions' in inspire_cmds:
                         inspire_cmds_positions = inspire_cmds['positions']
                         if len(inspire_cmds_positions) >= 12:
-                            self._inspire_buf.copy_(torch.tensor(inspire_cmds_positions[:12], dtype=torch.float32, device=self.env.device))
+                            self._inspire_buf.copy_(
+                                torch.tensor(inspire_cmds_positions[:12], dtype=torch.float32, device=self.env.device))
                             base_vals = self._inspire_buf.index_select(0, self._inspire_source_idx_t)
                             full_action.index_copy_(0, self._inspire_target_idx_t, base_vals)
-                            special_vals = self._inspire_buf.index_select(0, self._inspire_special_source_idx_t) * self._inspire_special_scales_t
+                            special_vals = self._inspire_buf.index_select(0,
+                                                                          self._inspire_special_source_idx_t) * self._inspire_special_scales_t
                             full_action.index_copy_(0, self._inspire_special_target_idx_t, special_vals)
 
             # 同步仿真多步
@@ -693,14 +689,14 @@ class DDSRLActionProvider(ActionProvider):
         except Exception as e:
             print(f"[{self.name}] Get DDS action failed: {e}")
             return None
-    
+
     def _convert_to_joint_range(self, value):
         """Convert gripper control value to joint angle"""
         input_min, input_max = 0.0, 5.6
         output_min, output_max = 0.03, -0.02
         value = max(input_min, min(input_max, value))
         return output_min + (output_max - output_min) * (value - input_min) / (input_max - input_min)
-    
+
     def cleanup(self):
         """Clean up DDS resources"""
         try:
