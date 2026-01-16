@@ -1,10 +1,7 @@
 from action_provider.action_provider_dds import DDSActionProvider
-
-
 from action_provider.action_provider_replay import FileActionProviderReplay
-
-# from action_provider.action_provider_wh_dds import DDSRLActionProvider
 from action_provider.action_provider_wh_twist2 import DDSRLActionProvider
+from action_provider.action_provider_openpi import OpenPIActionProvider
 from pathlib import Path
 
 
@@ -17,6 +14,11 @@ def create_action_provider(env,args):
         )
     elif args.action_source == "dds_wholebody":
         return DDSRLActionProvider(
+            env=env,
+            args_cli=args
+        )
+    elif args.action_source == "openpi":
+        return OpenPIActionProvider(
             env=env,
             args_cli=args
         )

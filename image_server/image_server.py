@@ -45,12 +45,12 @@ class _ZmqImagePublisher(_ImagePublisher):
 
 class _RedisImagePublisher(_ImagePublisher):
     def __init__(
-        self,
-        host: str,
-        port: int,
-        db: int,
-        key_prefix: str,
-        channel: str,
+            self,
+            host: str,
+            port: int,
+            db: int,
+            key_prefix: str,
+            channel: str,
     ):
         import redis
 
@@ -103,14 +103,14 @@ class _DdsImagePublisher(_ImagePublisher):
 
 class _XRobotImagePublisher(_ImagePublisher):
     def __init__(
-        self,
-        host: str,
-        port: int,
-        fps: int,
-        bitrate: int,
-        target_width: Optional[int],
-        target_height: Optional[int],
-        ffmpeg_path: Optional[str],
+            self,
+            host: str,
+            port: int,
+            fps: int,
+            bitrate: int,
+            target_width: Optional[int],
+            target_height: Optional[int],
+            ffmpeg_path: Optional[str],
     ):
         self.host = host
         self.port = port
@@ -175,6 +175,20 @@ class _XRobotImagePublisher(_ImagePublisher):
             return True
         except Exception as exc:
             print(f"[Image Server] XRobot connect failed: {exc}")
+            resolved_ips = []
+            try:
+                # Resolve DNS / hostname to one or more IPs for better debugging.
+                for info in socket.getaddrinfo(self.host, self.port, type=socket.SOCK_STREAM):
+                    ip = info[4][0]
+                    if ip not in resolved_ips:
+                        resolved_ips.append(ip)
+            except Exception:
+                pass
+
+            ip_hint = f" (resolved: {', '.join(resolved_ips)})" if resolved_ips else ""
+            print(
+                f"[Image Server] XRobot connect failed to {self.host}:{self.port}{ip_hint}: {exc}"
+            )
             self.sock = None
             return False
 
@@ -336,9 +350,9 @@ class _XRobotImagePublisher(_ImagePublisher):
                 pass
             self.proc = None
         if (
-            self.reader_thread
-            and self.reader_thread.is_alive()
-            and self.reader_thread is not threading.current_thread()
+                self.reader_thread
+                and self.reader_thread.is_alive()
+                and self.reader_thread is not threading.current_thread()
         ):
             self.reader_thread.join(timeout=1.0)
         self.reader_thread = None
@@ -354,33 +368,38 @@ class _XRobotImagePublisher(_ImagePublisher):
 
 class ImageServer:
     def __init__(
-        self,
-        fps=30,
-        port=5555,
-        Unit_Test=False,
-        transport: str = "zmq",
-        redis_host: str = "localhost",
-        redis_port: int = 6379,
-        redis_db: int = 0,
-        redis_key_prefix: str = "isaac_image",
-        redis_channel: str = "",
-        dds_topic: str = "rt/isaac_image",
-        xrobot_host: str = "127.0.0.1",
-        xrobot_port: int = 12345,
-        xrobot_bitrate: int = 4_000_000,
-        xrobot_width: Optional[int] = None,
-        xrobot_height: Optional[int] = None,
-        xrobot_ffmpeg: Optional[str] = None,
+            self,
+            fps=30,
+            port=5555,
+            Unit_Test=False,
+            transport: str = "zmq",
+            redis_host: str = "localhost",
+            redis_port: int = 6379,
+            redis_db: int = 0,
+            redis_key_prefix: str = "isaac_image",
+            redis_channel: str = "",
+            dds_topic: str = "rt/isaac_image",
+            xrobot_host: str = "127.0.0.1",
+            xrobot_port: int = 12345,
+            xrobot_bitrate: int = 4_000_000,
+            xrobot_width: Optional[int] = None,
+            xrobot_height: Optional[int] = None,
+            xrobot_ffmpeg: Optional[str] = None,
+            camera_name: str = "head",  # NEW: specify which camera to stream ("head" or "world")
     ):
         """
         Multi-image server - read multi-image data from shared memory and publish it
+
+        Args:
+            camera_name: which camera to stream - "head" for front camera, "world" for third-person camera
         """
-        print("[Image Server] Initializing multi-image server from shared memory")
-        
+        print(f"[Image Server] Initializing multi-image server from shared memory (camera: {camera_name})")
+
         self.fps = fps
         self.port = port
         self.Unit_Test = Unit_Test
         self.transport = transport
+        self.camera_name = camera_name  # Store the camera name
         self.running = False
         self.publish_thread = None
         self.frame_count = 0
@@ -410,26 +429,26 @@ class ImageServer:
             self._init_performance_metrics()
 
         print(f"[Image Server] Multi-image server initialized ({self.transport})")
-        
+
         # start the publishing thread
         self.start_publishing()
 
     def _create_publisher(
-        self,
-        transport: str,
-        port: int,
-        redis_host: str,
-        redis_port: int,
-        redis_db: int,
-        redis_key_prefix: str,
-        redis_channel: str,
-        dds_topic: str,
-        xrobot_host: str,
-        xrobot_port: int,
-        xrobot_bitrate: int,
-        xrobot_width: Optional[int],
-        xrobot_height: Optional[int],
-        xrobot_ffmpeg: Optional[str],
+            self,
+            transport: str,
+            port: int,
+            redis_host: str,
+            redis_port: int,
+            redis_db: int,
+            redis_key_prefix: str,
+            redis_channel: str,
+            dds_topic: str,
+            xrobot_host: str,
+            xrobot_port: int,
+            xrobot_bitrate: int,
+            xrobot_width: Optional[int],
+            xrobot_height: Optional[int],
+            xrobot_ffmpeg: Optional[str],
     ) -> _ImagePublisher:
         if transport == "zmq":
             return _ZmqImagePublisher(port)
@@ -471,52 +490,100 @@ class ImageServer:
         if self.frame_count % 30 == 0:
             elapsed_time = current_time - self.start_time
             real_time_fps = len(self.frame_times) / self.time_window if self.frame_times else 0
-            print(f"[Image Server] Real-time FPS: {real_time_fps:.2f}, Total frames sent: {self.frame_count}, Elapsed time: {elapsed_time:.2f} sec")
+            print(
+                f"[Image Server] Real-time FPS: {real_time_fps:.2f}, Total frames sent: {self.frame_count}, Elapsed time: {elapsed_time:.2f} sec")
 
     def send_process(self):
         """Read the concatenated images from shared memory and send them"""
         print("[Image Server] Starting send_process from shared memory...")
-        
+        print(f"[Image Server] Streaming {self.camera_name} camera view")
+
+        # Map camera_name to the key used in read_images()
+        camera_key_map = {
+            "head": "head",
+            "front_camera": "head",
+            "world": "world",
+            "world_camera": "world",
+            "left": "left",
+            "left_wrist_camera": "left",
+            "right": "right",
+            "right_wrist_camera": "right",
+        }
+
+        camera_key = camera_key_map.get(self.camera_name, "head")
+        print(f"[Image Server] Using camera key: {camera_key}")
+
         try:
             if not self.running:
                 self.running = True
             while self.running:
-                # read the concatenated images from shared memory
-                concatenated_image = self.multi_image_reader.read_concatenated_image()
-                
-                if concatenated_image is None:
+                # read all camera images from shared memory
+                images = self.multi_image_reader.read_images()
+
+                if images is None or len(images) == 0:
                     # if there is no image data, wait a moment and try again
                     time.sleep(0.01)
                     continue
-                
+
+                # extract the specific camera
+                if camera_key not in images:
+                    # if the requested camera is not available, wait and try again
+                    time.sleep(0.01)
+                    continue
+
+                camera_image = images[camera_key]
+
+                # Extract depth data if available
+                depth_key = f"{camera_key}_depth"
+                camera_depth = images.get(depth_key, None)
+
                 # show the concatenated images
-                # cv2.imshow('Concatenated Images (Head + Left + Right)', concatenated_image)
+                # cv2.imshow(f'{self.camera_name} Camera View', camera_image)
                 # key = cv2.waitKey(1) & 0xFF
                 # if key == ord('q') or key == 27:  # 'q' 或 ESC 键退出
                 #     print("[Image Server] User pressed quit key")
                 #     break
-                
+
                 if self.transport == "xrobot":
-                    self.publisher.publish_frame(concatenated_image)
+                    self.publisher.publish_frame(camera_image)
                 else:
                     # encode the images
-                    ret, buffer = cv2.imencode('.jpg', concatenated_image)
+                    ret, buffer = cv2.imencode('.jpg', camera_image)
                     if not ret:
                         print("[Image Server] Frame imencode is failed.")
                         continue
 
                     jpg_bytes = buffer.tobytes()
 
-                    # send the message
-                    height, width, channels = concatenated_image.shape
+                    # Prepare depth data if available
+                    depth_bytes = b''
+                    if camera_depth is not None:
+                        # Ensure depth is float32 and contiguous
+                        if camera_depth.dtype != np.float32:
+                            camera_depth = camera_depth.astype(np.float32)
+                        if not camera_depth.flags['C_CONTIGUOUS']:
+                            camera_depth = np.ascontiguousarray(camera_depth)
+                        depth_bytes = camera_depth.tobytes()
+
+                    # Pack message: [width][height][jpeg_len][jpeg_data][depth_len][depth_data]
+                    height, width, channels = camera_image.shape
+                    import struct
+                    header = struct.pack('iii', width, height, len(jpg_bytes))
+                    depth_header = struct.pack('i', len(depth_bytes))
+
+                    # Combine all parts
+                    message = header + jpg_bytes + depth_header + depth_bytes
+
+                    # Send the combined message
                     meta = {
                         "timestamp_ms": int(time.time() * 1000),
                         "height": int(height),
                         "width": int(width),
                         "channels": int(channels),
                         "format": "jpg",
+                        "has_depth": len(depth_bytes) > 0,
                     }
-                    self.publisher.publish(jpg_bytes, meta)
+                    self.publisher.publish(message, meta)
                 self.frame_count += 1
                 if self.fps and self.fps > 0:
                     time.sleep(1.0 / self.fps)
@@ -548,11 +615,11 @@ class ImageServer:
         """Close the server"""
         self.stop_publishing()
         cv2.destroyAllWindows()
-        
+
         # close the shared memory reader
         if hasattr(self, 'multi_image_reader'):
             self.multi_image_reader.close()
-            
+
         # close the network connection
         if hasattr(self, "publisher") and self.publisher:
             self.publisher.close()
@@ -566,10 +633,10 @@ class ImageServer:
 if __name__ == "__main__":
     # use the send_process mode example
     server = ImageServer(fps=30, Unit_Test=False)
-    
+
     # use the send_process method (blocking)
     server.send_process()
-    
+
     # or use the thread mode
     # try:
     #     server.start_publishing()
@@ -580,3 +647,4 @@ if __name__ == "__main__":
     #     print("\n[Image Server] Interrupted by user")
     # finally:
     #     server._close()
+
