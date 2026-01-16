@@ -74,23 +74,6 @@ class DDSRLActionProvider(ActionProvider):
         self._twist2_smplx_data = None
         self._twist2_smplx_valid = False
 
-        # Default 35D mimic_obs when no Redis data available (prevents falling)
-        # Structure: [xy_vel(2), z_pos(1), roll_pitch(2), yaw_vel(1), joints(29)] = 35D
-        self._default_mimic_obs = torch.tensor([
-            0.0, 0.0,  # xy velocity
-            0.8,       # z position
-            0.0, 0.0,  # roll/pitch
-            0.0,       # yaw angular velocity
-            # 29 DOF joint positions (matching TWIST2 default_dof_pos)
-            -0.2, 0.0, 0.0, 0.4, -0.2, 0.0,  # left leg (6)
-            -0.2, 0.0, 0.0, 0.4, -0.2, 0.0,  # right leg (6)
-            0.0, 0.0, 0.0,                   # waist (3)
-            0.0, 0.4, 0.0, 0.05, 0.0, 0.0, 0.0,  # left arm (7)
-            # 0.0, 0.4, 0.0, 1.2, 0.0, 0.0, 0.0,  # left arm (7)
-            0.0, -0.4, 0.0, 0.05, 0.0, 0.0, 0.0, # right arm (7)
-            # 0.0, -0.4, 0.0, 1.2, 0.0, 0.0, 0.0, # right arm (7)
-        ], device=self.env.device, dtype=torch.float32).unsqueeze(0)  # [1, 35]
-
         # Indices used in TWIST2
         self._twist2_ankle_idx = [4, 5, 10, 11]
 
@@ -472,8 +455,7 @@ class DDSRLActionProvider(ActionProvider):
         if self.redis_pipeline is None:
             self._twist2_hand_valid = False
             self._twist2_smplx_valid = False
-            # Return default 35D mimic_obs to maintain stable standing pose
-            return self._default_mimic_obs.clone()
+            return torch.zeros(1, self.n_mimic_obs, device=self.env.device, dtype=torch.float32)
         try:
             keys = [
                 "action_body_unitree_g1_with_hands",
@@ -495,12 +477,6 @@ class DDSRLActionProvider(ActionProvider):
             action_left = self._twist2_parse_list(action_left_raw, self._twist2_hand_dim)
             action_right = self._twist2_parse_list(action_right_raw, self._twist2_hand_dim)
             action_neck = self._twist2_parse_list(action_neck_raw, self._twist2_neck_dim)
-
-            # Check if action_body is all zeros (no valid data from Redis)
-            # This prevents robot from falling when Redis is empty
-            if action_body_raw is None or all(x == 0.0 for x in action_body):
-                # No valid teleop data, return default standing pose
-                return self._default_mimic_obs.clone()
 
             # Parse SMPLX data
             if smplx_data_raw is not None:
@@ -530,8 +506,7 @@ class DDSRLActionProvider(ActionProvider):
             print(f"[{self.name}] Redis action fetch failed: {e}")
             self._twist2_hand_valid = False
             self._twist2_smplx_valid = False
-            # Return default 35D mimic_obs on error to maintain stable standing pose
-            return self._default_mimic_obs.clone()
+            return torch.zeros(1, self.n_mimic_obs, device=self.env.device, dtype=torch.float32)
 
     def _twist2_publish_state(self, state_body, state_hand_left, state_hand_right, state_neck) -> None:
         if self.redis_pipeline is None:

@@ -26,55 +26,198 @@ class TableCylinderSceneCfgWH(InteractiveSceneCfg): # inherit from the interacti
             rot=[1.0, 0.0, 0.0, 0.0]
         ),
         spawn=UsdFileCfg(
-            usd_path=f"{project_root}/assets/objects/small_warehouse/small_warehouse_digital_twin.usd",
+            # usd_path=f"{project_root}/assets/objects/small_warehouse/small_warehouse_digital_twin.usd",
+            usd_path=f"{project_root}/assets/objects/small_warehouse/small_warehouse_digital_twin_boxtarget.usd",
         ),
     )
 
 
-        # 1. table configuration
-    packing_table1 = AssetBaseCfg(
-        prim_path="/World/envs/env_.*/PackingTable_1",    # table in the scene
-        init_state=AssetBaseCfg.InitialStateCfg(pos=[-2.35644,-3.45572,-0.2],   # initial position [x, y, z]
-                                                rot=[0.70091, 0.0, 0.0, 0.71325]), # initial rotation [x, y, z, w]
-        spawn=UsdFileCfg(
-            usd_path=f"{project_root}/assets/objects/PackingTable_2/PackingTable.usd",    # table model file
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),    # set to kinematic object
-        ),
-    )
+    # 1. table configuration
+    # packing_table1 = AssetBaseCfg(
+    #     prim_path="/World/envs/env_.*/PackingTable_1",    # table in the scene
+    #     init_state=AssetBaseCfg.InitialStateCfg(pos=[-2.35644,-3.45572,-0.2],   # initial position [x, y, z]
+    #                                             rot=[0.70091, 0.0, 0.0, 0.71325]), # initial rotation [x, y, z, w]
+    #     spawn=UsdFileCfg(
+    #         usd_path=f"{project_root}/assets/objects/PackingTable_2/PackingTable.usd",    # table model file
+    #         rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),    # set to kinematic object
+    #     ),
+    # )
 
-    packing_table2 = AssetBaseCfg(
-        prim_path="/World/envs/env_.*/PackingTable_2",    # table in the scene
-        init_state=AssetBaseCfg.InitialStateCfg(pos=[-3.97225,-4.3424,-0.2],   # initial position [x, y, z]
-                                                rot=[1.0, 0.0, 0.0, 0.0]), # initial rotation [x, y, z, w]
-        spawn=UsdFileCfg(
-            usd_path=f"{project_root}/assets/objects/PackingTable/PackingTable.usd",    # table model file
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),    # set to kinematic object
-        ),
-    )
+    # packing_table2 = AssetBaseCfg(
+    #     prim_path="/World/envs/env_.*/PackingTable_2",    # table in the scene
+    #     init_state=AssetBaseCfg.InitialStateCfg(pos=[-3.97225,-4.3424,-0.2],   # initial position [x, y, z]
+    #                                             rot=[1.0, 0.0, 0.0, 0.0]), # initial rotation [x, y, z, w]
+    #     spawn=UsdFileCfg(
+    #         usd_path=f"{project_root}/assets/objects/PackingTable/PackingTable.usd",    # table model file
+    #         rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),    # set to kinematic object
+    #     ),
+    # )
     # # Object
-    # 2. object configuration (cylinder)     
-    object = RigidObjectCfg(
-        prim_path="/World/envs/env_.*/Object",    # object in the scene
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-2.58514,-2.78975,0.84], # initial position (pos) 
-                                                  rot=[1, 0, 0, 0]), # initial rotation (rot)
-        spawn=sim_utils.CylinderCfg(
-            radius=0.018,    # cylinder radius (radius)
-            height=0.35,     # cylinder height (height)
- 
+    # 2. object configuration (cylinder)
+    # object = RigidObjectCfg(
+    #     prim_path="/World/envs/env_.*/Object",    # object in the scene
+    #     init_state=RigidObjectCfg.InitialStateCfg(pos=[-2.58514,-2.78975,0.84], # initial position (pos)
+    #                                               rot=[1, 0, 0, 0]), # initial rotation (rot)
+    #     spawn=sim_utils.CylinderCfg(
+    #         radius=0.018,    # cylinder radius (radius)
+    #         height=0.35,     # cylinder height (height)
+    #
+    #         rigid_props=sim_utils.RigidBodyPropertiesCfg(
+    #         ),    # rigid body properties configuration (rigid_props)
+    #         mass_props=sim_utils.MassPropertiesCfg(mass=0.4),    # mass properties configuration (mass)
+    #         collision_props=sim_utils.CollisionPropertiesCfg(),    # collision properties configuration (collision_props)
+    #         visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.15, 0.15, 0.15), metallic=1.0),    # visual material configuration (visual_material)
+    #         physics_material=sim_utils.RigidBodyMaterialCfg(
+    #             friction_combine_mode="max",    # friction combine mode
+    #             restitution_combine_mode="min",    # restitution combine mode
+    #             static_friction=1.5,    # static friction coefficient
+    #             dynamic_friction=1.5,    # dynamic friction coefficient
+    #             restitution=0.0,    # restitution coefficient (no restitution)
+    #         ),
+    #     ),
+    # )
+
+
+
+    # 3. cardboard box configuration (USD)
+    box = RigidObjectCfg(
+        prim_path="/World/envs/env_.*/Box",
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=[-3.3, -3.06, 0.9],
+            rot=[1.0, 0.0, 0.0, 0.0],
+        ),
+        spawn=UsdFileCfg(
+            usd_path=f"{project_root}/assets/objects/Props/general/CubeBox_A03_21cm_PR_NVD_01/CubeBox_A03_21cm_PR_NVD_01_physics_rigid.usd",
+            scale=(0.01, 0.01, 0.01),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-            ),    # rigid body properties configuration (rigid_props)
-            mass_props=sim_utils.MassPropertiesCfg(mass=0.4),    # mass properties configuration (mass)
-            collision_props=sim_utils.CollisionPropertiesCfg(),    # collision properties configuration (collision_props)
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.15, 0.15, 0.15), metallic=1.0),    # visual material configuration (visual_material)
-            physics_material=sim_utils.RigidBodyMaterialCfg(
-                friction_combine_mode="max",    # friction combine mode
-                restitution_combine_mode="min",    # restitution combine mode
-                static_friction=1.5,    # static friction coefficient
-                dynamic_friction=1.5,    # dynamic friction coefficient
-                restitution=0.0,    # restitution coefficient (no restitution)
+                rigid_body_enabled=True,
+                kinematic_enabled=False,
+                disable_gravity=False,
+                retain_accelerations=False,
             ),
+            mass_props=sim_utils.MassPropertiesCfg(mass=0.3),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                collision_enabled=True,
+                contact_offset=0.01,
+                rest_offset=0.0,
+            ),
+            activate_contact_sensors=False,
         ),
     )
+    #
+    # # # 4. cube configuration (USD)
+    # cube = RigidObjectCfg(
+    #     prim_path="/World/envs/env_.*/Cube",
+    #     init_state=RigidObjectCfg.InitialStateCfg(
+    #         pos=[-1.5, -2.0, 0.0],
+    #         rot=[1, 0, 0, 0]
+    #     ),
+    #     spawn=sim_utils.CuboidCfg(
+    #         size=(0.2, 0.2, 0.2),
+    #         rigid_props=sim_utils.RigidBodyPropertiesCfg(
+    #             disable_gravity=False,
+    #             retain_accelerations=False
+    #         ),
+    #         mass_props=sim_utils.MassPropertiesCfg(mass=0.5),
+    #         collision_props=sim_utils.CollisionPropertiesCfg(
+    #             collision_enabled=True,
+    #             contact_offset=0.01,
+    #             rest_offset=0.0
+    #         ),
+    #         visual_material=sim_utils.PreviewSurfaceCfg(
+    #             diffuse_color=(0.8, 0.65, 0.35),
+    #             metallic=0,
+    #             roughness=0.8,
+    #         ),
+    #         physics_material=sim_utils.RigidBodyMaterialCfg(
+    #             friction_combine_mode="max",
+    #             restitution_combine_mode="min",
+    #             static_friction=10,
+    #             dynamic_friction=1.5,
+    #             restitution=0.01,
+    #         ),
+    #     ),
+    # )
+
+    # 5. drum configuration (USD)
+    # plastic_drum = AssetBaseCfg(t
+    #     prim_path="/World/envs/env_.*/PlasticDrum",    # table in the scene
+    #     init_state=AssetBaseCfg.InitialStateCfg(pos=[-3.25, -2.86, 0.0],   # initial position [x, y, z]
+    #                                             rot=[1.0, 0.0, 0.0, 0.0]), # initial rotation [x, y, z, w]
+    #     spawn=UsdFileCfg(
+    #         usd_path=f"{project_root}/asset   s/objects/Props/general/SM_NestablePlasticDrum_A02_01/SM_NestablePlasticDrum_A02_01_physics_rigid.usd",
+    #         rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),    # set to kinematic object
+    #         scale=(0.008, 0.008, 0.008),
+    #     ),
+    # )
+
+    # 6. sofas configuration (USD)
+    # sofa_crestwood = AssetBaseCfg(
+    #     prim_path="/World/envs/env_.*/Sofa_Crestwood",
+    #     init_state=AssetBaseCfg.InitialStateCfg(
+    #         pos=[-1.5, -4.0, 0.0],
+    #         rot=[0.7071, 0.0, 0.0, 0.7071]  # 90 degrees rotation
+    #     ),
+    #     spawn=UsdFileCfg(
+    #         usd_path=f"{project_root}/assets/sofas/Crestwood/Crestwood_Sofa.usd",
+    #         rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+    #         scale=(0.01, 0.01, 0.01),
+    #     ),
+    # )
+
+    # sofa_appleseed = AssetBaseCfg(
+    #     prim_path="/World/envs/env_.*/Sofa_Appleseed",
+    #     init_state=AssetBaseCfg.InitialStateCfg(
+    #         pos=[-1.5, -2.0, 0.0],
+    #         rot=[0.7071, 0.0, 0.0, 0.7071]  # 90 degrees rotation
+    #     ),
+    #     spawn=UsdFileCfg(
+    #         usd_path=f"{project_root}/assets/sofas/Appleseed/Appleseed_Sofa.usd",
+    #         rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+    #         scale=(0.01, 0.01, 0.01),
+    #     ),
+    # )
+
+    # sofa_arnold = AssetBaseCfg(
+    #     prim_path="/World/envs/env_.*/Sofa_Arnold",
+    #     init_state=AssetBaseCfg.InitialStateCfg(
+    #         pos=[-1.5, -2.0, 0.0],
+    #         rot=[0.7071, 0.0, 0.0, -0.7071]  # -90 degrees rotation
+    #     ),
+    #     spawn=UsdFileCfg(
+    #         # usd_path=f"{project_root}/assets/sofas/Arnold.usd",
+    #         usd_path=f"{project_root}/assets/sofas/Arnold_rigid.usd",
+    #         # rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+    #         scale=(0.01, 0.01, 0.01),
+    #         rigid_props=sim_utils.RigidBodyPropertiesCfg(
+    #             rigid_body_enabled=True,
+    #             kinematic_enabled=True,  # static but with collision
+    #             disable_gravity=True,
+    #         ),
+    #         collision_props=sim_utils.CollisionPropertiesCfg(
+    #             collision_enabled=True,
+    #             contact_offset=0.02,
+    #             rest_offset=0.0,
+    #         ),
+    #         # activate_contact_sensors=True,
+    #     ),
+    # )
+
+    # sofa_moline = AssetBaseCfg(
+    #     prim_path="/World/envs/env_.*/Sofa_Moline",
+    #     init_state=AssetBaseCfg.InitialStateCfg(
+    #         pos=[-5.0, -2.0, 0.0],
+    #         rot=[0.7071, 0.0, 0.0, -0.7071]  # -90 degrees rotation
+    #     ),
+    #     spawn=UsdFileCfg(
+    #         usd_path=f"{project_root}/assets/sofas/Moline.usd",
+    #         rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+    #         scale=(0.01, 0.01, 0.01),
+    #     ),
+    # )
+
+
+
     # Ground plane
 
 

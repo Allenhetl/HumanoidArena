@@ -92,6 +92,13 @@ parser.add_argument("--model_path", type=str, default="/home/hcl4070-1/Desktop/t
 parser.add_argument("--enable_wholebody_dds", action="store_true", default=False, help="enable wh dds")
 parser.add_argument("--setpgrp", action="store_true", default=False, help="detach to a new process group")
 
+
+parser.add_argument("--gravity_z", type=float, default=-9.8, help="override gravity z (e.g., -9.8)")
+
+# world camera parameters
+parser.add_argument("--enable_world_camera", action="store_true", default=False, help="enable world camera (third-person view)")
+parser.add_argument("--world_camera_port", type=int, default=5556, help="ZMQ port for world camera streaming")
+
 # add AppLauncher parameters
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -127,8 +134,15 @@ from action_provider.create_action_provider import create_action_provider
 from tools.get_stiffness import get_robot_stiffness_from_env
 from tools.get_reward import get_step_reward_value,get_current_rewards
 
-def setup_signal_handlers(controller, dds_manager=None, image_server=None, simulation_app=None):
-    """set signal handlers"""
+def setup_signal_handlers(controller, dds_manager=None, image_servers=None, simulation_app=None):
+    """set signal handlers
+
+    Args:
+        controller: robot controller instance
+        dds_manager: DDS manager instance
+        image_servers: list of ImageServer instances or single ImageServer
+        simulation_app: simulation app instance
+    """
     _handling = {"in_progress": False}
     def signal_handler(signum, frame):
         print(f"\nreceived signal {signum}, stopping controller...")
@@ -141,11 +155,30 @@ def setup_signal_handlers(controller, dds_manager=None, image_server=None, simul
             controller.stop()
         except Exception as e:
             print(f"Failed to stop controller: {e}")
+
+        # Close image servers (support single or multiple servers)
         try:
-            if image_server is not None:
-                image_server._close()
+            if image_servers is not None:
+                # Handle both single server and list of servers
+                servers_list = image_servers if isinstance(image_servers, list) else [image_servers]
+                for idx, server in enumerate(servers_list):
+                    if server is not None:
+                        try:
+                            server._close()
+                            print(f"[sim_main] Image server {idx} closed successfully")
+                        except Exception as e:
+                            print(f"[sim_main] Failed to close image server {idx}: {e}")
         except Exception as e:
-            print(f"Failed to stop image server: {e}")
+            print(f"Failed to stop image servers: {e}")
+
+        # Clean up global shared memory writer from camera_state.py
+        try:
+            from tasks.common_observations.camera_state import multi_image_writer
+            print("[sim_main] Cleaning up global camera multi_image_writer...")
+            multi_image_writer.cleanup()
+        except Exception as e:
+            print(f"[sim_main] Failed to cleanup camera shared memory: {e}")
+
         try:
             if dds_manager is not None:
                 dds_manager.stop_all_communication()
@@ -162,7 +195,7 @@ def setup_signal_handlers(controller, dds_manager=None, image_server=None, simul
             _os._exit(0)
         except Exception:
             raise SystemExit(0)
-    
+
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
@@ -211,6 +244,36 @@ def main():
         print(f"\ncreate environment success ...")
         print("robot cfg init pos:", env.cfg.scene.robot.init_state.pos)
         print("robot usd:", env.cfg.scene.robot.spawn.usd_path)
+
+        # Optional: override gravity (IsaacLab/IsaacSim APIs differ across versions)
+        if args_cli.gravity_z is not None:
+            # import pdb; pdb.set_trace()
+            g = float(args_cli.gravity_z)
+            # gravity = (0.0, 0.0, g)
+            env.sim.get_physics_context().set_gravity(g)
+            # # Prefer public APIs when available
+            # if hasattr(env, "sim") and hasattr(env.sim, "set_gravity"):
+            #     env.sim.set_gravity(gravity)
+            #     print(f"[sim] gravity set via env.sim.set_gravity: {gravity}")
+            # # Some versions expose the physics context explicitly
+            # elif hasattr(env, "sim") and hasattr(env.sim, "get_physics_context"):
+            #     ctx = env.sim.get_physics_context()
+            #     if hasattr(ctx, "set_gravity"):
+            #         try:
+            #             ctx.set_gravity(gravity)  # 尝试 vec3
+            #             print(f"[sim] gravity set via physics context (vec3): {gravity}")
+            #         except TypeError:
+            #             ctx.set_gravity(g)  # 回退 scalar
+            #             print(f"[sim] gravity set via physics context (scalar): {g}")
+            #         print(f"[sim] gravity set via physics context: {gravity}")
+            #     else:
+            #         print("[sim] physics context has no set_gravity; gravity not changed")
+            # # Fallback: set on the config (may require env reset/recreate to take effect)
+            # elif hasattr(env_cfg, "sim") and hasattr(env_cfg.sim, "gravity"):
+            #     env_cfg.sim.gravity = gravity
+            #     print(f"[sim] gravity written to env_cfg.sim.gravity (may require reset): {gravity}")
+            # else:
+            #     print("[sim] could not find a supported gravity API on this IsaacLab version")
     except Exception as e:
         print(f"\nFailed to create environment: {e}")
         return
@@ -257,12 +320,88 @@ def main():
     env.sim.reset()
     env.reset()
 
+    # ================= Debug: print Box & Cube physics properties =================
+    print("\n" + "=" * 60)
+    print("[DEBUG] Inspecting physics properties using IsaacLab API")
+
+    # Get Box properties
+    if "box" in env.scene.keys():
+        box_obj = env.scene["box"]
+        print(f"\n[BOX] Prim path: {box_obj.cfg.prim_path}")
+
+        # Get mass (before modification)
+        masses_before = box_obj.root_physx_view.get_masses()
+        print(f"  Mass (original from USD): {masses_before[0] if len(masses_before) > 0 else 'N/A'} kg")
+        print(f"  Mass (from config): {box_obj.cfg.spawn.mass_props.mass if hasattr(box_obj.cfg.spawn, 'mass_props') and box_obj.cfg.spawn.mass_props else 'Not set in config'} kg")
+
+        # Try to set mass using correct format
+        print(f"\n  Attempting to set mass to 0.3 kg...")
+        try:
+            import torch
+            # PhysX requires CPU tensors (device -1 or 'cpu')
+            new_mass = torch.tensor([[0.3]], dtype=torch.float32, device='cpu')
+            box_obj.root_physx_view.set_masses(new_mass, indices=torch.tensor([0], device='cpu'))
+
+            # Verify the change
+            masses_after = box_obj.root_physx_view.get_masses()
+            print(f"  Mass (after setting): {masses_after[0]} kg")
+            print(f"  ✅ Successfully set mass to 0.3 kg!")
+        except Exception as e:
+            print(f"  ❌ Failed to set mass: {e}")
+            print(f"  Note: mass_props in config is ignored for USD files")
+
+        # Get friction and restitution from PhysX runtime
+        print(f"\n  Gravity disabled: {box_obj.cfg.spawn.rigid_props.disable_gravity}")
+
+        # Try to get material properties from PhysX view
+        try:
+            # Get material properties using PhysX view API
+            materials = box_obj.root_physx_view.get_material_properties()
+            if materials is not None and len(materials) > 0:
+                mat = materials[0]
+                print(f"  Static friction (from PhysX): {mat[0].item()}")
+                print(f"  Dynamic friction (from PhysX): {mat[1].item()}")
+                print(f"  Restitution (from PhysX): {mat[2].item()}")
+            else:
+                print(f"  Material properties: Unable to retrieve via PhysX view API")
+        except Exception as e:
+            print(f"  Material properties: Unable to retrieve ({e})")
+
+        print(f"\n  Note: Box uses USD file - friction/restitution from USD defaults")
+        print(f"        USD file does NOT contain explicit mass/friction/restitution properties")
+        print(f"        Physics engine auto-calculates mass from geometry volume + default density")
+
+    # Get Cube properties
+    if "cube" in env.scene.keys():
+        cube_obj = env.scene["cube"]
+        print(f"\n[CUBE] Prim path: {cube_obj.cfg.prim_path}")
+
+        # Get mass
+        masses = cube_obj.root_physx_view.get_masses()
+        print(f"  Mass (from runtime): {masses[0] if len(masses) > 0 else 'N/A'} kg")
+        print(f"  Mass (from config): {cube_obj.cfg.spawn.mass_props.mass if hasattr(cube_obj.cfg.spawn, 'mass_props') else 'Not set'} kg")
+
+        # Get friction from config
+        print(f"\n  Gravity disabled: {cube_obj.cfg.spawn.rigid_props.disable_gravity}")
+        if hasattr(cube_obj.cfg.spawn, 'physics_material') and cube_obj.cfg.spawn.physics_material:
+            phys_mat = cube_obj.cfg.spawn.physics_material
+            print(f"  Static friction (from config): {phys_mat.static_friction}")
+            print(f"  Dynamic friction (from config): {phys_mat.dynamic_friction}")
+            print(f"  Restitution (from config): {phys_mat.restitution}")
+
+        print(f"\n  Note: Cube uses procedural geometry (CuboidCfg)")
+        print(f"        Config mass_props and physics_material are applied correctly")
+
+    print("\n[DEBUG] Finished inspecting physics properties")
+    print("=" * 60 + "\n")
+    # ==================================================================
 
     # --- set default viewport camera (GUI only) ---
     try:
         # Viewport camera switching only makes sense when rendering is enabled
         import omni.kit.viewport.utility as vp_utils
 
+        # Set to front camera (first-person view)
         cam_path = "/World/envs/env_0/Robot/d435_link/front_cam"
         vp = vp_utils.get_active_viewport()
         if vp is not None:
@@ -301,9 +440,12 @@ def main():
     # create controller
 
     if not args_cli.replay_data:
-        print("========= create image server =========")
+        print("========= create image server(s) =========")
+        image_servers = []  # List to hold all image servers
+
+        # Create front camera image server (always enabled)
         try:
-            server = ImageServer(
+            front_server = ImageServer(
                 fps=args_cli.image_fps,
                 port=args_cli.image_zmq_port,
                 Unit_Test=False,
@@ -321,10 +463,43 @@ def main():
                 xrobot_height=args_cli.image_xrobot_height or None,
                 xrobot_ffmpeg=args_cli.image_xrobot_ffmpeg or None,
             )
+            image_servers.append(front_server)
+            print(f"[sim_main] Front camera ImageServer started on port {args_cli.image_zmq_port}")
         except Exception as e:
-            print(f"Failed to create image server: {e}")
+            print(f"Failed to create front camera image server: {e}")
             return
-        print("========= create image server success =========")
+
+        # Create world camera image server (optional, based on --enable_world_camera)
+        if args_cli.enable_world_camera:
+            try:
+                world_server = ImageServer(
+                    fps=args_cli.image_fps,
+                    port=args_cli.world_camera_port,
+                    Unit_Test=False,
+                    transport=args_cli.image_transport,
+                    redis_host=args_cli.image_redis_host,
+                    redis_port=args_cli.image_redis_port,
+                    redis_db=args_cli.image_redis_db,
+                    redis_key_prefix=args_cli.image_redis_key_prefix + "_world",
+                    redis_channel=args_cli.image_redis_channel + "_world" if args_cli.image_redis_channel else "",
+                    dds_topic=args_cli.image_dds_topic + "_world",
+                    xrobot_host=args_cli.image_xrobot_host,
+                    xrobot_port=args_cli.image_xrobot_port + 1,  # Use different port for world camera
+                    xrobot_bitrate=args_cli.image_xrobot_bitrate,
+                    xrobot_width=args_cli.image_xrobot_width or None,
+                    xrobot_height=args_cli.image_xrobot_height or None,
+                    xrobot_ffmpeg=args_cli.image_xrobot_ffmpeg or None,
+                    camera_name="world_camera",  # Specify which camera to use
+                )
+                image_servers.append(world_server)
+                print(f"[sim_main] World camera ImageServer started on port {args_cli.world_camera_port}")
+            except Exception as e:
+                print(f"Warning: Failed to create world camera image server: {e}")
+                print("[sim_main] Continuing without world camera...")
+        else:
+            print("[sim_main] World camera disabled (use --enable_world_camera to enable)")
+
+        print(f"========= created {len(image_servers)} image server(s) success =========")
         print("========= create dds =========")
         try:
             reset_pose_dds,sim_state_dds,dds_manager = create_dds_objects(args_cli,env)
@@ -348,10 +523,11 @@ def main():
             args_cli.action_source = "replay"
         print("========= get data json list success =========")
     # create action provider
-    
+
     print(f"\ncreate action provider: {args_cli.action_source}...")
     try:
         print(f"args_cli.task: {args_cli.task}")
+        # import pdb; pdb.set_trace()
         action_provider = create_action_provider(env, args_cli)
         if action_provider is None:
             print("action provider creation failed, exiting")
@@ -377,7 +553,7 @@ def main():
 
     # set signal handlers
     if not args_cli.replay_data:
-        setup_signal_handlers(controller, dds_manager, server, simulation_app)
+        setup_signal_handlers(controller, dds_manager, image_servers, simulation_app)
     else:
         setup_signal_handlers(controller, None, None, simulation_app)
     print("Note: The DDS in Sim transmits messages on channel 1. Please ensure that other DDS instances use the same channel for message exchange by setting: ChannelFactoryInitialize(1).")

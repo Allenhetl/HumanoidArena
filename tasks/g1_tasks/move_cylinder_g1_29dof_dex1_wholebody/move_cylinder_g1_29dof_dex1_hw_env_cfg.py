@@ -4,7 +4,7 @@ import tempfile
 import torch
 from dataclasses import MISSING
 
-from pink.tasks import FrameTask
+# from pink.tasks import FrameTask
 
 import isaaclab.envs.mdp as base_mdp
 from isaaclab.envs import ManagerBasedRLEnvCfg
@@ -43,11 +43,11 @@ class ObjectTableSceneCfg(TableCylinderSceneCfgWH):
         init_rot=(1, 0, 0, 0))
 
     contact_forces = ContactSensorCfg(prim_path="/World/envs/env_.*/Robot/.*", history_length=10, track_air_time=True, debug_vis=False)
-    # 6. add camera configuration 
+    # 6. add camera configuration
     front_camera = CameraPresets.g1_front_camera()
+    world_camera = CameraPresets.g1_world_camera()  # Third-person view camera
     # left_wrist_camera = CameraPresets.left_gripper_wrist_camera()
     # right_wrist_camera = CameraPresets.right_gripper_wrist_camera()
-    robot_camera = CameraPresets.g1_world_camera()
 ##
 # MDP settings
 ##
@@ -141,7 +141,7 @@ class MoveCylinderG129Dex1WholebodyEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self):
         """Post initialization."""
         # general settings
-        self.decimation = 20
+        self.decimation = 10
         self.episode_length_s = 20.0
         # simulation settings
         self.sim.dt = 0.001

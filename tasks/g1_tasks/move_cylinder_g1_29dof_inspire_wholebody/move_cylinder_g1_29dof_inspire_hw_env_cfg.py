@@ -20,11 +20,12 @@ from isaaclab.sensors import ContactSensorCfg
 from . import mdp
 # use Isaac Lab native event system
 
-from tasks.common_config import  G1RobotPresets, CameraPresets  # isort: skip
+from tasks.common_config import G1RobotPresets, CameraPresets  # isort: skip
 from tasks.common_event.event_manager import SimpleEvent, SimpleEventManager
 
 # import public scene configuration
 from tasks.common_scene.base_scene_pickplace_cylindercfg_wholebody import TableCylinderSceneCfgWH
+
 
 ##
 # Scene definition
@@ -36,18 +37,21 @@ class ObjectTableSceneCfg(TableCylinderSceneCfgWH):
     inherits from G1SingleObjectSceneCfg, gets the complete G1 robot scene configuration
     can add task-specific scene elements or override default configurations here
     """
-    
-    # Humanoid robot w/ arms higher
-    # 5. humanoid robot configuration 
-    robot: ArticulationCfg = G1RobotPresets.g1_29dof_inspire_wholebody(init_pos=(-3.9, -2.81811, 0.8),
-        init_rot=(1, 0, 0, 0))
 
-    contact_forces = ContactSensorCfg(prim_path="/World/envs/env_.*/Robot/.*", history_length=10, track_air_time=True, debug_vis=False)
-    # 6. add camera configuration 
+    # Humanoid robot w/ arms higher
+    # 5. humanoid robot configuration
+    robot: ArticulationCfg = G1RobotPresets.g1_29dof_inspire_wholebody(init_pos=(-3.9, -2.81811, 0.8),
+                                                                       init_rot=(1, 0, 0, 0))
+
+    contact_forces = ContactSensorCfg(prim_path="/World/envs/env_.*/Robot/.*", history_length=10, track_air_time=True,
+                                      debug_vis=False)
+    # 6. add camera configuration
     front_camera = CameraPresets.g1_front_camera()
+    world_camera = CameraPresets.g1_world_camera()  # Third-person view camera
     left_wrist_camera = CameraPresets.left_inspire_wrist_camera()
     right_wrist_camera = CameraPresets.right_inspire_wrist_camera()
-    robot_camera = CameraPresets.g1_world_camera()
+
+
 ##
 # MDP settings
 ##
@@ -58,17 +62,17 @@ class ActionsCfg:
     joint_pos = mdp.JointPositionActionCfg(asset_name="robot", joint_names=[".*"], scale=1.0, use_default_offset=True)
 
 
-
 @configclass
 class ObservationsCfg:
     """
     defines all available observation information
     """
+
     @configclass
     class PolicyCfg(ObsGroup):
         """policy group observation configuration class
         defines all state observation values for policy decision
-        inherit from ObsGroup base class 
+        inherit from ObsGroup base class
         """
 
         robot_joint_state = ObsTerm(func=mdp.get_robot_boy_joint_states)
@@ -93,9 +97,11 @@ class TerminationsCfg:
     # check if the object is out of the working range
     # success = DoneTerm(func=mdp.reset_object_estimate)# use task completion check function
 
+
 @configclass
 class RewardsCfg:
-    reward = RewTerm(func=mdp.compute_reward,weight=1.0)
+    reward = RewTerm(func=mdp.compute_reward, weight=1.0)
+
 
 @configclass
 class EventCfg:
@@ -124,27 +130,28 @@ class MoveCylinderG129InspireWholebodyEnvCfg(ManagerBasedRLEnvCfg):
     """
 
     # 1. scene settings
-    scene: ObjectTableSceneCfg = ObjectTableSceneCfg(num_envs=1, # environment number: 1
-                                                     env_spacing=2.5, # environment spacing: 2.5 meter
-                                                     replicate_physics=True # enable physics replication
+    scene: ObjectTableSceneCfg = ObjectTableSceneCfg(num_envs=1,  # environment number: 1
+                                                     env_spacing=2.5,  # environment spacing: 2.5 meter
+                                                     replicate_physics=True  # enable physics replication
                                                      )
     # basic settings
-    observations: ObservationsCfg = ObservationsCfg()   # observation configuration
-    actions: ActionsCfg = ActionsCfg()                  # action configuration
+    observations: ObservationsCfg = ObservationsCfg()  # observation configuration
+    actions: ActionsCfg = ActionsCfg()  # action configuration
     # MDP settings
-        
-    terminations: TerminationsCfg = TerminationsCfg()    # termination configuration
-    events = EventCfg()                                  # event configuration
-    commands = None # command manager
+
+    terminations: TerminationsCfg = TerminationsCfg()  # termination configuration
+    events = EventCfg()  # event configuration
+    commands = None  # command manager
     rewards: RewardsCfg = RewardsCfg()  # reward manager
-    curriculum = None # curriculum manager
+    curriculum = None  # curriculum manager
+
     def __post_init__(self):
         """Post initialization."""
         # general settings
-        self.decimation = 4
+        self.decimation = 10  # Changed from 4 to 10 to match MuJoCo (policy_hz = 100Hz)
         self.episode_length_s = 20.0
         # simulation settings
-        self.sim.dt = 0.005
+        self.sim.dt = 0.001  # Changed from 0.005 to 0.001 to match MuJoCo (1ms timestep)
         self.scene.contact_forces.update_period = self.sim.dt
         self.sim.render_interval = self.decimation
         self.sim.physx.bounce_threshold_velocity = 0.01
@@ -152,7 +159,7 @@ class MoveCylinderG129InspireWholebodyEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physx.gpu_total_aggregate_pairs_capacity = 16 * 1024
         self.sim.physx.friction_correlation_distance = 0.00625
 
-                # 物理材料属性设置 / Physics material properties
+        # 物理材料属性设置 / Physics material properties
         self.sim.physics_material.static_friction = 1.0  # 静摩擦系数 / Static friction
         self.sim.physics_material.dynamic_friction = 1.0  # 动摩擦系数 / Dynamic friction
         self.sim.physics_material.friction_combine_mode = "max"  # 摩擦力合并模式 / Friction combine mode
@@ -170,7 +177,7 @@ class MoveCylinderG129InspireWholebodyEnvCfg(ManagerBasedRLEnvCfg):
                 asset_cfg=SceneEntityCfg("object"),
             )
         ))
-        
+
         self.event_manager.register("reset_all_self", SimpleEvent(
             func=lambda env: base_mdp.reset_scene_to_default(
                 env,

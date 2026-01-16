@@ -1,8 +1,8 @@
 # Copyright (c) 2025, Unitree Robotics Co., Ltd. All Rights Reserved.
-# License: Apache License, Version 2.0  
+# License: Apache License, Version 2.0
 """
 camera state
-"""     
+"""
 
 from __future__ import annotations
 
@@ -11,70 +11,194 @@ from typing import TYPE_CHECKING
 import numpy as np
 import sys
 import os
+import atexit
 
 # add the project root directory to the path, so that the shared memory tool can be imported
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from image_server.shared_memory_utils import MultiImageWriter
+from tasks.common_observations.joint_projection import get_joint_keypoints_2d
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 # create the global multi-image shared memory writer
-multi_image_writer = MultiImageWriter()
+print("=" * 80)
+print("[CAMERA_STATE DIAGNOSTIC] Module is being imported!")
+print("[CAMERA_STATE DIAGNOSTIC] About to create MultiImageWriter...")
+print("=" * 80)
+
+try:
+    multi_image_writer = MultiImageWriter()
+    print("=" * 80)
+    print("[CAMERA_STATE DIAGNOSTIC] ✅ MultiImageWriter created successfully!")
+    print("=" * 80)
+except Exception as e:
+    print("=" * 80)
+    print(f"[CAMERA_STATE DIAGNOSTIC] ❌ Failed to create MultiImageWriter: {e}")
+    print("=" * 80)
+    import traceback
+    traceback.print_exc()
+    raise
+
+# Register cleanup function to ensure shared memory is properly released on exit
+def _cleanup_shared_memory():
+    """Cleanup function to properly release shared memory resources"""
+    try:
+        print("[camera_state] Cleaning up global multi_image_writer...")
+        multi_image_writer.cleanup()
+    except Exception as e:
+        print(f"[camera_state] Error during shared memory cleanup: {e}")
+
+atexit.register(_cleanup_shared_memory)
 
 def get_camera_image(
     env: ManagerBasedRLEnv,
 ) -> dict:
     # pass
-    """get multiple camera images and write them to shared memory
-    
+    """get multiple camera images and depth maps, write them to shared memory
+
     Args:
         env: ManagerBasedRLEnv - reinforcement learning environment instance
-    
+
     Returns:
         dict: dictionary containing multiple camera images
     """
-    # get the camera images
+    # get the camera images and depth maps
     images = {}
+    depths = {}
     # env.sim.render()
-    
+
     # Head camera (front camera)
     if "front_camera" in env.scene.keys():
         head_image = env.scene["front_camera"].data.output["rgb"][0]  # [batch, height, width, 3]
         images["head"] = head_image.cpu().numpy()
-    
+        print(f"[CAMERA_STATE] ✅ Got head camera image: {images['head'].shape}")
+
+        # Debug: Print available output types
+        available_outputs = list(env.scene["front_camera"].data.output.keys())
+        print(f"[CAMERA_STATE DEBUG] Front camera available outputs: {available_outputs}")
+
+        # Get depth data if available
+        if "distance_to_image_plane" in env.scene["front_camera"].data.output:
+            head_depth = env.scene["front_camera"].data.output["distance_to_image_plane"][0]
+            depths["head"] = head_depth.cpu().numpy()
+            print(f"[CAMERA_STATE] ✅ Got head camera depth: {depths['head'].shape}, min={depths['head'].min():.3f}, max={depths['head'].max():.3f}")
+        else:
+            print(f"[CAMERA_STATE] ⚠️ WARNING: 'distance_to_image_plane' NOT found in front camera output!")
+
+    # World camera (third-person view camera)
+    if "world_camera" in env.scene.keys():
+        world_image = env.scene["world_camera"].data.output["rgb"][0]
+        images["world"] = world_image.cpu().numpy()
+        img_height, img_width = images["world"].shape[:2]
+        print(f"[CAMERA_STATE] ✅ Got world camera image: {images['world'].shape} (H={img_height}, W={img_width})")
+
+        # Debug: Print available output types
+        available_outputs = list(env.scene["world_camera"].data.output.keys())
+        print(f"[CAMERA_STATE DEBUG] World camera available outputs: {available_outputs}")
+
+        # Get depth data if available
+        if "distance_to_image_plane" in env.scene["world_camera"].data.output:
+            world_depth = env.scene["world_camera"].data.output["distance_to_image_plane"][0]
+            depths["world"] = world_depth.cpu().numpy()
+            print(f"[CAMERA_STATE] ✅ Got world camera depth: {depths['world'].shape}, min={depths['world'].min():.3f}, max={depths['world'].max():.3f}")
+        else:
+            print(f"[CAMERA_STATE] ⚠️ WARNING: 'distance_to_image_plane' NOT found in world camera output!")
+
+        # Compute joint keypoints for world camera
+        try:
+            joint_data = get_joint_keypoints_2d(
+                env,
+                camera_name="world_camera",
+                img_width=img_width,
+                img_height=img_height,
+                debug=True  # Set to True to enable debug output
+            )
+            if joint_data is not None:
+                # IMPORTANT: The recording script resizes images to 360x640
+                # We need to scale the keypoint coordinates accordingly
+                target_width = 640
+                target_height = 360
+                scale_x = target_width / img_width
+                scale_y = target_height / img_height
+
+                print(f"[CAMERA_STATE] 📐 Scaling keypoints: scale_x={scale_x:.3f}, scale_y={scale_y:.3f}")
+
+                # Scale the keypoint coordinates
+                scaled_keypoints = []
+                for kp in joint_data["keypoints_2d_list"]:
+                    if kp is not None:
+                        scaled_u = kp[0] * scale_x
+                        scaled_v = kp[1] * scale_y
+                        scaled_keypoints.append([scaled_u, scaled_v])
+                    else:
+                        scaled_keypoints.append(None)
+
+                # Store scaled keypoints in Redis for recording script to access
+                import redis
+                import json
+                try:
+                    redis_client = redis.Redis(host="localhost", port=6379, db=0, socket_timeout=0.1)
+                    redis_client.set(
+                        "world_camera_joint_keypoints",
+                        json.dumps(scaled_keypoints)
+                    )
+                except Exception as e:
+                    print(f"[CAMERA_STATE] Warning: Failed to save keypoints to Redis: {e}")
+        except Exception as e:
+            print(f"[CAMERA_STATE] Warning: Failed to compute joint keypoints: {e}")
+
     # Left camera (left wrist camera)
     if "left_wrist_camera" in env.scene.keys():
         left_image = env.scene["left_wrist_camera"].data.output["rgb"][0]
         images["left"] = left_image.cpu().numpy()
-    
-    # Right camera (right wrist camera)  
+
+        # Get depth data if available
+        if "distance_to_image_plane" in env.scene["left_wrist_camera"].data.output:
+            left_depth = env.scene["left_wrist_camera"].data.output["distance_to_image_plane"][0]
+            depths["left"] = left_depth.cpu().numpy()
+
+    # Right camera (right wrist camera)
     if "right_wrist_camera" in env.scene.keys():
         right_image = env.scene["right_wrist_camera"].data.output["rgb"][0]
         images["right"] = right_image.cpu().numpy()
-    
+
+        # Get depth data if available
+        if "distance_to_image_plane" in env.scene["right_wrist_camera"].data.output:
+            right_depth = env.scene["right_wrist_camera"].data.output["distance_to_image_plane"][0]
+            depths["right"] = right_depth.cpu().numpy()
+
     # if no camera with the specified name is found, try other common camera names
     if not images:
         # try to find other possible camera names
         available_cameras = [name for name in env.scene.keys() if "camera" in name.lower()]
         print(f"[camera_state] No standard cameras found. Available cameras: {available_cameras}")
-        
-        # if there are available cameras, use the first three as head, left, right
-        for i, camera_name in enumerate(available_cameras[:3]):
+
+        # if there are available cameras, use the first four as head, world, left, right
+        for i, camera_name in enumerate(available_cameras[:4]):
             camera_image = env.scene[camera_name].data.output["rgb"][0]
-            
+
             if i == 0:
                 images["head"] = camera_image.cpu().numpy()
             elif i == 1:
-                images["left"] = camera_image.cpu().numpy()
+                images["world"] = camera_image.cpu().numpy()
             elif i == 2:
+                images["left"] = camera_image.cpu().numpy()
+            elif i == 3:
                 images["right"] = camera_image.cpu().numpy()
-    
-    # write the multi-image data to shared memory
+
+    # write the multi-image data (RGB + depth) to shared memory
     if images:
-        success = multi_image_writer.write_images(images)
+        print(f"[CAMERA_STATE] Writing {len(images)} images to shared memory: {list(images.keys())}")
+        if depths:
+            print(f"[CAMERA_STATE] Writing {len(depths)} depth maps to shared memory: {list(depths.keys())}")
+        success = multi_image_writer.write_images(images, depths if depths else None)
+        if success:
+            print(f"[CAMERA_STATE] ✅ Successfully wrote images and depth maps to shared memory!")
+        else:
+            print(f"[CAMERA_STATE] ❌ Failed to write images to shared memory!")
     else:
         print("[camera_state] No camera images found in the environment")
-    
+
     return torch.zeros((1, 480, 640, 3))
 
