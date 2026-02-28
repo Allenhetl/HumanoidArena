@@ -33,10 +33,10 @@
 
 运行前请先完成以下两个组件的安装：
 
-| 组件      | 安装文档                                |
-| --------- | --------------------------------------- |
-| IsaacLab  | [README.md](../README.md)               |
-| TWIST2    | [TWIST2/README.md](../TWIST2/README.md) |
+| 组件      | 安装文档                                         |
+| --------- |----------------------------------------------|
+| IsaacLab  | [README.md](../isaaclab_twist2_g1/README.md) |
+| TWIST2    | [TWIST2/README.md](../TWIST2/README.md)      |
 
 ---
 
