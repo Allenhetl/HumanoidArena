@@ -1,6 +1,7 @@
 #!/bin/bash
 # Copyright (c) 2025, HumanoidArena Project
-# Run all terrain and visual zone tests
+# Run all terrain, visual zone, and football environment tests
+# Uses conda environment: HumanoidArena-xzk
 
 set -e
 
@@ -9,19 +10,30 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 cd "$PROJECT_ROOT"
 
+# Activate conda environment HumanoidArena-xzk
+if [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
+    source "$HOME/miniconda3/etc/profile.d/conda.sh"
+elif [ -f "$HOME/anaconda3/etc/profile.d/conda.sh" ]; then
+    source "$HOME/anaconda3/etc/profile.d/conda.sh"
+fi
+if command -v conda &>/dev/null; then
+    conda activate HumanoidArena-xzk
+    echo "Using conda env: $CONDA_DEFAULT_ENV"
+fi
+
 echo "============================================================"
-echo "HumanoidArena Terrain & Visual Zones Test Suite"
+echo "HumanoidArena Test Suite"
 echo "============================================================"
 
 # Test 1: Terrain generation (no IsaacLab required)
 echo ""
-echo "[Test 1/3] Testing terrain generation functions..."
+echo "[Test 1/4] Testing terrain generation functions..."
 echo "------------------------------------------------------------"
 python scripts/test_terrain_generation.py
 
 # Test 2: Terrain environments (requires IsaacLab)
 echo ""
-echo "[Test 2/3] Testing terrain environments..."
+echo "[Test 2/4] Testing terrain environments..."
 echo "------------------------------------------------------------"
 
 TERRAIN_TYPES=("flat" "slope" "stairs" "wave")
@@ -38,9 +50,18 @@ done
 
 # Test 3: Visual zones environment
 echo ""
-echo "[Test 3/3] Testing visual zones environment..."
+echo "[Test 3/4] Testing visual zones environment..."
 echo "------------------------------------------------------------"
 python scripts/test_visual_zones_env.py \
+    --headless \
+    --device cuda \
+    --num_steps 50
+
+# Test 4: Football environment (G1 29DOF Dex3 + football)
+echo ""
+echo "[Test 4/4] Testing football environment..."
+echo "------------------------------------------------------------"
+python scripts/test_football_env.py \
     --headless \
     --device cuda \
     --num_steps 50

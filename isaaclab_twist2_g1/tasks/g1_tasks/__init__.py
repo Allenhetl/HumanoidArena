@@ -22,6 +22,7 @@ from . import move_cylinder_g1_29dof_dex1_wholebody
 from . import move_cylinder_g1_29dof_dex3_wholebody
 from . import move_cylinder_g1_29dof_inspire_wholebody
 from . import visual_zone_g1_29dof_dex3_wholebody
+from . import move_football_g1_29dof_dex3_wholebody
 
 # export all modules
 __all__ = [
@@ -36,4 +37,5 @@ __all__ = [
         "move_cylinder_g1_29dof_dex3_wholebody",
         "move_cylinder_g1_29dof_inspire_wholebody",
         "visual_zone_g1_29dof_dex3_wholebody",
+        "move_football_g1_29dof_dex3_wholebody",
 ]
