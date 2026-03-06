@@ -26,6 +26,7 @@ from .utils import import_packages
 
 # The blacklist is used to prevent importing configs from sub-packages
 # TODO(@ashwinvk): Remove pick_place from the blacklist once pinocchio from Isaac Sim is compatibility
-_BLACKLIST_PKGS = ["utils", ".mdp", "pick_place"]
+# g1_tasks: skipped by default to allow visual-zones-only scripts to run without pinocchio; use "from tasks.g1_tasks import ..." when needed
+_BLACKLIST_PKGS = ["utils", ".mdp", "pick_place", "g1_tasks"]
 # Import all configs in this package
 import_packages(__name__, _BLACKLIST_PKGS)

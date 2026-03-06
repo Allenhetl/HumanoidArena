@@ -8,9 +8,15 @@ Tests that the visual zone scene can be created and run in headless mode.
 Usage:
     cd isaaclab_twist2_g1
     python scripts/test_visual_zones_env.py --headless --device cuda
-    
+
     # With rendering (requires display)
     python scripts/test_visual_zones_env.py --device cuda
+
+    # Custom step count (e.g. 500 steps)
+    python scripts/test_visual_zones_env.py --device cuda --num_steps 500
+
+    # Run until you press Ctrl+C (no step limit)
+    python scripts/test_visual_zones_env.py --device cuda --no_limit
 """
 
 import argparse
@@ -25,7 +31,8 @@ os.environ["PROJECT_ROOT"] = project_root
 
 # Parse arguments
 parser = argparse.ArgumentParser(description="Test visual zones environment")
-parser.add_argument("--num_steps", type=int, default=100, help="Number of simulation steps")
+parser.add_argument("--num_steps", type=int, default=100, help="Number of simulation steps (ignored if --no_limit)")
+parser.add_argument("--no_limit", action="store_true", help="Run until Ctrl+C, no step limit")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments")
 
 # Add IsaacLab launcher args (includes --device, --headless, etc.)
@@ -189,15 +196,30 @@ def main():
     try:
         env.reset()
         print(f"   ✓ Environment reset")
-        
-        for step in range(args.num_steps):
-            # Step simulation (no actions)
-            env.sim.step(render=True)
-            
-            if step % 20 == 0:
-                print(f"   Step {step:4d}: Visual zones simulation running...")
-        
-        print(f"   ✓ Completed {args.num_steps} simulation steps")
+        if args.no_limit:
+            print("   Running until Ctrl+C (no step limit)...")
+        step = 0
+        try:
+            while True:
+                env.sim.step(render=True)
+                if args.no_limit:
+                    if step % 100 == 0:
+                        print(f"   Step {step}: running... (Ctrl+C to exit)")
+                elif step % 20 == 0:
+                    print(f"   Step {step:4d}: Visual zones simulation running...")
+                step += 1
+                if not args.no_limit and step >= args.num_steps:
+                    break
+        except KeyboardInterrupt:
+            if args.no_limit:
+                print("\n   Stopped by user (Ctrl+C).")
+            else:
+                raise
+        if not args.no_limit:
+            print(f"   ✓ Completed {args.num_steps} simulation steps")
+    except KeyboardInterrupt:
+        print("\n   Stopped by user (Ctrl+C).")
+        return 0
     except Exception as e:
         print(f"   ✗ Simulation failed: {e}")
         import traceback

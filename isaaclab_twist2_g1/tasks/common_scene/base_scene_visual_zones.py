@@ -34,9 +34,7 @@ class VisualZonesSceneCfg(InteractiveSceneCfg):
     - Lighting
     """
     
-    # Room/warehouse environment
-    # Note: Uses local warehouse USD for consistency with other scenes
-    # Change to ISAAC_NUCLEUS_DIR version if local file not available
+    # Room/warehouse environment (Isaac Nucleus - no local assets required)
     room_walls = AssetBaseCfg(
         prim_path="/World/envs/env_.*/Room",
         init_state=AssetBaseCfg.InitialStateCfg(
@@ -44,7 +42,7 @@ class VisualZonesSceneCfg(InteractiveSceneCfg):
             rot=[1.0, 0.0, 0.0, 0.0]
         ),
         spawn=UsdFileCfg(
-            usd_path=f"{project_root}/assets/objects/small_warehouse/small_warehouse_digital_twin.usd",
+            usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/warehouse.usd",
         ),
     )
     
