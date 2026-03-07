@@ -83,6 +83,8 @@ def main():
             obj = env.unwrapped.scene["object"]
             pos = obj.data.root_pos_w[0].cpu().numpy()
             print(f"\n   Football (object) initial position: [{pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}]")
+        if "goal_net" in scene_keys:
+            print(f"   Goal net (goal_net) loaded")
         if "robot" in scene_keys:
             robot = env.unwrapped.scene["robot"]
             pos = robot.data.root_pos_w[0].cpu().numpy()
@@ -105,12 +107,15 @@ def main():
         else:
             print(f"   Observation type: {type(obs).__name__}")
 
-        action_dim = env.unwrapped.action_space.shape[0]
+        action_space = env.unwrapped.action_space
+        action_dim = action_space.shape[-1]  # last dim for batched (num_envs, dim)
+        num_envs = env.unwrapped.num_envs
         device = env.unwrapped.device
 
         for step in range(args.num_steps):
             # Sample random action (small gaussian for stability)
-            action = torch.randn(action_dim, device=device) * 0.01
+            # action must be (num_envs, action_dim) for ManagerBasedRLEnv
+            action = torch.randn(num_envs, action_dim, device=device) * 0.01
             obs, reward, terminated, truncated, info = env.step(action)
 
             r = reward.item() if hasattr(reward, "item") else float(reward)

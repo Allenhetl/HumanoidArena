@@ -5,24 +5,33 @@
 contains various task implementations for the G1 robot, such as pick and place, motion control, etc.
 """
 
-# use relative import
-from . import pick_place_cylinder_g1_29dof_dex3
-from . import pick_place_cylinder_g1_29dof_dex1
-from . import pick_place_cylinder_g1_29dof_inspire
+def _safe_import(name):
+    """Import module, skip on ImportError (e.g. pinocchio/Assimp symbol conflict in GUI mode)."""
+    try:
+        __import__(name, fromlist=[""])
+    except ImportError as e:
+        import warnings
+        warnings.warn(f"Skipping {name}: {e}", ImportWarning)
 
-from . import pick_place_redblock_g1_29dof_dex1
-from . import pick_place_redblock_g1_29dof_dex3
-from . import stack_rgyblock_g1_29dof_dex1
-from . import stack_rgyblock_g1_29dof_dex3
-from . import stack_rgyblock_g1_29dof_inspire
-from . import pick_redblock_into_drawer_g1_29dof_dex1
-from . import pick_redblock_into_drawer_g1_29dof_dex3
-from . import pick_place_redblock_g1_29dof_inspire
-from . import move_cylinder_g1_29dof_dex1_wholebody
-from . import move_cylinder_g1_29dof_dex3_wholebody
-from . import move_cylinder_g1_29dof_inspire_wholebody
-from . import visual_zone_g1_29dof_dex3_wholebody
+# Import move_football first (no pink dependency) so football test works when others fail
 from . import move_football_g1_29dof_dex3_wholebody
+
+# Other tasks may use pink/pinocchio - wrap in _safe_import to tolerate ImportError
+_safe_import("tasks.g1_tasks.pick_place_cylinder_g1_29dof_dex3")
+_safe_import("tasks.g1_tasks.pick_place_cylinder_g1_29dof_dex1")
+_safe_import("tasks.g1_tasks.pick_place_cylinder_g1_29dof_inspire")
+_safe_import("tasks.g1_tasks.pick_place_redblock_g1_29dof_dex1")
+_safe_import("tasks.g1_tasks.pick_place_redblock_g1_29dof_dex3")
+_safe_import("tasks.g1_tasks.stack_rgyblock_g1_29dof_dex1")
+_safe_import("tasks.g1_tasks.stack_rgyblock_g1_29dof_dex3")
+_safe_import("tasks.g1_tasks.stack_rgyblock_g1_29dof_inspire")
+_safe_import("tasks.g1_tasks.pick_redblock_into_drawer_g1_29dof_dex1")
+_safe_import("tasks.g1_tasks.pick_redblock_into_drawer_g1_29dof_dex3")
+_safe_import("tasks.g1_tasks.pick_place_redblock_g1_29dof_inspire")
+_safe_import("tasks.g1_tasks.move_cylinder_g1_29dof_dex1_wholebody")
+_safe_import("tasks.g1_tasks.move_cylinder_g1_29dof_dex3_wholebody")
+_safe_import("tasks.g1_tasks.move_cylinder_g1_29dof_inspire_wholebody")
+_safe_import("tasks.g1_tasks.visual_zone_g1_29dof_dex3_wholebody")
 
 # export all modules
 __all__ = [
