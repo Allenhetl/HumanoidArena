@@ -16,6 +16,7 @@ import time
 from typing import Dict, Optional
 
 import cv2
+import numpy as np
 from image_server.shared_memory_utils import MultiImageReader
 
 
@@ -132,6 +133,17 @@ class _XRobotImagePublisher(_ImagePublisher):
         self.connect_interval = 2.0
         self.current_size = None
 
+        # Performance monitoring
+        self.frame_count = 0
+        self.encode_times = []
+        self.last_perf_report = time.time()
+
+        # Network transmission monitoring
+        self.packets_sent = 0
+        self.bytes_sent = 0
+        self.send_errors = 0
+        self.last_network_report = time.time()
+
     def publish_frame(self, frame) -> None:
         if frame is None:
             return
@@ -139,9 +151,25 @@ class _XRobotImagePublisher(_ImagePublisher):
         height, width = frame.shape[:2]
         if not self._ensure_stream(width, height):
             return
+
+        encode_start = time.time()
         try:
             if self.proc and self.proc.stdin:
                 self.proc.stdin.write(frame.tobytes())
+                self.frame_count += 1
+
+                # Track encoding time
+                encode_time = (time.time() - encode_start) * 1000  # ms
+                self.encode_times.append(encode_time)
+                if len(self.encode_times) > 100:
+                    self.encode_times.pop(0)
+
+                # Report performance every 5 seconds
+                if time.time() - self.last_perf_report >= 5.0:
+                    avg_encode = sum(self.encode_times) / len(self.encode_times)
+                    max_encode = max(self.encode_times)
+                    print(f"[XRobot] 🎬 Encoding: avg={avg_encode:.2f}ms, max={max_encode:.2f}ms, frames={self.frame_count}")
+                    self.last_perf_report = time.time()
         except Exception as exc:
             print(f"[Image Server] XRobot ffmpeg write failed: {exc}")
             self._reset()
@@ -326,7 +354,23 @@ class _XRobotImagePublisher(_ImagePublisher):
         try:
             header = struct.pack(">I", len(payload))
             self.sock.sendall(header + payload)
+
+            # Track transmission
+            self.packets_sent += 1
+            self.bytes_sent += len(header) + len(payload)
+
+            # Report network stats every 3 seconds
+            if time.time() - self.last_network_report >= 3.0:
+                elapsed = time.time() - self.last_network_report
+                mbps = (self.bytes_sent * 8 / 1000000) / elapsed
+                avg_packet_size = self.bytes_sent / self.packets_sent if self.packets_sent > 0 else 0
+                print(f"[XRobot] 📡 Network: {mbps:.2f} Mbps, packets={self.packets_sent}, avg_size={avg_packet_size/1024:.1f}KB, errors={self.send_errors}")
+                self.last_network_report = time.time()
+                self.bytes_sent = 0
+                self.packets_sent = 0
+                self.send_errors = 0
         except Exception as exc:
+            self.send_errors += 1
             print(f"[Image Server] XRobot send failed: {exc}")
             self._reset()
 
@@ -512,6 +556,17 @@ class ImageServer:
 
         camera_key = camera_key_map.get(self.camera_name, "head")
         print(f"[Image Server] Using camera key: {camera_key}")
+        print(f"[Image Server] ⚙️  FPS Configuration: target={self.fps} fps, transport={self.transport}")
+
+        # FPS monitoring variables
+        fps_start_time = time.time()
+        fps_frame_count = 0
+        fps_report_interval = 2.0  # Report FPS every 2 seconds (changed from 5.0 for faster feedback)
+
+        # Frame change detection
+        last_frame_hash = None
+        duplicate_count = 0
+        unique_count = 0
 
         try:
             if not self.running:
@@ -532,6 +587,15 @@ class ImageServer:
                     continue
 
                 camera_image = images[camera_key]
+
+                # Detect frame changes using hash
+                import hashlib
+                frame_hash = hashlib.md5(camera_image.tobytes()).hexdigest()
+                if frame_hash == last_frame_hash:
+                    duplicate_count += 1
+                else:
+                    unique_count += 1
+                    last_frame_hash = frame_hash
 
                 # Extract depth data if available
                 depth_key = f"{camera_key}_depth"
@@ -585,6 +649,26 @@ class ImageServer:
                     }
                     self.publisher.publish(message, meta)
                 self.frame_count += 1
+                fps_frame_count += 1
+
+                # Print progress every 50 frames
+                if self.frame_count % 50 == 0:
+                    print(f"[Image Server] 📊 Sent {self.frame_count} frames total")
+
+                # Report FPS periodically
+                current_time = time.time()
+                elapsed = current_time - fps_start_time
+                if elapsed >= fps_report_interval:
+                    actual_fps = fps_frame_count / elapsed
+                    unique_fps = unique_count / elapsed
+                    duplicate_ratio = duplicate_count / (duplicate_count + unique_count) * 100 if (duplicate_count + unique_count) > 0 else 0
+                    print(f"[Image Server] 🎯 Actual FPS: {actual_fps:.2f} (target: {self.fps}, frames sent: {fps_frame_count})")
+                    print(f"[Image Server] 🔄 Frame changes: unique={unique_count} ({unique_fps:.2f} FPS), duplicates={duplicate_count} ({duplicate_ratio:.1f}%)")
+                    fps_start_time = current_time
+                    fps_frame_count = 0
+                    duplicate_count = 0
+                    unique_count = 0
+
                 if self.fps and self.fps > 0:
                     time.sleep(1.0 / self.fps)
 
@@ -605,9 +689,10 @@ class ImageServer:
 
     def stop_publishing(self):
         """Stop the publishing thread"""
-        if self.running:
+        if hasattr(self, 'running') and self.running:
             self.running = False
-            if self.publish_thread:
+            # Only join if we're not in the publish thread itself
+            if self.publish_thread and self.publish_thread is not threading.current_thread():
                 self.publish_thread.join(timeout=1.0)
             print("[Image Server] Publishing thread stopped")
 

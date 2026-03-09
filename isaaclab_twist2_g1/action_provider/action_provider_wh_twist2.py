@@ -345,6 +345,21 @@ class DDSRLActionProvider(ActionProvider):
             }
         self.all_joint_names = self.env.scene["robot"].data.joint_names
         self.joint_to_index = {name: i for i, name in enumerate(self.all_joint_names)}
+
+        # Debug: Print joint order and PD gains
+        # print("\n" + "="*80)
+        # print("🔍 JOINT ORDER AND PD GAINS DEBUG")
+        # print("="*80)
+        # print(f"Total joints: {len(self.all_joint_names)}")
+        # print("\nJoint order:")
+        # for i, name in enumerate(self.all_joint_names):
+        #     print(f"  [{i:2d}] {name}")
+        # print("\nStiffness (Kp):")
+        # print(f"  {self.env.scene['robot'].data.default_joint_stiffness}")
+        # print("\nDamping (Kd):")
+        # print(f"  {self.env.scene['robot'].data.default_joint_damping}")
+        # print("="*80 + "\n")
+
         # Precompute Isaac indices for TWIST2 29-dof order
         if hasattr(self, "twist2_action_joint_names"):
             missing = [n for n in self.twist2_action_joint_names if n not in self.joint_to_index]
@@ -408,6 +423,28 @@ class DDSRLActionProvider(ActionProvider):
         self.sim_step_counter = 0
         cfg = getattr(self.env, "cfg", None)
         self._twist2_decimation = int(getattr(cfg, "decimation", 4))
+        # self._twist2_decimation = 1
+
+        # Render control: only render when camera needs update
+        self._render_counter = 0
+        self._render_interval = 3  # Render every 3 control steps (30Hz camera for 100Hz control)
+
+        # Observation update control: reduce observation computation frequency
+        self._obs_counter = 0
+        self._obs_interval = 3  # Update observations every 3 steps (30Hz camera updates)
+
+        # Performance profiling
+        self._perf_stats = {
+            'policy_inference': [],
+            'action_preparation': [],
+            'physics_step': [],
+            'scene_update': [],
+            'observation_compute': [],
+            'total_get_action': [],
+            'redis_fetch': [],
+            'render_time': []
+        }
+        self._perf_report_interval = 100  # Report every 100 steps
 
     def _resolve_policy_path(self, model_path: str) -> str:
         if os.path.isabs(model_path):
@@ -470,6 +507,7 @@ class DDSRLActionProvider(ActionProvider):
     def _twist2_fetch_actions(self) -> torch.Tensor:
         """Fetch TWIST2 actions (body + hand + neck) from Redis."""
         if self.redis_pipeline is None:
+            # print("[XY_DEBUG] ⚠️ Redis pipeline is None!")
             self._twist2_hand_valid = False
             self._twist2_smplx_valid = False
             # Return default 35D mimic_obs to maintain stable standing pose
@@ -486,6 +524,13 @@ class DDSRLActionProvider(ActionProvider):
                 self.redis_pipeline.get(key)
             res = self.redis_pipeline.execute()
             action_body_raw = res[0] if len(res) > 0 else None
+
+            # # 🔍 调试点1：检查Redis原始数据
+            # if action_body_raw is None:
+            #     print("[XY_DEBUG] ⚠️ action_body_raw is None - no data in Redis")
+            # else:
+            #     print(f"[XY_DEBUG] ✓ Redis data received: {len(action_body_raw)} bytes")
+
             action_left_raw = res[1] if len(res) > 1 else None
             action_right_raw = res[2] if len(res) > 2 else None
             action_neck_raw = res[3] if len(res) > 3 else None
@@ -496,9 +541,45 @@ class DDSRLActionProvider(ActionProvider):
             action_right = self._twist2_parse_list(action_right_raw, self._twist2_hand_dim)
             action_neck = self._twist2_parse_list(action_neck_raw, self._twist2_neck_dim)
 
+
+            # action_body[0] = max(0, min(2, action_body[0]))
+            # action_body[1] = max(0, min(2, action_body[1]))
+            # action_body[5] = max(0, min(2, action_body[5]))
+
+            # 🔍 调试点2：检查解析后的数据
+            if len(action_body) >= 6:
+                xy_vel = action_body[0:2]
+                z_pos = action_body[2]
+                yaw_vel = action_body[5]
+
+                import math
+                xy_speed = math.sqrt(xy_vel[0]**2 + xy_vel[1]**2)
+
+                # print(f"[ISAAC_XY_DEBUG] Isaac Lab接收到的数据:")
+                # print(f"  XY vel: [{xy_vel[0]:.6f}, {xy_vel[1]:.6f}] m/s (speed: {xy_speed:.6f})")
+                # print(f"  Z pos: {z_pos:.4f} m, Yaw vel: {yaw_vel:.6f} rad/s")
+                # print(f"  完整action_body前6维: {action_body[0:6]}")
+
+                # 分析速度方向
+                # if xy_speed > 0.1:
+                #     angle_deg = math.degrees(math.atan2(xy_vel[1], xy_vel[0]))
+                #     print(f"  速度方向: {angle_deg:.2f}° (0°=+X前方, 90°=+Y左侧)")
+                #     if abs(xy_vel[0]) > abs(xy_vel[1]) * 2:
+                #         print(f"  ✓ 主要沿X方向（前方）")
+                #     elif abs(xy_vel[1]) > abs(xy_vel[0]) * 2:
+                #         print(f"  ⚠️ 主要沿Y方向（左侧）")
+                #     else:
+                #         print(f"  ⚠️ X和Y速度相近，可能有偏移")
+
             # Check if action_body is all zeros (no valid data from Redis)
             # This prevents robot from falling when Redis is empty
-            if action_body_raw is None or all(x == 0.0 for x in action_body):
+            # 🔍 调试点3：检查全0判断逻辑
+            will_reject = action_body_raw is None or all(x == 0.0 for x in action_body)
+            if will_reject:
+                # print("[XY_DEBUG] ⚠️ Data REJECTED by all-zero check! Returning default.")
+                # print(f"  - action_body_raw is None: {action_body_raw is None}")
+                # if action_body_raw is not None:
+                #     print(f"  - all zeros: {all(x == 0.0 for x in action_body)}")
                 # No valid teleop data, return default standing pose
                 return self._default_mimic_obs.clone()
 
@@ -510,7 +591,7 @@ class DDSRLActionProvider(ActionProvider):
                     self._twist2_smplx_data = json.loads(smplx_data_raw)
                     self._twist2_smplx_valid = True
                 except Exception as e:
-                    print(f"[{self.name}] Failed to parse SMPLX data: {e}")
+                    # print(f"[{self.name}] Failed to parse SMPLX data: {e}")
                     self._twist2_smplx_data = None
                     self._twist2_smplx_valid = False
             else:
@@ -525,9 +606,14 @@ class DDSRLActionProvider(ActionProvider):
             self._twist2_action_neck.copy_(
                 torch.tensor(action_neck, device=self.env.device, dtype=torch.float32).unsqueeze(0))
 
-            return torch.tensor(action_body, device=self.env.device, dtype=torch.float32).unsqueeze(0)
+            result = torch.tensor(action_body, device=self.env.device, dtype=torch.float32).unsqueeze(0)
+
+            # 🔍 调试点4：检查返回的tensor
+            # print(f"[XY_DEBUG] ✓ Returning tensor with xy_vel: {result[0, 0:2].cpu().numpy()}")
+
+            return result
         except Exception as e:
-            print(f"[{self.name}] Redis action fetch failed: {e}")
+            # print(f"[{self.name}] Redis action fetch failed: {e}")
             self._twist2_hand_valid = False
             self._twist2_smplx_valid = False
             # Return default 35D mimic_obs on error to maintain stable standing pose
@@ -564,13 +650,6 @@ class DDSRLActionProvider(ActionProvider):
         """
         return self._twist2_smplx_valid
 
-    def _twist2_roll_pitch_from_projected_gravity(self, g_b: torch.Tensor) -> torch.Tensor:
-        """Approximate (roll, pitch) from projected gravity in body frame. g_b: [N,3]."""
-        gx, gy, gz = g_b[:, 0], g_b[:, 1], g_b[:, 2]
-        roll = torch.atan2(gy, gz)
-        pitch = torch.atan2(-gx, torch.sqrt(gy * gy + gz * gz + 1e-8))
-        return torch.stack([roll, pitch], dim=-1)
-
     def _twist2_roll_pitch_from_quaternion(self, quat: torch.Tensor) -> torch.Tensor:
         """Compute (roll, pitch) from quaternion (w, x, y, z)."""
         w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
@@ -585,7 +664,8 @@ class DDSRLActionProvider(ActionProvider):
     def compute_current_observations(self):
         # Proprio from Isaac
         root_state = self.env.scene["robot"].data.root_state_w
-        self.ang_vel = root_state[:, 10:13]  # [1,3]
+        # 使用局部坐标系的角速度（与其他action provider一致）
+        self.ang_vel = self.env.scene["robot"].data.root_ang_vel_b  # [1,3] 局部坐标系
         quat = root_state[:, 3:7]
         self.joint_pos = self.env.scene["robot"].data.joint_pos
         self.joint_vel = self.env.scene["robot"].data.joint_vel
@@ -615,6 +695,16 @@ class DDSRLActionProvider(ActionProvider):
         # TWIST2 mimic from Redis (and hand actions)
         action_mimic = self._twist2_fetch_actions()  # [1,35]
 
+        # Amplify XY velocity to compensate for slower teleop movement
+        # Structure: [xy_vel(2), z_pos(1), roll_pitch(2), yaw_vel(1), joints(29)]
+        # Scale factor: 5.0x makes teleop movement more responsive
+        # Real robot gets ~0.5-0.6x operator speed, so 5x amplification gives ~2.5-3x final speed
+        velocity_amplification = 1.0
+        action_mimic[:, 0:2] = action_mimic[:, 0:2] * velocity_amplification  # Amplify XY velocity
+
+        # Also amplify yaw angular velocity for consistent turning
+        action_mimic[:, 5:6] = action_mimic[:, 5:6] * velocity_amplification  # Amplify yaw velocity
+
         # zero ankle velocities (TWIST2 convention)
         if len(self._twist2_ankle_idx) > 0:
             dof_vel = dof_vel.clone()
@@ -633,16 +723,26 @@ class DDSRLActionProvider(ActionProvider):
 
         obs_full = torch.cat([action_mimic, obs_proprio], dim=-1)  # [1,127]
 
-        # History: flatten previous frames (127*10)
+        # Debug: Print observation components every 30 steps
+        # if self.sim_step_counter % 30 == 0:
+        #     print(f"\n[OBS_DEBUG] Step {self.sim_step_counter}")
+        #     print(f"  action_mimic (XY vel): {action_mimic[0, :2].cpu().numpy()}")
+        #     print(f"  action_mimic (joints 6-11): {action_mimic[0, 6:12].cpu().numpy()}")
+        #     print(f"  ang_vel (local): {self.ang_vel[0].cpu().numpy()}")
+        #     print(f"  dof_pos_delta (legs 0-5): {dof_pos_delta[0, :6].cpu().numpy()}")
+
+        # Get history BEFORE updating (matches real robot server_low_level_g1_real.py line 256-257)
         obs_hist = self._twist2_history.reshape(1, -1)
+
+        # Update history immediately after getting it (matches real robot timing)
+        self._twist2_history = torch.roll(self._twist2_history, shifts=-1, dims=0)
+        self._twist2_history[-1].copy_(obs_full.squeeze(0))
 
         # Future: current mimic (35)
         future_obs = action_mimic
 
+        # Construct final observation buffer [obs_full(127) + obs_hist(1270) + future_obs(35)] = 1432
         obs_buf = torch.cat([obs_full, obs_hist, future_obs], dim=-1)  # [1,1402]
-        # Update history AFTER forming obs_buf (match server semantics)
-        self._twist2_history = torch.roll(self._twist2_history, shifts=-1, dims=0)
-        self._twist2_history[-1].copy_(obs_full.squeeze(0))
 
         return obs_buf
 
@@ -652,7 +752,15 @@ class DDSRLActionProvider(ActionProvider):
         return obs
 
     def run_policy(self):
+        import time
+        redis_start = time.perf_counter()
         obs = self.compute_observations()
+        redis_time = time.perf_counter() - redis_start
+
+        # Store Redis fetch time (included in observation computation)
+        if hasattr(self, '_perf_stats'):
+            self._perf_stats['redis_fetch'].append(redis_time * 1000)
+
         with torch.no_grad():
             action = self.policy(obs)
         # Ensure shape [1,29]
@@ -665,13 +773,31 @@ class DDSRLActionProvider(ActionProvider):
 
     def get_action(self, env) -> Optional[torch.Tensor]:
         """Get action from DDS"""
+        import time
+        total_start = time.perf_counter()
+
+        # Timing variables
+        policy_time = 0.0
+        action_prep_time = 0.0
+        physics_time = 0.0
+        scene_update_time = 0.0
+        obs_time = 0.0
+        render_time = 0.0
+
         try:
             full_action = self._full_action_buf
             full_action.zero_()
-            action_data = self.run_policy()
 
+            # 1. Policy inference
+            policy_start = time.perf_counter()
+            action_data = self.run_policy()
+            policy_time = time.perf_counter() - policy_start
+
+            # 2. Action preparation
+            action_prep_start = time.perf_counter()
             # --- TWIST2 full-body action (29-dof, MuJoCo actuator order) ---
             raw_action = torch.clip(action_data.to(self.env.device, dtype=torch.float32), -10.0, 10.0)
+
             # Server uses per-joint action_scale=0.5; keep it simple for quick dev
             target_29 = raw_action * 0.5 + self.twist2_default_pos  # [1,29]
 
@@ -741,21 +867,101 @@ class DDSRLActionProvider(ActionProvider):
                             special_vals = self._inspire_buf.index_select(0,
                                                                           self._inspire_special_source_idx_t) * self._inspire_special_scales_t
                             full_action.index_copy_(0, self._inspire_special_target_idx_t, special_vals)
+            action_prep_time = time.perf_counter() - action_prep_start
 
-            # 同步仿真多步
-            for _ in range(self._twist2_decimation):
+            # 3. Physics simulation loop
+            physics_total = 0.0
+            scene_update_total = 0.0
+            render_total = 0.0
+
+            for i in range(self._twist2_decimation):
+                # Set joint targets and write to sim
+                step_start = time.perf_counter()
                 self.env.scene["robot"].set_joint_position_target(full_action)
                 self.env.scene.write_data_to_sim()
-                self.env.sim.step(render=False)
-                self.env.scene.update(dt=self.env.physics_dt)
 
-            self.env.sim.render()
-            self.env.observation_manager.compute()
-            # print(f"gravity:{self.env.sim.get_gravity()}")
+                # Physics step with optional rendering
+                is_last_step = (i == self._twist2_decimation - 1)
+                should_render = is_last_step and (self._render_counter % self._render_interval == 0)
+
+                if should_render:
+                    render_start = time.perf_counter()
+                    self.env.sim.step(render=True)
+                    render_total += time.perf_counter() - render_start
+                else:
+                    self.env.sim.step(render=False)
+
+                physics_total += time.perf_counter() - step_start - (render_total if should_render else 0)
+
+                # Scene update
+                update_start = time.perf_counter()
+                self.env.scene.update(dt=self.env.physics_dt)
+                scene_update_total += time.perf_counter() - update_start
+
+            physics_time = physics_total
+            scene_update_time = scene_update_total
+            render_time = render_total
+            self._render_counter += 1
+
+            # 4. Observation computation
+            obs_start = time.perf_counter()
+            self._obs_counter += 1
+            if self._obs_counter % self._obs_interval == 0:
+                self.env.observation_manager.compute()
+                obs_time = time.perf_counter() - obs_start
+
+            # Record performance stats
+            total_time = time.perf_counter() - total_start
+            self._perf_stats['policy_inference'].append(policy_time * 1000)
+            self._perf_stats['action_preparation'].append(action_prep_time * 1000)
+            self._perf_stats['physics_step'].append(physics_time * 1000)
+            self._perf_stats['scene_update'].append(scene_update_time * 1000)
+            self._perf_stats['observation_compute'].append(obs_time * 1000)
+            self._perf_stats['render_time'].append(render_time * 1000)
+            self._perf_stats['total_get_action'].append(total_time * 1000)
+
+            # Report performance statistics
+            self.sim_step_counter += 1
+            if self.sim_step_counter % self._perf_report_interval == 0:
+                self._print_performance_report()
+
             return full_action
         except Exception as e:
             print(f"[{self.name}] Get DDS action failed: {e}")
             return None
+
+    def _print_performance_report(self):
+        """Print detailed performance statistics"""
+        print("\n" + "="*80)
+        print(f"🔍 PERFORMANCE ANALYSIS (last {self._perf_report_interval} steps)")
+        print("="*80)
+
+        for key, values in self._perf_stats.items():
+            if not values:
+                continue
+
+            avg = sum(values) / len(values)
+            min_val = min(values)
+            max_val = max(values)
+
+            # Calculate percentage of total time
+            if key != 'total_get_action':
+                total_avg = sum(self._perf_stats['total_get_action']) / len(self._perf_stats['total_get_action'])
+                percentage = (avg / total_avg * 100) if total_avg > 0 else 0
+                print(f"  {key:25s}: avg={avg:6.2f}ms  min={min_val:6.2f}ms  max={max_val:6.2f}ms  ({percentage:5.1f}%)")
+            else:
+                print(f"  {key:25s}: avg={avg:6.2f}ms  min={min_val:6.2f}ms  max={max_val:6.2f}ms")
+
+        # Calculate theoretical max frequency
+        total_avg = sum(self._perf_stats['total_get_action']) / len(self._perf_stats['total_get_action'])
+        max_freq = 1000.0 / total_avg if total_avg > 0 else 0
+        print(f"\n  Theoretical max frequency: {max_freq:.1f} Hz")
+        print(f"  Render interval: {self._render_interval}, Obs interval: {self._obs_interval}")
+        print("="*80 + "\n")
+
+        # Clear stats for next interval
+        for key in self._perf_stats:
+            self._perf_stats[key].clear()
 
     def _convert_to_joint_range(self, value):
         """Convert gripper control value to joint angle"""

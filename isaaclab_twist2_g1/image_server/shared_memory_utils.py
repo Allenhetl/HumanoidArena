@@ -60,6 +60,8 @@ class MultiImageWriter:
             # if not exist, create a new shared memory
             self.shm = shared_memory.SharedMemory(create=True, size=shm_size, name=shm_name)
             self._created = True
+            # Initialize with zeros to avoid reading garbage data
+            self.shm.buf[:] = bytes(shm_size)
 
         print(f"[MultiImageWriter] Shared memory initialized: {shm_name} (created={self._created})")
 
@@ -207,27 +209,33 @@ class MultiImageReader:
         """
         self.shm_name = shm_name
         self.last_timestamp = 0
-        self.buffer = {}
+        self.buffer = {}  # Always initialize as dict
 
         try:
             # open the shared memory
             self.shm = shared_memory.SharedMemory(name=shm_name)
             print(f"[MultiImageReader] Shared memory opened: {shm_name}")
         except FileNotFoundError:
-            print(f"[MultiImageReader] Shared memory {shm_name} not found")
+            print(f"[MultiImageReader] Shared memory {shm_name} not found, will retry when reading")
             self.shm = None
 
-    def read_images(self) -> Optional[Dict[str, np.ndarray]]:
+    def read_images(self) -> Dict[str, np.ndarray]:
         """Read multiple RGB images and depth maps from shared memory
 
         Returns:
             Dict[str, np.ndarray]: Dictionary containing RGB images and depth maps.
                                    RGB images: 'head', 'world', 'left', 'right'
                                    Depth maps: 'head_depth', 'world_depth', etc.
-                                   Returns None if reading fails.
+                                   Returns empty dict or cached buffer if reading fails.
         """
+        # Try to reconnect if shared memory is not available
         if self.shm is None:
-            return None
+            try:
+                self.shm = shared_memory.SharedMemory(name=self.shm_name)
+                print(f"[MultiImageReader] Reconnected to shared memory: {self.shm_name}")
+            except FileNotFoundError:
+                # Still not available, return empty buffer
+                return self.buffer if isinstance(self.buffer, dict) else {}
 
         try:
             # Read header
@@ -235,13 +243,29 @@ class MultiImageReader:
             header_data = bytes(self.shm.buf[:header_size])
             header = SimpleImageHeader.from_buffer_copy(header_data)
 
+            # Validate header data
+            if header.timestamp == 0 or header.width == 0 or header.height == 0:
+                # Shared memory not yet initialized by writer
+                return self.buffer
+
             # Check for new data
             if header.timestamp <= self.last_timestamp:
+                return self.buffer
+
+            # Validate image count
+            if header.image_count == 0 or header.image_count > 4:
+                print(f"[MultiImageReader] Invalid image count: {header.image_count}")
                 return self.buffer
 
             # Read RGB data
             rgb_offset = header_size
             rgb_end = rgb_offset + header.rgb_data_size
+
+            # Validate RGB data size
+            if header.rgb_data_size == 0 or rgb_end > len(self.shm.buf):
+                print(f"[MultiImageReader] Invalid RGB data size: {header.rgb_data_size}")
+                return self.buffer
+
             rgb_data = bytes(self.shm.buf[rgb_offset:rgb_end])
 
             concatenated_image = np.frombuffer(rgb_data, dtype=np.uint8)
@@ -249,14 +273,19 @@ class MultiImageReader:
 
             if concatenated_image.size != expected_size:
                 print(f"[MultiImageReader] RGB size mismatch: expected {expected_size}, got {concatenated_image.size}")
-                return None
+                return self.buffer
 
             concatenated_image = concatenated_image.reshape(header.height, header.width, header.channels)
 
             # Split RGB images
-            images = {}
+            images = {}  # Ensure images is always a dict
             image_names = ['head', 'world', 'left', 'right']
             single_width = header.single_width
+
+            # Validate single_width
+            if single_width == 0 or single_width * header.image_count != header.width:
+                print(f"[MultiImageReader] Invalid single_width: {single_width}, image_count: {header.image_count}, total width: {header.width}")
+                return self.buffer
 
             for i in range(header.image_count):
                 if i < len(image_names):
@@ -298,7 +327,7 @@ class MultiImageReader:
             print(f"[MultiImageReader] Error reading from shared memory: {e}")
             import traceback
             traceback.print_exc()
-            return None
+            return self.buffer  # Return cached buffer on error
 
     def read_concatenated_image(self, only_head: bool = False) -> Optional[np.ndarray]:
         """Read the concatenated image (without splitting)
@@ -324,7 +353,7 @@ class MultiImageReader:
 
             # read the concatenated image data
             start_offset = header_size
-            end_offset = start_offset + header.data_size
+            end_offset = start_offset + header.rgb_data_size
             image_data = bytes(self.shm.buf[start_offset:end_offset])
 
             # convert to numpy array

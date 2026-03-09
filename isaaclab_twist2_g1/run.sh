@@ -4,7 +4,8 @@ redis-cli DEL \
   action_hand_right_unitree_g1_with_hands \
   action_neck_unitree_g1_with_hands \
   controller_data \
-  t_action
+  t_action \
+  isaac_reset_trigger
 
 #  python sim_main.py \
 #    --device cuda \
@@ -34,7 +35,7 @@ redis-cli DEL \
     --image_xrobot_width 640 \
     --image_xrobot_height 480 \
     --image_xrobot_bitrate 4194304 \
-    --image_fps 30 \
-    --image_xrobot_ffmpeg /usr/bin/ffmpeg \
-    --enable_world_camera \
+    --image_fps 10 \
+    --image_xrobot_ffmpeg /usr/bin/ffmpeg
+#    --enable_world_camera \
 #    --image_xrobot_host 172.20.10.2 \

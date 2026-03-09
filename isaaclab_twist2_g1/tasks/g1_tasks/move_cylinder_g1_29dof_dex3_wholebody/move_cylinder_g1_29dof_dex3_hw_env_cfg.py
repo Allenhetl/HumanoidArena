@@ -21,7 +21,29 @@ from . import mdp
 # use Isaac Lab native event system
 
 from tasks.common_config import G1RobotPresets, CameraPresets  # isort: skip
-from tasks.common_event.event_manager import SimpleEvent, SimpleEventManager
+
+# Define event manager classes inline to avoid import issues
+class SimpleEvent:
+    def __init__(self, func, params=None):
+        self.func = func
+        self.params = params or {}
+
+    def trigger(self, env):
+        return self.func(env, **self.params)
+
+class SimpleEventManager:
+    def __init__(self):
+        self._events = {}
+
+    def register(self, name, event):
+        self._events[name] = event
+
+    def trigger(self, name, env):
+        event = self._events.get(name)
+        if event:
+            return event.trigger(env)
+        else:
+            print(f"Event {name} not registered")
 
 # import public scene configuration
 from tasks.common_scene.base_scene_pickplace_cylindercfg_wholebody import TableCylinderSceneCfgWH
@@ -47,7 +69,10 @@ class ObjectTableSceneCfg(TableCylinderSceneCfgWH):
                                       debug_vis=False)
     # 6. add camera configuration
     front_camera = CameraPresets.g1_front_camera()
-    world_camera = CameraPresets.g1_world_camera()  # Third-person view camera
+    # Match camera update rate with image transmission fps (10Hz)
+    front_camera.update_period = 0.02  # 50Hz camera capture for smooth video
+
+    # world_camera = CameraPresets.g1_world_camera()  # Disable world camera for now
     # left_wrist_camera = CameraPresets.left_dex3_wrist_camera()
     # right_wrist_camera = CameraPresets.right_dex3_wrist_camera()
 
@@ -148,12 +173,16 @@ class MoveCylinderG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self):
         """Post initialization."""
         # general settings
-        self.decimation = 10  # Changed from 4 to 10 to match MuJoCo (policy_hz = 100Hz)
-        self.episode_length_s = 20.0
+        self.decimation = 10  # Match TWIST2 MuJoCo training (4 physics steps per policy update)
+        self.episode_length_s = 3600.0  # 1 hour - effectively infinite for teleoperation
         # simulation settings
-        self.sim.dt = 0.001  # Changed from 0.005 to 0.001 to match MuJoCo (1ms timestep)
+        self.sim.dt = 0.002  # 2ms timestep for stability (500Hz physics, 50Hz policy)
         self.scene.contact_forces.update_period = self.sim.dt
-        self.sim.render_interval = self.decimation
+        # Render interval (policy runs at 50Hz):
+        # - render_interval=5 → 10fps (best performance, matches image transmission)
+        # - render_interval=2 → 25fps (balanced, smooth GUI)
+        # - render_interval=1 → 50fps (smoothest, higher GPU load)
+        self.sim.render_interval = 1  # 25fps rendering (balanced)
         self.sim.physx.bounce_threshold_velocity = 0.01
         self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 1024 * 1024 * 4
         self.sim.physx.gpu_total_aggregate_pairs_capacity = 16 * 1024

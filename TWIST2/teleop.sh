@@ -1,6 +1,6 @@
 # sudo ufw disable
 
-source ~/miniconda3/bin/activate gmr
+#source ~/miniconda3/bin/activate gmr
 
 cd deploy_real
 
@@ -10,7 +10,7 @@ cd deploy_real
 redis_ip="localhost"
 
 # the height (empirically) should be smaller than the actual human height, due to inaccuracy of the PICO estimation.
-actual_human_height=1.79
+actual_human_height=1.59
 python xrobot_teleop_to_robot_w_hand.py --robot unitree_g1 \
              --actual_human_height $actual_human_height \
              --redis_ip $redis_ip \

@@ -1,5 +1,5 @@
 # Copyright (c) 2025, Unitree Robotics Co., Ltd. All Rights Reserved.
-# License: Apache License, Version 2.0  
+# License: Apache License, Version 2.0
 """Configuration for Unitree robots."""
 
 import isaaclab.sim as sim_utils
@@ -101,8 +101,18 @@ G129_CFG_WITH_DEX3_BASE_FIX = ArticulationCfg(
             ],
             effort_limit=None,
             velocity_limit=None,
-            stiffness=None,
-            damping=None,
+            stiffness={
+                ".*_hip_yaw_joint": 100.0,    # Match real robot g1.yaml
+                ".*_hip_roll_joint": 100.0,   # Match real robot g1.yaml
+                ".*_hip_pitch_joint": 100.0,  # Match real robot g1.yaml
+                ".*_knee_joint": 150.0,       # Match real robot g1.yaml
+            },
+            damping={
+                ".*_hip_yaw_joint": 2.0,      # Match real robot g1.yaml
+                ".*_hip_roll_joint": 2.0,     # Match real robot g1.yaml
+                ".*_hip_pitch_joint": 2.0,    # Match real robot g1.yaml
+                ".*_knee_joint": 4.0,         # Match real robot g1.yaml
+            },
             armature=None,
         ),
         "waist": ImplicitActuatorCfg(
@@ -114,22 +124,28 @@ G129_CFG_WITH_DEX3_BASE_FIX = ArticulationCfg(
             effort_limit=1000.0,  # set a large torque limit
             velocity_limit=0.0,  # set the velocity limit to 0
             stiffness={
-                "waist_yaw_joint": 10000.0,
-                "waist_roll_joint": 10000.0,
-                "waist_pitch_joint": 10000.0
+                "waist_yaw_joint": 150.0,    # Match real robot g1.yaml (was 10000.0)
+                "waist_roll_joint": 150.0,   # Match real robot g1.yaml (was 10000.0)
+                "waist_pitch_joint": 150.0   # Match real robot g1.yaml (was 10000.0)
             },
             damping={
-                "waist_yaw_joint": 10000.0,
-                "waist_roll_joint": 10000.0,
-                "waist_pitch_joint": 10000.0
+                "waist_yaw_joint": 4.0,      # Match real robot g1.yaml (was 10000.0)
+                "waist_roll_joint": 4.0,     # Match real robot g1.yaml (was 10000.0)
+                "waist_pitch_joint": 4.0     # Match real robot g1.yaml (was 10000.0)
             },
             armature=None,
         ),
         "feet": ImplicitActuatorCfg(
             effort_limit=None,
             joint_names_expr=[".*_ankle_pitch_joint", ".*_ankle_roll_joint"],
-            stiffness=None,
-            damping=None,
+            stiffness={
+                ".*_ankle_pitch_joint": 40.0,  # Match real robot g1.yaml
+                ".*_ankle_roll_joint": 40.0,   # Match real robot g1.yaml
+            },
+            damping={
+                ".*_ankle_pitch_joint": 2.0,   # Match real robot g1.yaml
+                ".*_ankle_roll_joint": 2.0,    # Match real robot g1.yaml
+            },
             # armature=0.001,
         ),
         "arms": ImplicitActuatorCfg(
@@ -253,8 +269,18 @@ G129_CFG_WITH_DEX1_BASE_FIX = ArticulationCfg(
             ],
             effort_limit=None,
             velocity_limit=None,
-            stiffness=None,
-            damping=None,
+            stiffness={
+                ".*_hip_yaw_joint": 100.0,    # Match real robot g1.yaml
+                ".*_hip_roll_joint": 100.0,   # Match real robot g1.yaml
+                ".*_hip_pitch_joint": 100.0,  # Match real robot g1.yaml
+                ".*_knee_joint": 150.0,       # Match real robot g1.yaml
+            },
+            damping={
+                ".*_hip_yaw_joint": 2.0,      # Match real robot g1.yaml
+                ".*_hip_roll_joint": 2.0,     # Match real robot g1.yaml
+                ".*_hip_pitch_joint": 2.0,    # Match real robot g1.yaml
+                ".*_knee_joint": 4.0,         # Match real robot g1.yaml
+            },
             armature=None,
         ),
         "waist": ImplicitActuatorCfg(
@@ -266,22 +292,28 @@ G129_CFG_WITH_DEX1_BASE_FIX = ArticulationCfg(
             effort_limit=1000.0,  # set a large torque limit
             velocity_limit=0.0,  # set the velocity limit to 0
             stiffness={
-                "waist_yaw_joint": 10000.0,
-                "waist_roll_joint": 10000.0,
-                "waist_pitch_joint": 10000.0
+                "waist_yaw_joint": 150.0,    # Match real robot g1.yaml (was 10000.0)
+                "waist_roll_joint": 150.0,   # Match real robot g1.yaml (was 10000.0)
+                "waist_pitch_joint": 150.0   # Match real robot g1.yaml (was 10000.0)
             },
             damping={
-                "waist_yaw_joint": 10000.0,
-                "waist_roll_joint": 10000.0,
-                "waist_pitch_joint": 10000.0
+                "waist_yaw_joint": 4.0,      # Match real robot g1.yaml (was 10000.0)
+                "waist_roll_joint": 4.0,     # Match real robot g1.yaml (was 10000.0)
+                "waist_pitch_joint": 4.0     # Match real robot g1.yaml (was 10000.0)
             },
             armature=None,
         ),
         "feet": ImplicitActuatorCfg(
             effort_limit=None,
             joint_names_expr=[".*_ankle_pitch_joint", ".*_ankle_roll_joint"],
-            stiffness=None,
-            damping=None,
+            stiffness={
+                ".*_ankle_pitch_joint": 40.0,  # Match real robot g1.yaml
+                ".*_ankle_roll_joint": 40.0,   # Match real robot g1.yaml
+            },
+            damping={
+                ".*_ankle_pitch_joint": 2.0,   # Match real robot g1.yaml
+                ".*_ankle_roll_joint": 2.0,    # Match real robot g1.yaml
+            },
             # armature=0.001,
         ),
         "arms": ImplicitActuatorCfg(
@@ -422,8 +454,18 @@ G129_CFG_WITH_INSPIRE_HAND = ArticulationCfg(
             ],
             effort_limit=None,
             velocity_limit=None,
-            stiffness=None,
-            damping=None,
+            stiffness={
+                ".*_hip_yaw_joint": 100.0,    # Match real robot g1.yaml
+                ".*_hip_roll_joint": 100.0,   # Match real robot g1.yaml
+                ".*_hip_pitch_joint": 100.0,  # Match real robot g1.yaml
+                ".*_knee_joint": 150.0,       # Match real robot g1.yaml
+            },
+            damping={
+                ".*_hip_yaw_joint": 2.0,      # Match real robot g1.yaml
+                ".*_hip_roll_joint": 2.0,     # Match real robot g1.yaml
+                ".*_hip_pitch_joint": 2.0,    # Match real robot g1.yaml
+                ".*_knee_joint": 4.0,         # Match real robot g1.yaml
+            },
             armature=None,
         ),
         "waist": ImplicitActuatorCfg(
@@ -435,22 +477,28 @@ G129_CFG_WITH_INSPIRE_HAND = ArticulationCfg(
             effort_limit=1000.0,  # set a large torque limit
             velocity_limit=0.0,  # set the velocity limit to 0
             stiffness={
-                "waist_yaw_joint": 10000.0,
-                "waist_roll_joint": 10000.0,
-                "waist_pitch_joint": 10000.0
+                "waist_yaw_joint": 150.0,    # Match real robot g1.yaml (was 10000.0)
+                "waist_roll_joint": 150.0,   # Match real robot g1.yaml (was 10000.0)
+                "waist_pitch_joint": 150.0   # Match real robot g1.yaml (was 10000.0)
             },
             damping={
-                "waist_yaw_joint": 10000.0,
-                "waist_roll_joint": 10000.0,
-                "waist_pitch_joint": 10000.0
+                "waist_yaw_joint": 4.0,      # Match real robot g1.yaml (was 10000.0)
+                "waist_roll_joint": 4.0,     # Match real robot g1.yaml (was 10000.0)
+                "waist_pitch_joint": 4.0     # Match real robot g1.yaml (was 10000.0)
             },
             armature=None,
         ),
         "feet": ImplicitActuatorCfg(
             effort_limit=None,
             joint_names_expr=[".*_ankle_pitch_joint", ".*_ankle_roll_joint"],
-            stiffness=None,
-            damping=None,
+            stiffness={
+                ".*_ankle_pitch_joint": 40.0,  # Match real robot g1.yaml
+                ".*_ankle_roll_joint": 40.0,   # Match real robot g1.yaml
+            },
+            damping={
+                ".*_ankle_pitch_joint": 2.0,   # Match real robot g1.yaml
+                ".*_ankle_roll_joint": 2.0,    # Match real robot g1.yaml
+            },
             # armature=0.001,
         ),
         "arms": ImplicitActuatorCfg(
@@ -764,6 +812,7 @@ G129_CFG_WITH_DEX3_WHOLEBODY = ArticulationCfg(
         ),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             # enabled_self_collisions=False, solver_position_iteration_count=4, solver_velocity_iteration_count=1
+            # Increased iterations for stability with dt=0.005 (MuJoCo training timestep)
             enabled_self_collisions=False, solver_position_iteration_count=8, solver_velocity_iteration_count=4
         ),
     ),

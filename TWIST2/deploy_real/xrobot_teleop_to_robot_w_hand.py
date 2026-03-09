@@ -57,26 +57,26 @@ def start_interpolation(state_machine, start_obs, end_obs, duration=1.0):
     state_machine.interpolation_duration = duration
     state_machine.interpolation_start_obs = start_obs.copy() if start_obs is not None else None
     state_machine.interpolation_target_obs = end_obs.copy() if end_obs is not None else None
-    
+
 
 def get_interpolated_obs(state_machine):
     """Get current interpolated observation, returns None if interpolation complete"""
-    if (not state_machine.is_interpolating or 
-        state_machine.interpolation_start_obs is None or 
-        state_machine.interpolation_target_obs is None or 
+    if (not state_machine.is_interpolating or
+        state_machine.interpolation_start_obs is None or
+        state_machine.interpolation_target_obs is None or
         state_machine.interpolation_start_time is None):
         return None
     elapsed_time = time.time() - state_machine.interpolation_start_time
     progress = min(elapsed_time / state_machine.interpolation_duration, 1.0)
-    
+
     # Linear interpolation
     interp_obs = state_machine.interpolation_start_obs + (state_machine.interpolation_target_obs - state_machine.interpolation_start_obs) * progress
-    
+
     # Check if interpolation is complete
     if progress >= 1.0:
         state_machine.is_interpolating = False
         return state_machine.interpolation_target_obs
-    
+
     return interp_obs
 
 def extract_mimic_obs_whole_body(qpos, last_qpos, dt=1/30):
@@ -90,7 +90,7 @@ def extract_mimic_obs_whole_body(qpos, last_qpos, dt=1/30):
     # convert root vel to local frame
     base_vel_local = quat_rotate_inverse_np(root_quat, base_vel, scalar_first=True)
     base_ang_vel_local = quat_rotate_inverse_np(root_quat, base_ang_vel, scalar_first=True)
-    
+
     # Standard mimic observation (35 dims)
     height = root_pos[2:3]
     # print("height: ", height)
@@ -101,7 +101,7 @@ def extract_mimic_obs_whole_body(qpos, last_qpos, dt=1/30):
         base_ang_vel_local[2:3],  # yaw angular velocity (1 dim)
         robot_joints         # joint positions (29 dims)
     ])
-    
+
     return mimic_obs
 
 
@@ -134,10 +134,10 @@ class StateMachine:
         self.use_pinch = use_pinch
         # Hand control parameters
         self.hand_movement_step = 0.05  # 5% movement per press/hold
-        
+
         # Velocity commands from joystick
         self.velocity_commands = np.array([0.0, 0.0, 0.0])  # [vx, vy, vyaw]
-        
+
         # Smooth filtering
         self.enable_smooth = enable_smooth
         self.smooth_window_size = smooth_window_size
@@ -147,11 +147,11 @@ class StateMachine:
         """Update state machine with controller data"""
         # Store previous state
         self.previous_state = self.state
-        
+
         # Get current button states
         right_key_current = controller_data.get('RightController', {}).get('key_one', False)
         left_key_current = controller_data.get('LeftController', {}).get('key_one', False)
-        
+
         # Hand control - index_trig for close, grip for open
         right_index_trig_current = controller_data.get('RightController', {}).get('index_trig', False)
         left_index_trig_current = controller_data.get('LeftController', {}).get('index_trig', False)
@@ -166,13 +166,19 @@ class StateMachine:
         left_key_just_pressed = left_key_current and not self.left_key_one_was_pressed
         left_axis_click_just_pressed = left_axis_click_current and not self.left_axis_click_was_pressed
 
+        # Debug: print button states
+        if left_key_current or right_key_current:
+            print(f"[DEBUG] Left key: {left_key_current}, Right key: {right_key_current}")
+            print(f"[DEBUG] Left just pressed: {left_key_just_pressed}, Right just pressed: {right_key_just_pressed}")
+
         # Handle left axis click - emergency stop
         if left_axis_click_just_pressed:
             self._emergency_stop()
 
-        # Handle left key press - exit from any state
+        # Handle left key press - trigger Isaac Lab reset via Redis
         if left_key_just_pressed:
-            self.state = "exit"
+            print("🔄 Left key pressed - Triggering Isaac Lab reset...")
+            self._trigger_isaac_reset()
 
         # Handle right key press - cycle between idle, teleop, pause
         elif right_key_just_pressed:
@@ -195,7 +201,7 @@ class StateMachine:
             if new_position != self.hand_right_position:
                 self.hand_right_position = new_position
                 print(f"Right hand opening: {self.hand_right_position:.1f}")
-        
+
         # Left hand control
         if left_index_trig_current:  # Close left hand
             new_position = min(1.0, self.hand_left_position + self.hand_movement_step)
@@ -207,78 +213,78 @@ class StateMachine:
             if new_position != self.hand_left_position:
                 self.hand_left_position = new_position
                 print(f"Left hand opening: {self.hand_left_position:.1f}")
-        
+
         # Extract velocity commands from controller axes
         self._update_velocity_commands(controller_data)
-        
+
         # Update button state tracking
         self.right_key_one_was_pressed = right_key_current
         self.left_key_one_was_pressed = left_key_current
         self.left_axis_click_was_pressed = left_axis_click_current
-    
+
     def _update_velocity_commands(self, controller_data):
         """Update velocity commands from controller axes"""
         left_axis = controller_data.get('LeftController', {}).get('axis', [0.0, 0.0])
         right_axis = controller_data.get('RightController', {}).get('axis', [0.0, 0.0])
-        
+
         # Use left stick for xy movement, right stick for yaw rotation
         if len(left_axis) >= 2 and len(right_axis) >= 2:
             # Scale factors for velocity commands
             xy_scale = 2.0  # m/s
             yaw_scale = 3.0  # rad/s
-            
+
             self.velocity_commands[0] = left_axis[1] * xy_scale   # forward/backward (y axis inverted)
             self.velocity_commands[1] = -left_axis[0] * xy_scale  # left/right (x axis inverted)
             self.velocity_commands[2] = -right_axis[0] * yaw_scale  # yaw rotation (x axis inverted)
-    
+
     def has_state_changed(self):
         """Check if state has changed since last update"""
         return self.state != self.previous_state
-    
-    
+
+
     def set_current_mimic_obs(self, mimic_obs):
         """Update current mimic obs"""
         self.current_mimic_obs = mimic_obs.copy() if mimic_obs is not None else None
-        
+
     def set_last_mimic_obs(self, mimic_obs):
         """Update last mimic obs (used when entering pause)"""
         self.last_mimic_obs = mimic_obs.copy() if mimic_obs is not None else None
-        
+
     def set_last_neck_data(self, neck_data):
         """Update last neck data (used when entering pause)"""
         self.last_neck_data = neck_data[:] if neck_data is not None else None
-        
+
     def set_current_neck_data(self, neck_data):
         """Update current neck data"""
         self.current_neck_data = neck_data[:] if neck_data is not None else None
-    
+
     def get_current_state(self):
         return self.state
-    
+
 
     def get_velocity_commands(self):
         return self.velocity_commands.copy()
-        
+
     def is_teleop_active(self):
         """Return True if currently in teleop state"""
         return self.state == "teleop"
-        
+
     def should_exit(self):
         """Return True if should exit the program"""
         return self.state == "exit"
-        
+
     def should_process_data(self):
         """Return True if should process motion data"""
         return self.state == "teleop" and not self.is_interpolating
-    
+
     def get_hand_state(self):
         return self.hand_left_position, self.hand_right_position
-    
+
     def get_hand_pose(self, robot_name):
         """Get interpolated hand poses based on current hand positions"""
         use_pinch = self.use_pinch
         # Get open and closed poses
-        
+
         if not use_pinch:
             left_open = DEFAULT_HAND_POSE[robot_name]['left']['open']
             left_closed = DEFAULT_HAND_POSE[robot_name]['left']['close']
@@ -298,28 +304,28 @@ class StateMachine:
             left_closed = left_fully_open * ratio_closed + (1 - ratio_closed) * left_fully_closed
             right_open = right_fully_open * ratio_open + (1 - ratio_open) * right_fully_closed
             right_closed = right_fully_open * ratio_closed + (1 - ratio_closed) * right_fully_closed
-        
+
         # Interpolate between open and closed poses
         left_pose = left_open + (left_closed - left_open) * self.hand_left_position
         right_pose = right_open + (right_closed - right_open) * self.hand_right_position
-        
+
         return left_pose, right_pose
-    
+
     def apply_smooth(self, mimic_obs):
         """Apply sliding window smoothing to mimic observations"""
         if not self.enable_smooth or mimic_obs is None:
             return mimic_obs
-            
+
         # Convert to numpy array if needed
         obs_array = np.array(mimic_obs) if not isinstance(mimic_obs, np.ndarray) else mimic_obs.copy()
-        
+
         # Add current observation to history
         self.smooth_history.append(obs_array)
-        
+
         # Keep only the recent window_size observations
         if len(self.smooth_history) > self.smooth_window_size:
             self.smooth_history.pop(0)
-            
+
         # Apply sliding window average
         if len(self.smooth_history) >= 2:  # Need at least 2 observations for smoothing
             # Stack all observations in history
@@ -330,17 +336,17 @@ class StateMachine:
         else:
             # Not enough history, return original observation
             return obs_array
-    
+
     def reset_smooth_history(self):
         """Reset smooth history (call when transitioning states)"""
         self.smooth_history = []
-    
+
     def _emergency_stop(self):
         """Emergency stop: kill sim2real.sh process (server_low_level_g1_real_future.py)"""
         try:
             print("[EMERGENCY STOP] Killing sim2real.sh process...")
             # Kill sim2real.sh which contains server_low_level_g1_real_future.py
-            result = subprocess.run(['pkill', '-f', 'sim2real.sh'], 
+            result = subprocess.run(['pkill', '-f', 'sim2real.sh'],
                                   capture_output=True, text=True, timeout=5)
             if result.returncode == 0:
                 print("[EMERGENCY STOP] Successfully killed sim2real.sh process")
@@ -348,17 +354,67 @@ class StateMachine:
                 print(f"[EMERGENCY STOP] pkill returned code {result.returncode}")
 
             # Also try to kill the specific server script directly as backup
-            result2 = subprocess.run(['pkill', '-f', 'server_low_level_g1_real_future.py'], 
+            result2 = subprocess.run(['pkill', '-f', 'server_low_level_g1_real_future.py'],
                                    capture_output=True, text=True, timeout=5)
             if result2.returncode == 0:
                 print("[EMERGENCY STOP] Successfully killed server_low_level_g1_real_future.py process")
             else:
                 print(f"[EMERGENCY STOP] pkill for server script returned code {result2.returncode}")
-                
+
         except subprocess.TimeoutExpired:
             print("[EMERGENCY STOP] pkill command timed out")
         except Exception as e:
             print(f"[EMERGENCY STOP] Error executing pkill: {e}")
+
+    def _trigger_isaac_reset(self):
+        """Trigger Isaac Lab reset via Redis (simpler than shared memory)"""
+        print("[DEBUG] _trigger_isaac_reset() called")
+        try:
+            import redis
+            import json
+            import time
+
+            print("[DEBUG] Connecting to Redis...")
+            redis_client = redis.Redis(host='localhost', port=6379, db=0)
+
+            # Test connection
+            redis_client.ping()
+            print("[DEBUG] Redis connection OK")
+
+            # Send reset command via Redis
+            # Isaac Lab will read this and trigger reset
+            reset_command = {
+                "reset_category": "2",  # Reset all (robot + objects)
+                "timestamp": int(time.time() * 1000)
+            }
+
+            json_str = json.dumps(reset_command)
+            print(f"[DEBUG] Writing to Redis: {json_str}")
+
+            # Use a simple Redis key that Isaac Lab can check
+            result = redis_client.set("isaac_reset_trigger", json_str)
+            print(f"[DEBUG] Redis SET result: {result}")
+
+            # Verify it was written
+            verify = redis_client.get("isaac_reset_trigger")
+            print(f"[DEBUG] Redis GET verify: {verify}")
+
+            redis_client.expire("isaac_reset_trigger", 5)  # Auto-expire after 5 seconds
+
+            print("✅ [RESET] Isaac Lab reset command sent via Redis")
+
+            # Also reset state machine to idle
+            self.state = "idle"
+            self.velocity_commands = np.array([0.0, 0.0, 0.0])
+            self.hand_left_position = 0.0
+            self.hand_right_position = 0.0
+
+        except redis.ConnectionError as e:
+            print(f"❌ [RESET] Redis connection failed: {e}")
+        except Exception as e:
+            print(f"❌ [RESET] Failed to send reset command: {e}")
+            import traceback
+            traceback.print_exc()
 
 class XRobotTeleopToRobot:
     def __init__(self, args):
@@ -366,7 +422,7 @@ class XRobotTeleopToRobot:
         self.robot_name = args.robot
         self.xml_file = ROBOT_XML_DICT[args.robot]
         self.robot_base = ROBOT_BASE_DICT[args.robot]
-        
+
         print(f"Pinch mode: {self.args.pinch_mode}")
         # Initialize state tracking
         self.last_qpos = None
@@ -386,11 +442,11 @@ class XRobotTeleopToRobot:
             use_pinch=args.pinch_mode
         )
         self.rate = None
-        
+
         # Video recording
         self.video_writer = None
         self.renderer = None
-        
+
         # FPS monitoring
         self.fps_monitor = FPSMonitor(
             enable_detailed_stats=args.measure_fps,
@@ -405,7 +461,7 @@ class XRobotTeleopToRobot:
         """Initialize and start the teleop data streamer"""
         self.teleop_data_streamer = XRobotStreamer()
         print("Teleop data streamer initialized")
-        
+
     def setup_redis_connection(self):
         """Setup Redis connection"""
         redis_ip = self.args.redis_ip
@@ -422,70 +478,70 @@ class XRobotTeleopToRobot:
             actual_human_height=self.args.actual_human_height,
         )
         print("Retargeting system initialized")
-    
+
     def setup_mujoco_simulation(self):
         """Setup MuJoCo model and data"""
         self.model = mj.MjModel.from_xml_path(str(self.xml_file))
         self.data = mj.MjData(self.model)
         print("MuJoCo simulation initialized")
-        
+
     def setup_video_recording(self):
         """Setup video recording if requested"""
         if not self.args.record_video:
             return
-            
+
         self.video_writer = cv2.VideoWriter(
-            'output.mp4', 
-            cv2.VideoWriter_fourcc(*'mp4v'), 
-            30, 
+            'output.mp4',
+            cv2.VideoWriter_fourcc(*'mp4v'),
+            30,
             (640, 480)
         )
         width, height = 640, 480
         self.renderer = mj.Renderer(self.model, height=height, width=width)
         print("Video recording setup completed")
-        
+
     def setup_rate_limiter(self):
         """Setup rate limiter for consistent FPS"""
         self.rate = RateLimiter(frequency=self.target_fps, warn=False)
         print(f"Rate limiter setup for {self.target_fps} FPS")
-        
+
     def get_teleop_data(self):
         """Get current teleop data from streamer"""
         if self.teleop_data_streamer is not None:
             return self.teleop_data_streamer.get_current_frame()
         return None, None, None, None, None
-        
+
     def process_retargeting(self, smplx_data):
         """Process motion retargeting and return observations"""
         if smplx_data is None or self.retarget is None:
             return None, None
-            
+
         # Measure dt between retarget calls
         current_time = time.time()
         self.measured_dt = current_time - self.last_time
         self.last_time = current_time
-        
+
         # Retarget till convergence
         qpos = self.retarget.retarget(smplx_data, offset_to_ground=True)
-        
+
         # Create mimic obs from retargeting
         if self.last_qpos is not None:
             current_retarget_obs = extract_mimic_obs_whole_body(qpos, self.last_qpos, dt=self.measured_dt)
         else:
             current_retarget_obs = DEFAULT_MIMIC_OBS[self.robot_name]
-        
+
         self.last_qpos = qpos.copy()
         return qpos, current_retarget_obs
-        
+
     def update_visualization(self, qpos, smplx_data, viewer):
         """Update MuJoCo visualization"""
         if qpos is None:
             return
-            
+
         # Clean custom geometry
         if hasattr(viewer, 'user_scn') and viewer.user_scn is not None:
             viewer.user_scn.ngeom = 0
-            
+
         # Draw the task targets for reference
         if smplx_data is not None and self.retarget is not None:
             for robot_link, ik_data in self.retarget.ik_match_table1.items():
@@ -499,15 +555,15 @@ class XRobotTeleopToRobot:
                     0.1,
                     orientation_correction=R.from_quat(ik_data[-1]),
                 )
-                
+
         # Update the simulation
         if qpos is not None:
             self.data.qpos[:] = qpos.copy()
             mj.mj_forward(self.model, self.data)
-            
+
             # Camera follow the pelvis
             self._update_camera_position(viewer)
-        
+
     def _update_camera_position(self, viewer):
         """Update camera to follow the robot"""
         FOLLOW_CAMERA = True
@@ -515,22 +571,22 @@ class XRobotTeleopToRobot:
             robot_base_pos = self.data.xpos[self.model.body(self.robot_base).id]
             viewer.cam.lookat = robot_base_pos
             viewer.cam.distance = 3.0
-            
+
     def handle_state_transitions(self, current_retarget_obs):
         """Handle state machine transitions and interpolations"""
         if not self.state_machine.has_state_changed():
             return
-            
+
         current_state = self.state_machine.get_current_state()
         previous_state = self.state_machine.previous_state
-        
+
         print(f"State changed: {previous_state} -> {current_state}")
-        
+
         if current_state == "teleop":
             self._handle_enter_teleop(previous_state, current_retarget_obs)
         elif current_state == "pause":
             self._handle_enter_pause()
-            
+
     def _handle_enter_teleop(self, previous_state, current_retarget_obs):
         """Handle entering teleop state"""
         if previous_state in ["idle", "pause"]:
@@ -556,7 +612,7 @@ class XRobotTeleopToRobot:
         if self.state_machine.current_neck_data is not None:
             self.state_machine.set_last_neck_data(self.state_machine.current_neck_data)
             print("Entered pause mode, storing last neck data")
-            
+
     def determine_mimic_obs_to_send(self, current_retarget_obs):
         """Determine which mimic observation to send based on current state"""
         current_state = self.state_machine.get_current_state()
@@ -575,7 +631,7 @@ class XRobotTeleopToRobot:
             obs = DEFAULT_MIMIC_OBS[self.robot_name]
 
         return obs
-        
+
     def _get_teleop_mimic_obs(self, current_retarget_obs):
         """Get mimic obs for teleop state, handling interpolation"""
         if self.state_machine.is_interpolating:
@@ -591,16 +647,16 @@ class XRobotTeleopToRobot:
             return obs_35d
 
         return DEFAULT_MIMIC_OBS[self.robot_name]
-    
+
     def determine_neck_data_to_send(self, smplx_data):
         """Determine which neck data to send based on current state"""
-       
+
         current_state = self.state_machine.get_current_state()
-        
+
         # In non-teleop states, send default neck position [0, 0]
         if current_state in ["idle"]:
             return [0.0, 0.0]
-        
+
         if current_state == "pause":
             # return [0.0, 0.0]
             # use last neck data
@@ -608,35 +664,35 @@ class XRobotTeleopToRobot:
                 return self.state_machine.last_neck_data
             else:
                 return [0.0, 0.0]
-            
+
         # In teleop state, extract neck data from smplx_data
         elif current_state == "teleop" and smplx_data is not None:
             scale = self.args.neck_retarget_scale
             neck_yaw, neck_pitch = human_head_to_robot_neck(smplx_data)
             return [neck_yaw * scale, neck_pitch * scale]
-        
+
         # Default fallback
         return [0.0, 0.0]
-            
+
     def send_to_redis(self, mimic_obs, neck_data=None):
         """Send mimic observations to Redis"""
-        
+
         if self.redis_client is not None and mimic_obs is not None:
             # Expect 35D mimic observations
             assert len(mimic_obs) == 35, f"Expected 35 mimic obs dims, got {len(mimic_obs)}"
             # Send to both keys for compatibility
             self.redis_pipeline.set("action_body_unitree_g1_with_hands", json.dumps(mimic_obs.tolist()))
-        
+
         # Send hand action to redis
         if self.redis_client is not None:
             hand_left_pose, hand_right_pose = self.state_machine.get_hand_pose(self.robot_name)
             self.redis_pipeline.set("action_hand_left_unitree_g1_with_hands", json.dumps(hand_left_pose.tolist()))
             self.redis_pipeline.set("action_hand_right_unitree_g1_with_hands", json.dumps(hand_right_pose.tolist()))
-        
+
         # Send neck data to redis
         if neck_data is not None:
             self.redis_pipeline.set("action_neck_unitree_g1_with_hands", json.dumps(neck_data))
-        
+
         # Send timestamp to redis
         t_action = int(time.time() * 1000) # current timestamp in ms
         self.redis_pipeline.set("t_action", t_action)
@@ -644,28 +700,28 @@ class XRobotTeleopToRobot:
         # execute the pipeline once
         self.redis_pipeline.execute()
 
-    
+
     def send_controller_data_to_redis(self, controller_data):
         """Send controller data to Redis"""
         if self.redis_client is not None and controller_data is not None:
             self.redis_client.set(
-                f"controller_data", 
+                f"controller_data",
                 json.dumps(controller_data)
             )
-            
-            
+
+
     def record_video_frame(self, viewer):
         """Record current frame to video if recording is enabled"""
         if not self.args.record_video or self.renderer is None:
             return
-            
+
         self.renderer.update_scene(self.data, camera=viewer.cam)
         pixels = self.renderer.render()
-        
+
         # Convert from RGB to BGR (OpenCV uses BGR)
         frame = cv2.cvtColor(pixels, cv2.COLOR_RGB2BGR)
         self.video_writer.write(frame)
-        
+
     def handle_exit_sequence(self, viewer):
         """Handle graceful exit with interpolation to default pose"""
         if self.state_machine.current_mimic_obs is not None:
@@ -673,7 +729,7 @@ class XRobotTeleopToRobot:
             current_obs = self.state_machine.current_mimic_obs[:35] if len(self.state_machine.current_mimic_obs) > 35 else self.state_machine.current_mimic_obs
             start_interpolation(self.state_machine, current_obs, default_obs)
             print("Interpolating to default pose before exit...")
-            
+
             # Wait for interpolation to complete
             while self.state_machine.is_interpolating:
                 interp_obs = get_interpolated_obs(self.state_machine)
@@ -683,7 +739,7 @@ class XRobotTeleopToRobot:
                     self.send_to_redis(interp_obs, neck_data_to_send)
                 viewer.sync()
                 self.rate.sleep()
-                
+
 
 
     def initialize_all_systems(self):
@@ -709,7 +765,7 @@ class XRobotTeleopToRobot:
             print(f"- Smooth filtering: ENABLED (window size: {self.state_machine.smooth_window_size} frames)")
         else:
             print("- Smooth filtering: DISABLED")
-        
+
         if self.fps_monitor.enable_detailed_stats:
             print(f"- FPS measurement: ENABLED (detailed stats every {self.fps_monitor.detailed_print_interval} steps)")
         else:
@@ -720,57 +776,57 @@ class XRobotTeleopToRobot:
     def run(self):
         """Main execution loop"""
         self.initialize_all_systems()
-        
+
         # Start the viewer
         with mjv.launch_passive(
-            model=self.model, 
-            data=self.data, 
-            show_left_ui=False, 
+            model=self.model,
+            data=self.data,
+            show_left_ui=False,
             show_right_ui=False
         ) as viewer:
             viewer.opt.flags[mj.mjtVisFlag.mjVIS_TRANSPARENT] = 1
-            
+
             while viewer.is_running():
                 # Get current teleop data
                 smplx_data, left_hand_data, right_hand_data, controller_data, headset_data = self.get_teleop_data()
-                
+
                 # Update state machine
                 if controller_data is not None:
                     self.state_machine.update(controller_data)
                     self.send_controller_data_to_redis(controller_data)
-                
+
                 # Check if we should exit
                 if self.state_machine.should_exit():
                     print("Exit requested via controller")
                     self.handle_exit_sequence(viewer)
                     break
-                
+
                 # Process retargeting if we have data
                 qpos, current_retarget_obs = None, None
                 if smplx_data is not None:
                     qpos, current_retarget_obs = self.process_retargeting(smplx_data)
                     self.update_visualization(qpos, smplx_data, viewer)
-                
+
                 # Handle state transitions
                 self.handle_state_transitions(current_retarget_obs)
-                
+
                 # Determine and send mimic observations
                 mimic_obs_to_send = self.determine_mimic_obs_to_send(current_retarget_obs)
                 neck_data_to_send = self.determine_neck_data_to_send(smplx_data)
-                
+
                 # Store current neck data in state machine for pause state handling
                 if neck_data_to_send is not None:
                     self.state_machine.set_current_neck_data(neck_data_to_send)
-                
+
                 self.send_to_redis(mimic_obs_to_send, neck_data_to_send)
-                
+
                 # Update visualization and record video
                 viewer.sync()
                 self.record_video_frame(viewer)
-                
+
                 # FPS monitoring
                 self.fps_monitor.tick()
-                
+
                 self.rate.sleep()
 
 def parse_arguments():
@@ -803,7 +859,7 @@ def parse_arguments():
         type=float,
         default=1.5,
         help="Actual human height for retargeting.",
-    )   
+    )
     parser.add_argument(
         "--neck_retarget_scale",
         type=float,

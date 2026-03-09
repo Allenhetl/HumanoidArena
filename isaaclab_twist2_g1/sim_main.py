@@ -30,9 +30,20 @@ from dds.dds_create import create_dds_objects,create_dds_objects_replay
 # add command line arguments
 parser = argparse.ArgumentParser(description="Unitree Simulation")
 parser.add_argument("--task", type=str, default="Isaac-PickPlace-G129-Head-Waist-Fix", help="task name")
-parser.add_argument("--action_source", type=str, default="dds", 
-                   choices=["dds", "file", "trajectory", "policy", "replay","dds_wholebody"], 
+parser.add_argument("--action_source", type=str, default="dds",
+                   choices=["dds", "file", "trajectory", "policy", "replay",
+                            "dds_wholebody", "sonic_wholebody"],
                    help="Action source")
+
+# SONIC-specific arguments (used when action_source=sonic_wholebody)
+parser.add_argument("--sonic_zmq_host", type=str, default="localhost",
+                    help="ZMQ host for SONIC pose topic (pico_manager_thread_server)")
+parser.add_argument("--sonic_zmq_port", type=int, default=5556,
+                    help="ZMQ port for SONIC pose topic")
+parser.add_argument("--sonic_encoder_path", type=str, default="",
+                    help="Path to GEAR-SONIC encoder ONNX model")
+parser.add_argument("--sonic_decoder_path", type=str, default="",
+                    help="Path to GEAR-SONIC decoder ONNX model")
 
 
 parser.add_argument("--robot_type", type=str, default="g129", help="robot type")
@@ -88,7 +99,7 @@ parser.add_argument("--step_hz", type=int, default=500, help="control frequency"
 parser.add_argument("--enable_profiling", action="store_true", default=True, help="enable performance analysis")
 parser.add_argument("--profile_interval", type=int, default=500, help="performance analysis report interval (steps)")
 
-parser.add_argument("--model_path", type=str, default="/home/hcl4070-1/Desktop/taowen/projects/TWIST2/assets/ckpts/twist2_1017_20k.onnx", help="model path")
+parser.add_argument("--model_path", type=str, default="/home/yixiao/Users/yixiao/temp/TWIST2/assets/ckpts/twist2_1017_20k.onnx", help="model path")
 parser.add_argument("--enable_wholebody_dds", action="store_true", default=False, help="enable wh dds")
 parser.add_argument("--setpgrp", action="store_true", default=False, help="detach to a new process group")
 
@@ -110,7 +121,7 @@ if args_cli.enable_dex3_dds and args_cli.enable_dex1_dds and args_cli.enable_ins
     sys.exit(1)
 
 
-import pinocchio 
+# import pinocchio  # 注释掉：与 NumPy 2.x 不兼容，且当前未使用
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
@@ -337,7 +348,6 @@ def main():
         # Try to set mass using correct format
         print(f"\n  Attempting to set mass to 0.3 kg...")
         try:
-            import torch
             # PhysX requires CPU tensors (device -1 or 'cpu')
             new_mass = torch.tensor([[0.3]], dtype=torch.float32, device='cpu')
             box_obj.root_physx_view.set_masses(new_mass, indices=torch.tensor([0], device='cpu'))
@@ -400,32 +410,77 @@ def main():
     try:
         # Viewport camera switching only makes sense when rendering is enabled
         import omni.kit.viewport.utility as vp_utils
+        from pxr import Usd, UsdGeom
 
-        # Set to front camera (first-person view)
-        cam_path = "/World/envs/env_0/Robot/d435_link/front_cam"
+        # Debug: List all cameras in the scene
+        stage = env.sim.stage
+        print("\n🔍 [DEBUG] Available cameras in USD stage:")
+        camera_paths = []
+        for prim in stage.Traverse():
+            if prim.IsA(UsdGeom.Camera):
+                cam_path_str = str(prim.GetPath())
+                camera_paths.append(cam_path_str)
+                print(f"  - {cam_path_str}")
+
+        if not camera_paths:
+            print("  ⚠️ No cameras found in stage!")
+
+        # Try to find front_cam
+        front_cam_candidates = [p for p in camera_paths if "front_cam" in p.lower()]
+
+        if front_cam_candidates:
+            cam_path = front_cam_candidates[0]
+            print(f"\n✅ Found front_cam at: {cam_path}")
+        else:
+            # Fallback to the expected path
+            cam_path = "/World/envs/env_0/Robot/d435_link/front_cam"
+            print(f"\n⚠️ No front_cam found, trying expected path: {cam_path}")
+
         vp = vp_utils.get_active_viewport()
         if vp is not None:
+            # Check current camera before switching
+            current_cam = vp.get_active_camera()
+            print(f"  Current viewport camera: {current_cam}")
+
+            # Try to set the camera
             vp.set_active_camera(cam_path)
-            print(f"✅ Viewport active camera set to: {cam_path}")
+
+            # Verify the switch
+            new_cam = vp.get_active_camera()
+            if new_cam == cam_path:
+                print(f"  ✅ Successfully switched viewport to: {cam_path}")
+            else:
+                print(f"  ❌ Failed to switch! Viewport still at: {new_cam}")
         else:
             print("⚠️ No active viewport found; skip setting default camera")
     except Exception as e:
         # Likely running headless / no viewport
-        print(f"⚠️ Failed to set viewport default camera (maybe headless): {e}")
+        import traceback
+        print(f"⚠️ Failed to set viewport default camera: {e}")
+        print(traceback.format_exc())
 
 
     # create simplified control configuration
     try:
-        use_wholebody = "Wholebody" in args_cli.task or args_cli.enable_wholebody_dds
-        if use_wholebody:
-            args_cli.action_source = "dds_wholebody"
-            args_cli.enable_wholebody_dds = True
+        # sonic_wholebody 优先：不被 task 名中的 "Wholebody" 覆盖
+        if args_cli.action_source == "sonic_wholebody":
+            use_wholebody = True
             physics_dt = getattr(env, "physics_dt", None) or env_cfg.sim.dt
             policy_hz = int(round(1.0 / (physics_dt * env_cfg.decimation)))
             if args_cli.step_hz != policy_hz:
                 print(f"⚠️  Overriding step_hz {args_cli.step_hz} -> {policy_hz} to match TWIST2 policy rate")
             step_hz = policy_hz
+        elif "Wholebody" in args_cli.task or args_cli.enable_wholebody_dds:
+            use_wholebody = True
+            args_cli.action_source = "dds_wholebody"
+            args_cli.enable_wholebody_dds = True
+            # Match step_hz with physics frequency for TWIST2
+            physics_dt = getattr(env, "physics_dt", None) or env_cfg.sim.dt
+            policy_hz = int(round(1.0 / (physics_dt * env_cfg.decimation)))
+            step_hz = policy_hz  # Use physics frequency instead of args_cli.step_hz
+            print(f"✅ TWIST2 Wholebody: step_hz set to {step_hz}Hz (physics_dt={physics_dt}s, decimation={env_cfg.decimation})")
         else:
+            use_wholebody = False
             step_hz = args_cli.step_hz
 
         control_config = ControlConfig(
@@ -577,46 +632,86 @@ def main():
                     current_time = time.time()
                     loop_count += 1
                     if not args_cli.replay_data:
+                        # Only update state and reward every 10 loops to improve performance
+                        if loop_count % 10 == 0:
+                            try:
+                                env_state = env.scene.get_state()
+                                env_state_json = sim_state_to_json(env_state)
+                                sim_state = {"init_state": env_state_json, "task_name": args_cli.task}
+                            except Exception as e:
+                                print(f"Failed to get env state: {e}")
+                                raise e
+                            try:
+                                # sim_state = json.dumps(sim_state)
+                                sim_state_dds.write_sim_state_data(sim_state)
+                            except Exception as e:
+                                print(f"Failed to write sim state: {e}")
+                                raise e
+                        # Check for reset command from Redis (from Pico controller)
                         try:
-                            env_state = env.scene.get_state()
-                            env_state_json = sim_state_to_json(env_state)
-                            sim_state = {"init_state": env_state_json, "task_name": args_cli.task}
+                            import redis
+                            redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+                            reset_trigger = redis_client.get("isaac_reset_trigger")
+
+                            # Debug: print every 50 loops to show we're checking
+                            if loop_count % 50 == 0:
+                                print(f"[DEBUG] Checking Redis reset trigger... (value: {reset_trigger})")
+
+                            if reset_trigger:
+                                import json
+                                reset_cmd_redis = json.loads(reset_trigger)
+                                reset_category = reset_cmd_redis.get("reset_category", "2")
+                                print(f"[DEBUG] ✅ Received reset from Redis: category={reset_category}")
+
+                                if reset_category == "1":
+                                    print("🔄 Resetting object...")
+                                    env_cfg.event_manager.trigger("reset_object_self", env)
+                                elif reset_category == "2":
+                                    print("🔄 Resetting all (robot + objects)...")
+                                    env_cfg.event_manager.trigger("reset_all_self", env)
+
+                                # Clear the trigger
+                                redis_client.delete("isaac_reset_trigger")
+                                print("[DEBUG] Reset trigger cleared from Redis")
+                        except redis.ConnectionError as e:
+                            if loop_count % 100 == 0:  # Print occasionally
+                                print(f"[WARN] Redis not available for reset trigger: {e}")
                         except Exception as e:
-                            print(f"Failed to get env state: {e}")
-                            raise e
-                        try:
-                            # sim_state = json.dumps(sim_state)
-                            sim_state_dds.write_sim_state_data(sim_state)
-                        except Exception as e:
-                            print(f"Failed to write sim state: {e}")
-                            raise e
+                            print(f"[ERROR] Failed to check Redis reset trigger: {e}")
+
+                        # Check for reset command from DDS (original method)
                         # print(f"reset_pose_dds: {reset_pose_dds}")
                         try:
                             reset_pose_cmd = reset_pose_dds.get_reset_pose_command()
+                            # Debug: print when command is received
+                            if reset_pose_cmd is not None:
+                                print(f"[DEBUG] Received reset command: {reset_pose_cmd}")
                         except Exception as e:
                             print(f"Failed to get reset pose command: {e}")
                             raise e
                         # # print(f"reset_pose_cmd: {reset_pose_cmd}")
                         # Compute current reward values manually if needed for debugging
-                        try:
-                            current_reward = get_step_reward_value(env)
-                            print(f"reward: {current_reward}")
-                        except Exception as e:
-                            print(f"奖励计算失败: {e}")
-                            pass
+                        if loop_count % 10 == 0:  # Only compute reward every 10 loops
+                            try:
+                                current_reward = get_step_reward_value(env)
+                                print(f"reward: {current_reward}")
+                            except Exception as e:
+                                print(f"奖励计算失败: {e}")
+                                pass
 
                         if reset_pose_cmd is not None:
                             try:
                                 reset_category = reset_pose_cmd.get("reset_category")
                                 # print(f"reset_category: {reset_category}")
-                                if (args_cli.enable_wholebody_dds and (reset_category == '1' or reset_category == '2')) or (
-                                    not args_cli.enable_wholebody_dds and reset_category == '1'
-                                ):
-                                    print("reset object")
+
+                                if reset_category == '1':
+                                    # Reset object only
+                                    print("🔄 Resetting object...")
                                     env_cfg.event_manager.trigger("reset_object_self", env)
                                     reset_pose_dds.write_reset_pose_command(-1)
-                                elif reset_category == '2' and not args_cli.enable_wholebody_dds:
-                                    print("reset all")
+                                elif reset_category == '2':
+                                    # Reset all (robot + objects)
+                                    print("🔄 Resetting all (robot + objects)...")
                                     env_cfg.event_manager.trigger("reset_all_self", env)
                                     reset_pose_dds.write_reset_pose_command(-1)
                             except Exception as e:

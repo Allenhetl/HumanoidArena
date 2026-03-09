@@ -8,17 +8,18 @@ support different robot variants: with/without waist joint, different finger con
 
 from isaaclab.assets import ArticulationCfg
 from isaaclab.utils import configclass
-from robots.unitree import G129_CFG_WITH_DEX1_BASE_FIX,G129_CFG_WITH_DEX3_BASE_FIX,G129_CFG_WITH_INSPIRE_HAND,G129_CFG_WITH_DEX1_WHOLEBODY,G129_CFG_WITH_DEX3_WHOLEBODY,G129_CFG_WITH_INSPIRE_WHOLEBODY
+from robots.unitree import G129_CFG_WITH_DEX1_BASE_FIX, G129_CFG_WITH_DEX3_BASE_FIX, G129_CFG_WITH_INSPIRE_HAND, \
+    G129_CFG_WITH_DEX1_WHOLEBODY, G129_CFG_WITH_DEX3_WHOLEBODY, G129_CFG_WITH_INSPIRE_WHOLEBODY
 from typing import Optional, Dict, Tuple, Literal
 
 
 @configclass
 class G1RobotJointTemplates:
     """G1 robot joint template collection
-    
+
     provide different types of joint configuration templates
     """
-    
+
     @classmethod
     def get_leg_joints(cls) -> Dict[str, float]:
         """get the default position of the leg joints"""
@@ -30,7 +31,7 @@ class G1RobotJointTemplates:
             "left_knee_joint": 0.0,
             "left_ankle_pitch_joint": 0.0,
             "left_ankle_roll_joint": 0.0,
-            
+
             # right leg joint - locked in standing position
             "right_hip_pitch_joint": 0.0,
             "right_hip_roll_joint": 0.0,
@@ -39,26 +40,26 @@ class G1RobotJointTemplates:
             "right_ankle_pitch_joint": 0.0,
             "right_ankle_roll_joint": 0.0,
         }
-    
+
     @classmethod
     def get_waist_joints(cls, include_waist: bool = True) -> Dict[str, float]:
         """get the position of the waist joints
-        
+
         Args:
             include_waist: whether to include the waist joint
-            
+
         Returns:
             waist joint position dictionary, if not included, return an empty dictionary
         """
         if not include_waist:
             return {}
-        
+
         return {
             "waist_yaw_joint": 0.0,
             "waist_roll_joint": 0.0,
             "waist_pitch_joint": 0.0,
         }
-    
+
     @classmethod
     def get_arm_joints(cls) -> Dict[str, float]:
         """get the default position of the arm joints"""
@@ -71,7 +72,7 @@ class G1RobotJointTemplates:
             "left_wrist_roll_joint": 0.0,
             "left_wrist_pitch_joint": 0.0,
             "left_wrist_yaw_joint": 0.0,
-            
+
             # right arm joint
             "right_shoulder_pitch_joint": 0.0,
             "right_shoulder_roll_joint": 0.0,
@@ -81,16 +82,16 @@ class G1RobotJointTemplates:
             "right_wrist_pitch_joint": 0.0,
             "right_wrist_yaw_joint": 0.0,
         }
-    
+
     @classmethod
-    def get_hand_joints(cls, hand_type: Literal["gripper", "dex3","inspire"] = "gripper") -> Dict[str, float]:
+    def get_hand_joints(cls, hand_type: Literal["gripper", "dex3", "inspire"] = "gripper") -> Dict[str, float]:
         """get the default position of the hand joints
-        
+
         Args:
             hand_type: hand type
                 - "gripper": simple gripper (2 joints)
                 - "dex3": dexterous hand (14 joints)
-                
+
         Returns:
             hand joint position dictionary
         """
@@ -112,7 +113,7 @@ class G1RobotJointTemplates:
                 "left_hand_middle_1_joint": 0.0,
                 "left_hand_thumb_1_joint": 0.0,
                 "left_hand_thumb_2_joint": 0.0,
-                
+
                 # dexterous hand joint - right hand
                 "right_hand_index_0_joint": 0.0,
                 "right_hand_middle_0_joint": 0.0,
@@ -124,32 +125,32 @@ class G1RobotJointTemplates:
             }
         elif hand_type == "inspire":
             return {
-            # fingers joints
-            "L_index_proximal_joint": 0.0,
-            "L_index_intermediate_joint": 0.0,
-            "L_middle_proximal_joint": 0.0,
-            "L_middle_intermediate_joint": 0.0,
-            "L_pinky_proximal_joint":0.0,
-            "L_pinky_intermediate_joint":0.0,
-            "L_ring_proximal_joint":0.0,
-            "L_ring_intermediate_joint":0.0,
-            "L_thumb_proximal_yaw_joint":0.0,
-            "L_thumb_proximal_pitch_joint":0.0,
-            "L_thumb_intermediate_joint":0.0,
-            "L_thumb_distal_joint":0.0,
+                # fingers joints
+                "L_index_proximal_joint": 0.0,
+                "L_index_intermediate_joint": 0.0,
+                "L_middle_proximal_joint": 0.0,
+                "L_middle_intermediate_joint": 0.0,
+                "L_pinky_proximal_joint": 0.0,
+                "L_pinky_intermediate_joint": 0.0,
+                "L_ring_proximal_joint": 0.0,
+                "L_ring_intermediate_joint": 0.0,
+                "L_thumb_proximal_yaw_joint": 0.0,
+                "L_thumb_proximal_pitch_joint": 0.0,
+                "L_thumb_intermediate_joint": 0.0,
+                "L_thumb_distal_joint": 0.0,
 
-            "R_index_proximal_joint": 0.0,
-            "R_index_intermediate_joint": 0.0,
-            "R_middle_proximal_joint": 0.0,
-            "R_middle_intermediate_joint": 0.0,
-            "R_pinky_proximal_joint":0.0,
-            "R_pinky_intermediate_joint":0.0,
-            "R_ring_proximal_joint":0.0,
-            "R_ring_intermediate_joint":0.0,
-            "R_thumb_proximal_yaw_joint":0.0,
-            "R_thumb_proximal_pitch_joint":0.0,
-            "R_thumb_intermediate_joint":0.0,
-            "R_thumb_distal_joint":0.0,
+                "R_index_proximal_joint": 0.0,
+                "R_index_intermediate_joint": 0.0,
+                "R_middle_proximal_joint": 0.0,
+                "R_middle_intermediate_joint": 0.0,
+                "R_pinky_proximal_joint": 0.0,
+                "R_pinky_intermediate_joint": 0.0,
+                "R_ring_proximal_joint": 0.0,
+                "R_ring_intermediate_joint": 0.0,
+                "R_thumb_proximal_yaw_joint": 0.0,
+                "R_thumb_proximal_pitch_joint": 0.0,
+                "R_thumb_intermediate_joint": 0.0,
+                "R_thumb_distal_joint": 0.0,
             }
         else:
             raise ValueError(f"Unsupported hand type: {hand_type}. Supported: 'gripper', 'dex3'")
@@ -158,7 +159,7 @@ class G1RobotJointTemplates:
 @configclass
 class G129dofRobotBaseCfg:
     """G1 robot base configuration class
-    
+
     provide the flexible configuration for G1 robot, support:
     - with/without waist joint
     - simple gripper/dexterous hand
@@ -166,20 +167,20 @@ class G129dofRobotBaseCfg:
     - default joint position
     - scene-specific parameter customization
     """
-    
+
     @classmethod
     def get_base_config(
-        cls,
-        prim_path: str = "/World/envs/env_.*/Robot",
-        init_pos: Tuple[float, float, float] = (-0.15, 0.0, 0.793),
-        init_rot: Tuple[float, float, float, float] = (0.7071, 0, 0, 0.7071),
-        include_waist: bool = True,
-        hand_type: Literal["gripper", "dex3", "inspire"] = "gripper",
-        base_config = None,
-        custom_joint_pos: Optional[Dict[str, float]] = None,
-        is_have_hand: bool = True,
-        update_default_joint_pos: bool = True,
-        use_twist2_defaults: bool = False,
+            cls,
+            prim_path: str = "/World/envs/env_.*/Robot",
+            init_pos: Tuple[float, float, float] = (-0.15, 0.0, 0.793),
+            init_rot: Tuple[float, float, float, float] = (0.7071, 0, 0, 0.7071),
+            include_waist: bool = True,
+            hand_type: Literal["gripper", "dex3", "inspire"] = "gripper",
+            base_config=None,
+            custom_joint_pos: Optional[Dict[str, float]] = None,
+            is_have_hand: bool = True,
+            update_default_joint_pos: bool = True,
+            use_twist2_defaults: bool = False,
     ) -> ArticulationCfg:
         """get the base configuration for G1 robot
 
@@ -225,10 +226,10 @@ class G129dofRobotBaseCfg:
 
                 # Waist
                 default_joint_pos.update({
-                    "waist_yaw_joint": 0.0,
-                    "waist_roll_joint": 0.0,
-                    "waist_pitch_joint": 0.0,
-                } if include_waist else {})
+                                             "waist_yaw_joint": 0.0,
+                                             "waist_roll_joint": 0.0,
+                                             "waist_pitch_joint": 0.0,
+                                         } if include_waist else {})
 
                 # Arms (TWIST2 uses shoulder_roll=±0.4, elbow=1.2, others 0)
                 default_joint_pos.update({
@@ -299,8 +300,8 @@ class G1RobotPresets:
     # === pick-place task preset ===
 
     @classmethod
-    def g1_29dof_dex1_base_fix(cls,init_pos: Tuple[float, float, float] = (-0.15, 0.0, 0.76),
-        init_rot: Tuple[float, float, float, float] = (0.7071, 0, 0, 0.7071)) -> ArticulationCfg:
+    def g1_29dof_dex1_base_fix(cls, init_pos: Tuple[float, float, float] = (-0.15, 0.0, 0.76),
+                               init_rot: Tuple[float, float, float, float] = (0.7071, 0, 0, 0.7071)) -> ArticulationCfg:
         """pick-place task configuration - simple gripper"""
         return G129dofRobotBaseCfg.get_base_config(
             init_pos=init_pos,
@@ -310,8 +311,8 @@ class G1RobotPresets:
         )
 
     @classmethod
-    def g1_29dof_dex3_base_fix(cls,init_pos: Tuple[float, float, float] = (-0.15, 0.0, 0.76),
-        init_rot: Tuple[float, float, float, float] = (0.7071, 0, 0, 0.7071)) -> ArticulationCfg:
+    def g1_29dof_dex3_base_fix(cls, init_pos: Tuple[float, float, float] = (-0.15, 0.0, 0.76),
+                               init_rot: Tuple[float, float, float, float] = (0.7071, 0, 0, 0.7071)) -> ArticulationCfg:
         """pick-place task configuration - dex3 hand"""
         return G129dofRobotBaseCfg.get_base_config(
             init_pos=init_pos,
@@ -321,10 +322,10 @@ class G1RobotPresets:
             base_config=G129_CFG_WITH_DEX3_BASE_FIX
         )
 
-
     @classmethod
-    def g1_29dof_inspire_base_fix(cls,init_pos: Tuple[float, float, float] = (-0.15, 0.0, 0.76),
-        init_rot: Tuple[float, float, float, float] = (0.7071, 0, 0, 0.7071)) -> ArticulationCfg:
+    def g1_29dof_inspire_base_fix(cls, init_pos: Tuple[float, float, float] = (-0.15, 0.0, 0.76),
+                                  init_rot: Tuple[float, float, float, float] = (
+                                  0.7071, 0, 0, 0.7071)) -> ArticulationCfg:
         """pick-place task configuration - inspire hand"""
         return G129dofRobotBaseCfg.get_base_config(
             init_pos=init_pos,
@@ -333,9 +334,11 @@ class G1RobotPresets:
             hand_type="inspire",
             base_config=G129_CFG_WITH_INSPIRE_HAND
         )
+
     @classmethod
-    def g1_29dof_dex1_wholebody(cls,init_pos: Tuple[float, float, float] = (-0.15, 0.0, 0.793),
-        init_rot: Tuple[float, float, float, float] = (0.7071, 0, 0, 0.7071)) -> ArticulationCfg:
+    def g1_29dof_dex1_wholebody(cls, init_pos: Tuple[float, float, float] = (-0.15, 0.0, 0.793),
+                                init_rot: Tuple[float, float, float, float] = (
+                                0.7071, 0, 0, 0.7071)) -> ArticulationCfg:
         """pick-place task configuration - inspire hand"""
         return G129dofRobotBaseCfg.get_base_config(
             init_pos=init_pos,
@@ -346,9 +349,11 @@ class G1RobotPresets:
             update_default_joint_pos=True,
             use_twist2_defaults=True,
         )
+
     @classmethod
-    def g1_29dof_dex3_wholebody(cls,init_pos: Tuple[float, float, float] = (-0.15, 0.0, 0.793),
-        init_rot: Tuple[float, float, float, float] = (0.7071, 0, 0, 0.7071)) -> ArticulationCfg:
+    def g1_29dof_dex3_wholebody(cls, init_pos: Tuple[float, float, float] = (-0.15, 0.0, 0.793),
+                                init_rot: Tuple[float, float, float, float] = (
+                                0.7071, 0, 0, 0.7071)) -> ArticulationCfg:
         """pick-place task configuration - inspire hand"""
         return G129dofRobotBaseCfg.get_base_config(
             init_pos=init_pos,
@@ -359,9 +364,11 @@ class G1RobotPresets:
             update_default_joint_pos=True,
             use_twist2_defaults=True,
         )
+
     @classmethod
-    def g1_29dof_inspire_wholebody(cls,init_pos: Tuple[float, float, float] = (-0.15, 0.0, 0.793),
-        init_rot: Tuple[float, float, float, float] = (0.7071, 0, 0, 0.7071)) -> ArticulationCfg:
+    def g1_29dof_inspire_wholebody(cls, init_pos: Tuple[float, float, float] = (-0.15, 0.0, 0.793),
+                                   init_rot: Tuple[float, float, float, float] = (
+                                   0.7071, 0, 0, 0.7071)) -> ArticulationCfg:
         """pick-place task configuration - inspire hand"""
         return G129dofRobotBaseCfg.get_base_config(
             init_pos=init_pos,

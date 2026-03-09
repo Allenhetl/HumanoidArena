@@ -17,6 +17,9 @@ def create_action_provider(env,args):
             env=env,
             args_cli=args
         )
+    elif args.action_source == "sonic_wholebody":
+        from action_provider.action_provider_sonic import SonicActionProvider
+        return SonicActionProvider(env=env, args_cli=args)
     elif args.action_source == "openpi":
         return OpenPIActionProvider(
             env=env,

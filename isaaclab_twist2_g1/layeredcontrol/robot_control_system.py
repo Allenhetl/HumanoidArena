@@ -119,10 +119,12 @@ class RobotController:
         
         # 2. direct environment step
         env_start = perf_counter()
-        if self.config.replay_mode or self.config.use_rl_action_mode:
-            pass
-            # self.env.sim.render()
+        if self.config.replay_mode:
+            # Replay mode: only render, don't step physics
+            self.env.sim.render()
         else:
+            # Normal mode: always step environment
+            # For TWIST2, action_provider returns joint targets, env.step() applies them
             self.env.step(action)
         env_time = perf_counter() - env_start
         
