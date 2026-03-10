@@ -55,6 +55,64 @@ atexit.register(_cleanup_shared_memory)
 _camera_update_count = 0
 _camera_last_report_time = None
 
+def _add_recording_status_overlay(rgb_image, recording_display_state):
+    """Add recording status overlay to RGB image for VR display.
+
+    Args:
+        rgb_image: numpy array [H, W, 3] in range [0, 1] (float) or [0, 255] (uint8)
+        recording_display_state: str, display state ("idle", "recording", "saved", "discard")
+
+    Returns:
+        numpy array with recording status overlay
+    """
+    import cv2
+    import numpy as np
+
+    # Convert to uint8 if needed
+    if rgb_image.dtype == np.float32 or rgb_image.dtype == np.float64:
+        img = (rgb_image * 255).astype(np.uint8)
+    else:
+        img = rgb_image.copy()
+
+    # Define overlay parameters
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 1.0
+    thickness = 2
+    padding = 10
+    circle_radius = 15
+
+    # Determine status based on recording display state
+    if recording_display_state == "saved":
+        # Just saved - green dot
+        text = "SAVED"
+        color = (0, 255, 0)  # Green in BGR
+    elif recording_display_state == "discard":
+        # Just cancelled - red dot
+        text = "DISCARD"
+        color = (0, 0, 255)  # Red in BGR
+    elif recording_display_state == "recording":
+        # Currently recording - yellow dot
+        text = "RECORDING"
+        color = (0, 255, 255)  # Yellow in BGR (B=0, G=255, R=255)
+    else:  # idle
+        # Idle - green dot
+        text = "IDLE"
+        color = (0, 255, 0)  # Green in BGR
+
+    # Draw filled circle (status indicator)
+    circle_center = (padding + circle_radius, padding + circle_radius)
+    cv2.circle(img, circle_center, circle_radius, color, -1)
+
+    # Draw text next to circle
+    text_pos = (padding + circle_radius * 2 + 10, padding + circle_radius + 8)
+    cv2.putText(img, text, text_pos, font, font_scale, color, thickness, cv2.LINE_AA)
+
+    # Convert back to float if original was float
+    if rgb_image.dtype == np.float32 or rgb_image.dtype == np.float64:
+        img = img.astype(np.float32) / 255.0
+
+    return img
+
 def get_camera_image(
     env: ManagerBasedRLEnv,
 ) -> dict:
@@ -82,6 +140,40 @@ def get_camera_image(
         print(f"[CAMERA_STATE] 📸 Camera update frequency: {update_fps:.2f} Hz (count={_camera_update_count})")
         _camera_update_count = 0
         _camera_last_report_time = current_time
+
+    # Get recording status from action provider if available
+    recording_active = False
+    recording_command = "none"
+
+    # Debug: check if action_provider exists
+    if not hasattr(get_camera_image, '_debug_checked_provider'):
+        get_camera_image._debug_checked_provider = True
+        print(f"[CAMERA_STATE DEBUG] Checking action_provider availability:")
+        print(f"  - hasattr(env, 'action_provider'): {hasattr(env, 'action_provider')}")
+        if hasattr(env, 'action_provider'):
+            action_provider = env.action_provider
+            print(f"  - action_provider type: {type(action_provider)}")
+            print(f"  - hasattr(action_provider, 'is_recording_active'): {hasattr(action_provider, 'is_recording_active')}")
+            print(f"  - hasattr(action_provider, 'get_recording_command'): {hasattr(action_provider, 'get_recording_command')}")
+
+    if hasattr(env, 'action_provider'):
+        action_provider = env.action_provider
+        if hasattr(action_provider, 'is_recording_active'):
+            recording_active = action_provider.is_recording_active()
+        if hasattr(action_provider, 'get_recording_command'):
+            recording_command = action_provider.get_recording_command()
+
+        # Debug: print recording state every 100 frames
+        if not hasattr(get_camera_image, '_debug_counter'):
+            get_camera_image._debug_counter = 0
+        get_camera_image._debug_counter += 1
+        if get_camera_image._debug_counter % 100 == 0:
+            print(f"[CAMERA_STATE DEBUG] Recording state: active={recording_active}, command={recording_command}")
+    else:
+        # Debug: warn if action_provider not found
+        if not hasattr(get_camera_image, '_debug_warned_no_provider'):
+            get_camera_image._debug_warned_no_provider = True
+            print(f"[CAMERA_STATE WARNING] env.action_provider not found! Status indicator will always show IDLE.")
 
     # get the camera images and depth maps
     images = {}
@@ -195,6 +287,20 @@ def get_camera_image(
                 images["left"] = camera_image.cpu().numpy()
             elif i == 3:
                 images["right"] = camera_image.cpu().numpy()
+
+    # Add recording status overlay to head camera image (for VR display only)
+    # This does NOT affect the original image data stored in collect_recording_data
+    if "head" in images:
+        # Try to get recording display state from action provider
+        recording_display_state = "idle"  # Default
+        try:
+            # Access action provider through env if available
+            if hasattr(env, 'action_provider') and hasattr(env.action_provider, '_recording_display_state'):
+                recording_display_state = env.action_provider._recording_display_state
+        except Exception as e:
+            pass  # Silently fall back to default
+
+        images["head"] = _add_recording_status_overlay(images["head"], recording_display_state)
 
     # write the multi-image data (RGB + depth) to shared memory
     if images:

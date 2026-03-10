@@ -116,7 +116,13 @@ class StateMachine:
         self.previous_state = "idle"
         self.right_key_one_was_pressed = False
         self.left_key_one_was_pressed = False
+        self.left_key_two_was_pressed = False
         self.left_axis_click_was_pressed = False
+
+        # Recording control state
+        self.recording_active = False
+        self.recording_command = "none"  # "none", "start", "save", "cancel"
+        self.recording_command_frame_count = 0  # Counter to keep command visible for a few frames
         # Interpolation state
         self.is_interpolating = False
         self.interpolation_start_time = None
@@ -151,6 +157,7 @@ class StateMachine:
         # Get current button states
         right_key_current = controller_data.get('RightController', {}).get('key_one', False)
         left_key_current = controller_data.get('LeftController', {}).get('key_one', False)
+        left_key_two_current = controller_data.get('LeftController', {}).get('key_two', False)
 
         # Hand control - index_trig for close, grip for open
         right_index_trig_current = controller_data.get('RightController', {}).get('index_trig', False)
@@ -164,6 +171,7 @@ class StateMachine:
         # Detect button presses
         right_key_just_pressed = right_key_current and not self.right_key_one_was_pressed
         left_key_just_pressed = left_key_current and not self.left_key_one_was_pressed
+        left_key_two_just_pressed = left_key_two_current and not self.left_key_two_was_pressed
         left_axis_click_just_pressed = left_axis_click_current and not self.left_axis_click_was_pressed
 
         # Debug: print button states
@@ -171,17 +179,40 @@ class StateMachine:
             print(f"[DEBUG] Left key: {left_key_current}, Right key: {right_key_current}")
             print(f"[DEBUG] Left just pressed: {left_key_just_pressed}, Right just pressed: {right_key_just_pressed}")
 
-        # Handle left axis click - emergency stop
+        # Handle left axis click - recording cancel (when recording) or emergency stop (when not recording)
         if left_axis_click_just_pressed:
-            self._emergency_stop()
+            if self.recording_active:
+                # Cancel recording without saving
+                self.recording_active = False
+                self.recording_command = "cancel"
+                self.recording_command_frame_count = 0
+                print("❌ Recording cancelled (not saved)")
+            else:
+                # Emergency stop
+                self._emergency_stop()
 
         # Handle left key press - trigger Isaac Lab reset via Redis
         if left_key_just_pressed:
             print("🔄 Left key pressed - Triggering Isaac Lab reset...")
             self._trigger_isaac_reset()
 
+        # Handle left key_two press - toggle recording state
+        if left_key_two_just_pressed:
+            if not self.recording_active:
+                # Start recording
+                self.recording_active = True
+                self.recording_command = "start"
+                self.recording_command_frame_count = 0
+                print("🔴 Recording started")
+            else:
+                # Save and stop recording
+                self.recording_active = False
+                self.recording_command = "save"
+                self.recording_command_frame_count = 0
+                print("💾 Recording saved and stopped")
+
         # Handle right key press - cycle between idle, teleop, pause
-        elif right_key_just_pressed:
+        if right_key_just_pressed:
             if self.state == "idle":
                 self.state = "teleop"
             elif self.state == "teleop":
@@ -220,6 +251,7 @@ class StateMachine:
         # Update button state tracking
         self.right_key_one_was_pressed = right_key_current
         self.left_key_one_was_pressed = left_key_current
+        self.left_key_two_was_pressed = left_key_two_current
         self.left_axis_click_was_pressed = left_axis_click_current
 
     def _update_velocity_commands(self, controller_data):
@@ -674,7 +706,30 @@ class XRobotTeleopToRobot:
         # Default fallback
         return [0.0, 0.0]
 
-    def send_to_redis(self, mimic_obs, neck_data=None):
+    def _convert_smplx_to_serializable(self, smplx_data):
+        """Convert SMPLX data with numpy arrays to JSON-serializable format"""
+        if smplx_data is None:
+            return None
+
+        serializable_data = {}
+        for key, value in smplx_data.items():
+            if isinstance(value, (list, tuple)):
+                # Convert each element in the list/tuple
+                serializable_value = []
+                for item in value:
+                    if isinstance(item, np.ndarray):
+                        serializable_value.append(item.tolist())
+                    else:
+                        serializable_value.append(item)
+                serializable_data[key] = serializable_value
+            elif isinstance(value, np.ndarray):
+                serializable_data[key] = value.tolist()
+            else:
+                serializable_data[key] = value
+
+        return serializable_data
+
+    def send_to_redis(self, mimic_obs, neck_data=None, smplx_data=None, recording_active=False, recording_command="none"):
         """Send mimic observations to Redis"""
 
         if self.redis_client is not None and mimic_obs is not None:
@@ -692,6 +747,33 @@ class XRobotTeleopToRobot:
         # Send neck data to redis
         if neck_data is not None:
             self.redis_pipeline.set("action_neck_unitree_g1_with_hands", json.dumps(neck_data))
+
+        # Send human SMPLX data (before GMR retargeting) to redis
+        if smplx_data is not None:
+            serializable_smplx = self._convert_smplx_to_serializable(smplx_data)
+            self.redis_pipeline.set("human_smplx_data_unitree_g1_with_hands", json.dumps(serializable_smplx))
+
+        # Send human height information to redis
+        if hasattr(self.args, 'actual_human_height'):
+            human_info = {
+                'height': self.args.actual_human_height,
+                'neck_retarget_scale': self.args.neck_retarget_scale
+            }
+            self.redis_pipeline.set("human_info_unitree_g1_with_hands", json.dumps(human_info))
+
+        # Send recording control state to redis
+        recording_control_data = {
+            "active": recording_active,
+            "command": recording_command
+        }
+        self.redis_pipeline.set("recording_control_unitree_g1_with_hands", json.dumps(recording_control_data))
+
+        # Debug: print recording state every 100 frames
+        if not hasattr(self, '_send_counter'):
+            self._send_counter = 0
+        self._send_counter += 1
+        if self._send_counter % 100 == 0:
+            print(f"[SEND_TO_REDIS DEBUG] Recording state: active={recording_active}, command={recording_command}")
 
         # Send timestamp to redis
         t_action = int(time.time() * 1000) # current timestamp in ms
@@ -736,7 +818,7 @@ class XRobotTeleopToRobot:
                 if interp_obs is not None:
                     # During exit sequence, send default neck position [0, 0]
                     neck_data_to_send = self.determine_neck_data_to_send(None)
-                    self.send_to_redis(interp_obs, neck_data_to_send)
+                    self.send_to_redis(interp_obs, neck_data_to_send, smplx_data=None, recording_active=False)
                 viewer.sync()
                 self.rate.sleep()
 
@@ -818,7 +900,24 @@ class XRobotTeleopToRobot:
                 if neck_data_to_send is not None:
                     self.state_machine.set_current_neck_data(neck_data_to_send)
 
-                self.send_to_redis(mimic_obs_to_send, neck_data_to_send)
+                # Send data with recording state and command
+                self.send_to_redis(
+                    mimic_obs_to_send,
+                    neck_data_to_send,
+                    smplx_data,
+                    self.state_machine.recording_active,
+                    self.state_machine.recording_command
+                )
+
+                # Manage recording command visibility
+                # Keep "start", "save", "cancel" commands visible for 30 frames (~1 second at 30Hz)
+                if self.state_machine.recording_command in ["start", "save", "cancel"]:
+                    self.state_machine.recording_command_frame_count += 1
+                    if self.state_machine.recording_command_frame_count >= 30:
+                        self.state_machine.recording_command = "none"
+                        self.state_machine.recording_command_frame_count = 0
+                else:
+                    self.state_machine.recording_command_frame_count = 0
 
                 # Update visualization and record video
                 viewer.sync()

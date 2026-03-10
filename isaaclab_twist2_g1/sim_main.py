@@ -1,13 +1,14 @@
 import sys
 import coverage, coverage.types
+
 print("PY:", sys.executable)
 print("coverage:", coverage.__version__, coverage.__file__)
 print("has Tracer:", hasattr(coverage.types, "Tracer"))
 print("sys.path head:", sys.path[:8])
-#exit()
+# exit()
 # Copyright (c) 2025, Unitree Robotics Co., Ltd. All Rights Reserved.
 # License: Apache License, Version 2.0  
-#!/usr/bin/env python3
+# !/usr/bin/env python3
 # main.py
 import os
 
@@ -26,14 +27,15 @@ from pathlib import Path
 from isaaclab.app import AppLauncher
 
 from image_server.image_server import ImageServer
-from dds.dds_create import create_dds_objects,create_dds_objects_replay
+from dds.dds_create import create_dds_objects, create_dds_objects_replay
+
 # add command line arguments
 parser = argparse.ArgumentParser(description="Unitree Simulation")
 parser.add_argument("--task", type=str, default="Isaac-PickPlace-G129-Head-Waist-Fix", help="task name")
 parser.add_argument("--action_source", type=str, default="dds",
-                   choices=["dds", "file", "trajectory", "policy", "replay",
-                            "dds_wholebody", "sonic_wholebody"],
-                   help="Action source")
+                    choices=["dds", "file", "trajectory", "policy", "replay",
+                             "dds_wholebody", "sonic_wholebody"],
+                    help="Action source")
 
 # SONIC-specific arguments (used when action_source=sonic_wholebody)
 parser.add_argument("--sonic_zmq_host", type=str, default="localhost",
@@ -45,21 +47,21 @@ parser.add_argument("--sonic_encoder_path", type=str, default="",
 parser.add_argument("--sonic_decoder_path", type=str, default="",
                     help="Path to GEAR-SONIC decoder ONNX model")
 
-
 parser.add_argument("--robot_type", type=str, default="g129", help="robot type")
 parser.add_argument("--enable_dex1_dds", action="store_true", help="enable gripper DDS")
 parser.add_argument("--enable_dex3_dds", action="store_true", help="enable dexterous hand DDS")
 parser.add_argument("--enable_inspire_dds", action="store_true", help="enable inspire hand DDS")
 parser.add_argument("--stats_interval", type=float, default=10.0, help="statistics print interval (seconds)")
 
-parser.add_argument("--file_path", type=str, default="/home/unitree/newDisk/sim-data/Placewoodenblock", help="file path (when action_source=file)")
+parser.add_argument("--file_path", type=str, default="/home/unitree/newDisk/sim-data/Placewoodenblock",
+                    help="file path (when action_source=file)")
 parser.add_argument("--generate_data_dir", type=str, default="./data", help="save data dir")
 parser.add_argument("--generate_data", action="store_true", default=False, help="generate data")
 parser.add_argument("--rerun_log", action="store_true", default=False, help="rerun log")
-parser.add_argument("--replay_data",  action="store_true", default=False, help="replay data")
+parser.add_argument("--replay_data", action="store_true", default=False, help="replay data")
 
-parser.add_argument("--modify_light",  action="store_true", default=False, help="modify light")
-parser.add_argument("--modify_camera",  action="store_true", default=False,    help="modify camera")
+parser.add_argument("--modify_light", action="store_true", default=False, help="modify light")
+parser.add_argument("--modify_camera", action="store_true", default=False, help="modify camera")
 
 # image streaming parameters
 parser.add_argument(
@@ -99,34 +101,38 @@ parser.add_argument("--step_hz", type=int, default=500, help="control frequency"
 parser.add_argument("--enable_profiling", action="store_true", default=True, help="enable performance analysis")
 parser.add_argument("--profile_interval", type=int, default=500, help="performance analysis report interval (steps)")
 
-parser.add_argument("--model_path", type=str, default="/home/yixiao/Users/yixiao/temp/TWIST2/assets/ckpts/twist2_1017_20k.onnx", help="model path")
+parser.add_argument("--model_path", type=str,
+                    default="/home/dreams/Users/taowen/HumanoidArena/TWIST2/assets/ckpts/twist2_1017_20k.onnx",
+                    help="model path")
 parser.add_argument("--enable_wholebody_dds", action="store_true", default=False, help="enable wh dds")
 parser.add_argument("--setpgrp", action="store_true", default=False, help="detach to a new process group")
 
+# recording parameters
+parser.add_argument("--recording_save_dir", type=str, default="./recording_data",
+                    help="directory to save recording data")
 
 parser.add_argument("--gravity_z", type=float, default=-9.8, help="override gravity z (e.g., -9.8)")
 
 # world camera parameters
-parser.add_argument("--enable_world_camera", action="store_true", default=False, help="enable world camera (third-person view)")
+parser.add_argument("--enable_world_camera", action="store_true", default=False,
+                    help="enable world camera (third-person view)")
 parser.add_argument("--world_camera_port", type=int, default=5556, help="ZMQ port for world camera streaming")
 
 # add AppLauncher parameters
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
-
 if args_cli.enable_dex3_dds and args_cli.enable_dex1_dds and args_cli.enable_inspire_dds:
     print("Error: enable_dex3_dds and enable_dex1_dds and enable_inspire_dds cannot be enabled at the same time")
     print("Please select one of the options")
     sys.exit(1)
-
 
 # import pinocchio  # 注释掉：与 NumPy 2.x 不兼容，且当前未使用
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 from layeredcontrol.robot_control_system import (
-    RobotController, 
+    RobotController,
     ControlConfig,
 )
 
@@ -143,7 +149,8 @@ from tools.data_json_load import sim_state_to_json
 from dds.sim_state_dds import *
 from action_provider.create_action_provider import create_action_provider
 from tools.get_stiffness import get_robot_stiffness_from_env
-from tools.get_reward import get_step_reward_value,get_current_rewards
+from tools.get_reward import get_step_reward_value, get_current_rewards
+
 
 def setup_signal_handlers(controller, dds_manager=None, image_servers=None, simulation_app=None):
     """set signal handlers
@@ -155,6 +162,7 @@ def setup_signal_handlers(controller, dds_manager=None, image_servers=None, simu
         simulation_app: simulation app instance
     """
     _handling = {"in_progress": False}
+
     def signal_handler(signum, frame):
         print(f"\nreceived signal {signum}, stopping controller...")
         # Prevent running cleanup multiple times (Ctrl-C can be pressed repeatedly)
@@ -211,7 +219,6 @@ def setup_signal_handlers(controller, dds_manager=None, image_servers=None, simu
     signal.signal(signal.SIGTERM, signal_handler)
 
 
-
 def main():
     """main function"""
     import os
@@ -221,7 +228,7 @@ def main():
             os.setpgrp()
             current_pgid = os.getpgrp()
             print(f"Setting process group: {current_pgid}")
-        
+
             def cleanup_process_group():
                 try:
                     print(f"Cleaning up process group: {current_pgid}")
@@ -229,9 +236,9 @@ def main():
                     os.killpg(current_pgid, signal.SIGTERM)
                 except Exception as e:
                     print(f"Failed to clean up process group: {e}")
-        
+
             atexit.register(cleanup_process_group)
-        
+
     except Exception as e:
         print(f"Failed to set process group: {e}")
     print("=" * 60)
@@ -247,7 +254,7 @@ def main():
     except Exception as e:
         print(f"Failed to parse environment configuration: {e}")
         return
-    
+
     # create environment
     print("\ncreate environment...")
     try:
@@ -255,6 +262,59 @@ def main():
         print(f"\ncreate environment success ...")
         print("robot cfg init pos:", env.cfg.scene.robot.init_state.pos)
         print("robot usd:", env.cfg.scene.robot.spawn.usd_path)
+
+        # Set rendering mode via viewport API
+        try:
+            from omni.kit.viewport.utility import get_active_viewport
+            viewport = get_active_viewport()
+            if viewport:
+                # Switch to Real-Time mode (RaytracedLighting) - fastest RTX mode
+                viewport.set_hd_engine("rtx", "RaytracedLighting")
+                print("[RENDER] ✅ Switched to Real-Time (RaytracedLighting) mode via viewport API")
+                # === Other render modes (commented out for comparison) ===
+                # viewport.set_hd_engine("rtx", "PathTracing")        # Path Tracing (slower, higher quality)
+                # viewport.set_hd_engine("iray", "iray")              # iray (not available in Isaac Sim)
+
+                # Verify viewport settings
+                print(f"[RENDER] Viewport hydra_engine: {viewport.hydra_engine}")
+                print(f"[RENDER] Viewport render_mode: {viewport.render_mode}")
+
+                # Print current render settings
+                import carb
+                settings = carb.settings.get_settings()
+                print("\n" + "=" * 60)
+                print(" REAL-TIME RENDER PARAMETERS")
+                print("=" * 60)
+                print(f"  /rtx/rendermode: {settings.get('/rtx/rendermode')}")
+                print(f"  Antialiasing: DLAA (configured in env_cfg)")
+                print("=" * 60 + "\n")
+
+                # === Path Tracing code (commented out for comparison) ===
+                # viewport.set_hd_engine("rtx", "PathTracing")
+                # print("[RENDER] ✅ Switched to Path Tracing mode via viewport API")
+                # settings.set("/rtx/pathtracing/spp", 1)  # Samples per pixel per frame = 1
+                # settings.set("/rtx/pathtracing/totalSpp", 1)  # Total samples per pixel
+                # settings.set("/rtx/pathtracing/maxBounces", 4)  # Max light bounces
+                # pt_settings = [
+                #     "/rtx/rendermode",
+                #     "/rtx/pathtracing/spp",
+                #     "/rtx/pathtracing/totalSpp",
+                #     "/rtx/pathtracing/maxBounces",
+                #     "/rtx/pathtracing/maxSpecularAndTransmissionBounces",
+                #     "/rtx/pathtracing/maxVolumeBounces",
+                #     "/rtx/pathtracing/clampSpp",
+                #     "/rtx/pathtracing/optixDenoiser/enabled",
+                #     "/rtx/pathtracing/cached/enabled",
+                #     "/rtx/pathtracing/aa/op",
+                # ]
+                # for setting in pt_settings:
+                #     value = settings.get(setting)
+                #     print(f"  {setting}: {value}")
+                # === End Path Tracing code ===
+            else:
+                print("[RENDER] ⚠️ No active viewport found, cannot set render mode")
+        except Exception as e:
+            print(f"[RENDER] ⚠️ Failed to set render mode: {e}")
 
         # Optional: override gravity (IsaacLab/IsaacSim APIs differ across versions)
         if args_cli.gravity_z is not None:
@@ -288,12 +348,12 @@ def main():
     except Exception as e:
         print(f"\nFailed to create environment: {e}")
         return
-    
+
     # get robot stiffness and damping parameters from runtime environment
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("🔍 Getting robot stiffness and damping parameters from runtime environment")
-    print("="*60)
-    
+    print("=" * 60)
+
     try:
         stiffness_data = get_robot_stiffness_from_env(env)
         if stiffness_data:
@@ -302,9 +362,9 @@ def main():
             print("⚠️ Failed to get robot parameters, will try again after environment reset")
     except Exception as e:
         print(f"⚠️ Error getting robot parameters: {e}")
-    
-    print("="*60)
-    
+
+    print("=" * 60)
+
     print("\n")
     print("***  Please left-click on the Sim window to activate rendering. ***")
     print("\n")
@@ -343,7 +403,8 @@ def main():
         # Get mass (before modification)
         masses_before = box_obj.root_physx_view.get_masses()
         print(f"  Mass (original from USD): {masses_before[0] if len(masses_before) > 0 else 'N/A'} kg")
-        print(f"  Mass (from config): {box_obj.cfg.spawn.mass_props.mass if hasattr(box_obj.cfg.spawn, 'mass_props') and box_obj.cfg.spawn.mass_props else 'Not set in config'} kg")
+        print(
+            f"  Mass (from config): {box_obj.cfg.spawn.mass_props.mass if hasattr(box_obj.cfg.spawn, 'mass_props') and box_obj.cfg.spawn.mass_props else 'Not set in config'} kg")
 
         # Try to set mass using correct format
         print(f"\n  Attempting to set mass to 0.3 kg...")
@@ -389,7 +450,8 @@ def main():
         # Get mass
         masses = cube_obj.root_physx_view.get_masses()
         print(f"  Mass (from runtime): {masses[0] if len(masses) > 0 else 'N/A'} kg")
-        print(f"  Mass (from config): {cube_obj.cfg.spawn.mass_props.mass if hasattr(cube_obj.cfg.spawn, 'mass_props') else 'Not set'} kg")
+        print(
+            f"  Mass (from config): {cube_obj.cfg.spawn.mass_props.mass if hasattr(cube_obj.cfg.spawn, 'mass_props') else 'Not set'} kg")
 
         # Get friction from config
         print(f"\n  Gravity disabled: {cube_obj.cfg.spawn.rigid_props.disable_gravity}")
@@ -459,7 +521,6 @@ def main():
         print(f"⚠️ Failed to set viewport default camera: {e}")
         print(traceback.format_exc())
 
-
     # create simplified control configuration
     try:
         # sonic_wholebody 优先：不被 task 名中的 "Wholebody" 覆盖
@@ -478,7 +539,8 @@ def main():
             physics_dt = getattr(env, "physics_dt", None) or env_cfg.sim.dt
             policy_hz = int(round(1.0 / (physics_dt * env_cfg.decimation)))
             step_hz = policy_hz  # Use physics frequency instead of args_cli.step_hz
-            print(f"✅ TWIST2 Wholebody: step_hz set to {step_hz}Hz (physics_dt={physics_dt}s, decimation={env_cfg.decimation})")
+            print(
+                f"✅ TWIST2 Wholebody: step_hz set to {step_hz}Hz (physics_dt={physics_dt}s, decimation={env_cfg.decimation})")
         else:
             use_wholebody = False
             step_hz = args_cli.step_hz
@@ -491,7 +553,7 @@ def main():
     except Exception as e:
         print(f"Failed to create control configuration: {e}")
         return
-    
+
     # create controller
 
     if not args_cli.replay_data:
@@ -557,7 +619,7 @@ def main():
         print(f"========= created {len(image_servers)} image server(s) success =========")
         print("========= create dds =========")
         try:
-            reset_pose_dds,sim_state_dds,dds_manager = create_dds_objects(args_cli,env)
+            reset_pose_dds, sim_state_dds, dds_manager = create_dds_objects(args_cli, env)
         except Exception as e:
             print(f"Failed to create dds: {e}")
             return
@@ -565,14 +627,14 @@ def main():
     else:
         print("========= create dds =========")
         try:
-            create_dds_objects_replay(args_cli,env)
+            create_dds_objects_replay(args_cli, env)
         except Exception as e:
             print(f"Failed to create dds: {e}")
             return
         print("========= create dds success =========")
         from tools.data_json_load import get_data_json_list
         print("========= get data json list =========")
-        data_idx=0
+        data_idx = 0
         data_json_list = get_data_json_list(args_cli.file_path)
         if args_cli.action_source != "replay":
             args_cli.action_source = "replay"
@@ -590,13 +652,18 @@ def main():
     except Exception as e:
         print(f"Failed to create action provider: {e}")
         return
-    
+
     # set action provider
     print("========= create controller =========")
     controller = RobotController(env, control_config)
     controller.set_action_provider(action_provider)
+
+    # Also set action_provider on env for camera_state.py to access
+    env.action_provider = action_provider
+    print(f"[sim_main] Set action_provider on env: {type(action_provider)}")
+
     print("========= create controller success =========")
-    
+
     # configure performance analysis
     if args_cli.enable_profiling:
         controller.set_profiling(True, args_cli.profile_interval)
@@ -605,19 +672,19 @@ def main():
         controller.set_profiling(False)
         print("performance analysis disabled")
 
-
     # set signal handlers
     if not args_cli.replay_data:
         setup_signal_handlers(controller, dds_manager, image_servers, simulation_app)
     else:
         setup_signal_handlers(controller, None, None, simulation_app)
-    print("Note: The DDS in Sim transmits messages on channel 1. Please ensure that other DDS instances use the same channel for message exchange by setting: ChannelFactoryInitialize(1).")
+    print(
+        "Note: The DDS in Sim transmits messages on channel 1. Please ensure that other DDS instances use the same channel for message exchange by setting: ChannelFactoryInitialize(1).")
     try:
         # start controller - start asynchronous components
         print("========= start controller =========")
         controller.start()
         print("========= start controller success =========")
-        
+
         # main loop - execute in main thread to support rendering
         last_stats_time = time.time()
         loop_start_time = time.time()
@@ -777,9 +844,9 @@ def main():
                             f"moving average frequency: {moving_avg_frequency:.2f} Hz (last {len(recent_loop_times)} times)"
                         )
                         print(f"frequency range: {min_freq:.2f} - {max_freq:.2f} Hz")
-                        print(f"average loop time: {(elapsed_time/loop_count*1000):.2f} ms")
+                        print(f"average loop time: {(elapsed_time / loop_count * 1000):.2f} ms")
                         if recent_loop_times:
-                            print(f"recent loop time: {(avg_loop_time*1000):.2f} ms")
+                            print(f"recent loop time: {(avg_loop_time * 1000):.2f} ms")
                         print(f"=============================")
 
                         # print_stats(controller)
@@ -792,15 +859,15 @@ def main():
                     # rate_limiter.sleep(env)
         except KeyboardInterrupt:
             print("\nuser interrupted program")
-    
+
     except Exception as e:
         print(f"\nprogram exception: {e}")
-    
+
     finally:
         # clean up resources
         print("\nclean up resources...")
         controller.cleanup()
-        
+
         env.close()
         print("cleanup completed")
 
@@ -810,24 +877,24 @@ if __name__ == "__main__":
         main()
     finally:
         print("Performing final cleanup...")
-        
+
         # Get current process information
         import os
         import subprocess
         import signal
         import time
-        
+
         current_pid = os.getpid()
         print(f"Current main process PID: {current_pid}")
-        
+
         try:
             # Find all related Python processes
-            result = subprocess.run(['pgrep', '-f', 'sim_main.py'], 
-                                  capture_output=True, text=True)
+            result = subprocess.run(['pgrep', '-f', 'sim_main.py'],
+                                    capture_output=True, text=True)
             if result.returncode == 0:
                 pids = result.stdout.strip().split('\n')
                 print(f"Found related processes: {pids}")
-                
+
                 for pid in pids:
                     if pid and pid != str(current_pid):
                         try:
@@ -837,13 +904,13 @@ if __name__ == "__main__":
                             print(f"Process {pid} does not exist")
                         except Exception as e:
                             print(f"Failed to terminate process {pid}: {e}")
-                
+
                 # Wait for processes to exit
                 time.sleep(2)
-                
+
                 # Check if there are any remaining processes, force kill them
-                result2 = subprocess.run(['pgrep', '-f', 'sim_main.py'], 
-                                       capture_output=True, text=True)
+                result2 = subprocess.run(['pgrep', '-f', 'sim_main.py'],
+                                         capture_output=True, text=True)
                 if result2.returncode == 0:
                     remaining_pids = result2.stdout.strip().split('\n')
                     for pid in remaining_pids:
@@ -853,17 +920,17 @@ if __name__ == "__main__":
                                 os.kill(int(pid), signal.SIGKILL)
                             except Exception as e:
                                 print(f"Failed to force kill process {pid}: {e}")
-                                
+
         except Exception as e:
             print(f"Error during process cleanup: {e}")
-        
+
         try:
             simulation_app.close()
         except Exception as e:
             print(f"Failed to close simulation application: {e}")
-            
+
         print("Program exit completed")
-        
+
         # Force exit
         os._exit(0)
 
@@ -881,8 +948,6 @@ if __name__ == "__main__":
 # python sim_main.py --device cpu  --enable_cameras  --task Isaac-Stack-RgyBlock-G129-Inspire-Joint     --enable_inspire_dds --robot_type g129
 
 
-
-
-# python sim_main.py --device cpu  --enable_cameras  --task Isaac-Move-Cylinder-G129-Dex1-Wholebody  --robot_type g129 --enable_dex1_dds 
+# python sim_main.py --device cpu  --enable_cameras  --task Isaac-Move-Cylinder-G129-Dex1-Wholebody  --robot_type g129 --enable_dex1_dds
 # python sim_main.py --device cpu  --enable_cameras  --task Isaac-Move-Cylinder-G129-Dex3-Wholebody  --robot_type g129 --enable_dex3_dds 
 # python sim_main.py --device cpu  --enable_cameras  --task Isaac-Move-Cylinder-G129-Inspire-Wholebody  --robot_type g129 --enable_inspire_dds 

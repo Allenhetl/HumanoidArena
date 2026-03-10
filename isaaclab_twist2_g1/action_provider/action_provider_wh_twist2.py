@@ -14,8 +14,379 @@ import time
 import threading
 from isaaclab.utils.buffers import CircularBuffer, DelayBuffer
 import ast
+import queue
+import copy
+import numpy as np
 
 project_root = os.environ.get("PROJECT_ROOT")
+
+
+class RecordingManager:
+    """Manages recording data collection and asynchronous saving to disk.
+
+    This class handles:
+    - Recording state management (start/save/cancel)
+    - Data buffering during recording
+    - Asynchronous saving to disk using a background thread
+    - File naming with timestamps
+    """
+
+    def __init__(self, save_dir: str, task_name: str, max_frames: int = 10000):
+        """Initialize the recording manager.
+
+        Args:
+            save_dir: Directory to save recording files
+            task_name: Name of the task (used in filename)
+            max_frames: Maximum number of frames to record (default: 10000, ~5min @ 30Hz)
+        """
+        self.save_dir = save_dir
+        self.task_name = task_name
+        self.max_frames = max_frames
+
+        # Create save directory if it doesn't exist
+        os.makedirs(save_dir, exist_ok=True)
+
+        # Recording state
+        self.is_recording = False
+        self.recording_buffer = []
+        self.frame_count = 0
+
+        # Async save queue and thread
+        self.save_queue = queue.Queue(maxsize=10)  # Limit queue size to prevent memory overflow
+        self.save_thread = None
+        self.thread_running = False
+
+        # Start the save worker thread
+        self._start_save_worker()
+
+        print(f"[RecordingManager] Initialized with save_dir={save_dir}, task={task_name}")
+
+    def _start_save_worker(self):
+        """Start the background save worker thread."""
+        self.thread_running = True
+        self.save_thread = threading.Thread(target=self._save_worker, daemon=False)
+        self.save_thread.start()
+        print(f"[RecordingManager] Save worker thread started")
+
+    def _save_worker(self):
+        """Background worker thread that saves data to disk."""
+        while self.thread_running:
+            try:
+                # Wait for save task with timeout to allow checking thread_running
+                task = self.save_queue.get(timeout=1.0)
+
+                if task is None:  # Poison pill to stop thread
+                    break
+
+                # Unpack task
+                data_buffer, timestamp_us = task
+
+                # Save to disk
+                self._save_to_disk(data_buffer, timestamp_us)
+
+                # Mark task as done
+                self.save_queue.task_done()
+
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"[RecordingManager] Error in save worker: {e}")
+                import traceback
+                traceback.print_exc()
+
+    def _save_to_disk(self, data_buffer: list, timestamp_us: int):
+        """Save recording data to disk.
+
+        Args:
+            data_buffer: List of recording data dictionaries
+            timestamp_us: Timestamp in microseconds for filename
+        """
+        try:
+            # Generate filename with timestamp
+            filename = f"{self.task_name}_{timestamp_us}.npz"
+            # Note: np.savez_compressed automatically adds .npz extension, so use base name for temp
+            temp_basename = f"{self.task_name}_{timestamp_us}_temp"
+            filepath = os.path.join(self.save_dir, filename)
+            temp_filepath = os.path.join(self.save_dir, temp_basename)  # Will become temp_basename.npz
+
+            print(f"[RecordingManager] 💾 Saving {len(data_buffer)} frames to {filename}...")
+
+            save_start = time.time()
+
+            # Organize data for npz format
+            # Convert list of dicts to dict of lists
+            print(f"[RecordingManager] Organizing data...")
+            organized_data = self._organize_data_for_save(data_buffer)
+
+            # Save to temporary file first
+            # np.savez_compressed will automatically add .npz extension
+            print(f"[RecordingManager] Writing to temporary file: {temp_basename}.npz")
+            try:
+                np.savez_compressed(temp_filepath, **organized_data)
+                print(f"[RecordingManager] Temporary file written successfully")
+            except Exception as e:
+                print(f"[RecordingManager] ❌ Failed to write npz file: {e}")
+                import traceback
+                traceback.print_exc()
+                raise
+
+            # The actual temp file will have .npz extension
+            actual_temp_filepath = temp_filepath + ".npz"
+
+            # Check if temp file exists
+            if not os.path.exists(actual_temp_filepath):
+                raise FileNotFoundError(f"Temporary file was not created: {actual_temp_filepath}")
+
+            # Rename to final filename (atomic operation)
+            print(f"[RecordingManager] Renaming to final file: {filename}")
+            os.rename(actual_temp_filepath, filepath)
+
+            save_time = time.time() - save_start
+            file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
+
+            print(f"[RecordingManager] ✅ Saved successfully!")
+            print(f"  - File: {filename}")
+            print(f"  - Frames: {len(data_buffer)}")
+            print(f"  - Size: {file_size_mb:.2f} MB")
+            print(f"  - Time: {save_time:.2f}s")
+
+        except Exception as e:
+            print(f"[RecordingManager] ❌ Failed to save recording: {e}")
+            import traceback
+            traceback.print_exc()
+
+            # Clean up temp file if it exists
+            actual_temp_filepath = temp_filepath + ".npz"
+            if os.path.exists(actual_temp_filepath):
+                try:
+                    os.remove(actual_temp_filepath)
+                    print(f"[RecordingManager] Cleaned up temporary file")
+                except:
+                    pass
+
+    def _organize_data_for_save(self, data_buffer: list) -> dict:
+        """Organize list of frame data into arrays for npz format.
+
+        Args:
+            data_buffer: List of recording data dictionaries (one per frame)
+
+        Returns:
+            Dictionary with organized arrays suitable for np.savez
+        """
+        num_frames = len(data_buffer)
+        print(f"[RecordingManager] Organizing {num_frames} frames...")
+
+        # Validate first frame structure
+        if num_frames == 0:
+            raise ValueError("Data buffer is empty")
+
+        first_frame = data_buffer[0]
+        print(f"[RecordingManager] First frame keys: {first_frame.keys()}")
+        print(f"[RecordingManager] Task: {first_frame.get('task', 'N/A')}")
+
+        # Initialize storage
+        organized = {
+            'task': data_buffer[0]['task'],  # Task name (scalar)
+            'num_frames': num_frames,
+
+            # Human data
+            'human_hand_left': np.zeros((num_frames, 7), dtype=np.float32),
+            'human_hand_right': np.zeros((num_frames, 7), dtype=np.float32),
+            'human_neck': np.zeros((num_frames, 2), dtype=np.float32),
+
+            # Robot data
+            'robot_qpos_before_decimation': np.zeros((num_frames, 29), dtype=np.float32),
+            'robot_qvel_before_decimation': np.zeros((num_frames, 29), dtype=np.float32),
+            'robot_root_lin_vel_local': np.zeros((num_frames, 3), dtype=np.float32),
+            'robot_root_position': np.zeros((num_frames, 3), dtype=np.float32),
+            'robot_root_orientation': np.zeros((num_frames, 4), dtype=np.float32),
+            'robot_twist2_inference_qpos': np.zeros((num_frames, 29), dtype=np.float32),
+            'robot_obs_buf': np.zeros((num_frames, 1432), dtype=np.float32),  # 127*11+35 = 1432
+
+            # System data
+            'system_control_frequency': np.zeros(num_frames, dtype=np.float32),
+            'system_decimation': np.zeros(num_frames, dtype=np.int32),
+            'system_physics_dt': np.zeros(num_frames, dtype=np.float32),
+            'system_timestamp': np.zeros(num_frames, dtype=np.float64),
+        }
+
+        # Store observation semantics (same for all frames, store once)
+        organized['observation_semantics'] = json.dumps(data_buffer[0]['robot']['observation']['semantics'])
+
+        # Lists for variable-size data
+        human_smplx_list = []
+        human_info_list = []
+        env_obj_football_pos = []
+        env_obj_football_lin_vel = []
+        env_obj_football_ang_vel = []
+
+        # Collect vision data (store first and last frame only to save space)
+        vision_indices = [0, num_frames - 1] if num_frames > 1 else [0]
+        vision_rgb_list = []
+        vision_depth_list = []
+        vision_frame_indices = []
+
+        # Fill arrays frame by frame
+        for i, frame_data in enumerate(data_buffer):
+            # Human data
+            organized['human_hand_left'][i] = frame_data['human']['hand_control']['left']
+            organized['human_hand_right'][i] = frame_data['human']['hand_control']['right']
+            organized['human_neck'][i] = frame_data['human']['hand_control']['neck']
+
+            # Store SMPLX data (variable size, store as list)
+            human_smplx_list.append(frame_data['human']['smplx_data_before_gmr'])
+            human_info_list.append(frame_data['human']['human_info'])
+
+            # Environment objects
+            if frame_data['env_obj']['football'] is not None:
+                env_obj_football_pos.append(frame_data['env_obj']['football']['position'])
+                env_obj_football_lin_vel.append(frame_data['env_obj']['football']['linear_velocity'])
+                env_obj_football_ang_vel.append(frame_data['env_obj']['football']['angular_velocity'])
+            else:
+                env_obj_football_pos.append(np.zeros(3, dtype=np.float32))
+                env_obj_football_lin_vel.append(np.zeros(3, dtype=np.float32))
+                env_obj_football_ang_vel.append(np.zeros(3, dtype=np.float32))
+
+            # Robot data
+            organized['robot_qpos_before_decimation'][i] = frame_data['robot']['qpos_before_decimation']
+            organized['robot_qvel_before_decimation'][i] = frame_data['robot']['qvel_before_decimation']
+            organized['robot_root_lin_vel_local'][i] = frame_data['robot']['root_lin_vel_local']
+            organized['robot_root_position'][i] = frame_data['robot']['root_position']
+            organized['robot_root_orientation'][i] = frame_data['robot']['root_orientation']
+            organized['robot_twist2_inference_qpos'][i] = frame_data['robot']['twist2_inference_qpos']
+            organized['robot_obs_buf'][i] = frame_data['robot']['observation']['obs_buf']
+
+            # Vision data (only store selected frames)
+            if i in vision_indices:
+                rgb = frame_data['robot']['vision']['rgb']
+                depth = frame_data['robot']['vision']['depth']
+                if rgb is not None and depth is not None:
+                    vision_rgb_list.append(rgb)
+                    vision_depth_list.append(depth)
+                    vision_frame_indices.append(i)
+
+            # System data
+            organized['system_control_frequency'][i] = frame_data['system']['control_frequency']
+            organized['system_decimation'][i] = frame_data['system']['decimation']
+            organized['system_physics_dt'][i] = frame_data['system']['physics_dt']
+            organized['system_timestamp'][i] = frame_data['system']['timestamp']
+
+        # Add variable-size data
+        organized['human_smplx_data'] = json.dumps(human_smplx_list)
+        organized['human_info_data'] = json.dumps(human_info_list)
+        organized['env_obj_football_position'] = np.array(env_obj_football_pos, dtype=np.float32)
+        organized['env_obj_football_linear_velocity'] = np.array(env_obj_football_lin_vel, dtype=np.float32)
+        organized['env_obj_football_angular_velocity'] = np.array(env_obj_football_ang_vel, dtype=np.float32)
+
+        # Add vision data
+        if vision_rgb_list:
+            organized['vision_rgb'] = np.array(vision_rgb_list)
+            organized['vision_depth'] = np.array(vision_depth_list)
+            organized['vision_frame_indices'] = np.array(vision_frame_indices, dtype=np.int32)
+
+        return organized
+
+    def start_recording(self):
+        """Start a new recording session."""
+        if self.is_recording:
+            print(f"[RecordingManager] ⚠️ Already recording, ignoring start command")
+            return
+
+        self.is_recording = True
+        self.recording_buffer = []
+        self.frame_count = 0
+        print(f"[RecordingManager] 🔴 Recording started")
+
+    def add_frame(self, frame_data: dict):
+        """Add a frame to the recording buffer.
+
+        Args:
+            frame_data: Dictionary containing all recording data for this frame
+        """
+        if not self.is_recording:
+            return
+
+        # Check frame limit
+        if self.frame_count >= self.max_frames:
+            print(f"[RecordingManager] ⚠️ Max frames ({self.max_frames}) reached, stopping recording")
+            self.save_recording()
+            return
+
+        # Deep copy to avoid data corruption from subsequent modifications
+        frame_copy = copy.deepcopy(frame_data)
+        self.recording_buffer.append(frame_copy)
+        self.frame_count += 1
+
+    def save_recording(self):
+        """Save the current recording and stop recording."""
+        if not self.is_recording:
+            print(f"[RecordingManager] ⚠️ Not recording, nothing to save")
+            return
+
+        if len(self.recording_buffer) == 0:
+            print(f"[RecordingManager] ⚠️ Recording buffer is empty, nothing to save")
+            self.is_recording = False
+            return
+
+        # Stop recording
+        self.is_recording = False
+
+        # Generate timestamp (microseconds for uniqueness)
+        timestamp_us = int(time.time() * 1_000_000)
+
+        # Check queue size
+        if self.save_queue.full():
+            print(f"[RecordingManager] ⚠️ Save queue is full, waiting for previous saves to complete...")
+
+        # Queue the save task (this will block if queue is full)
+        print(f"[RecordingManager] 📦 Queuing {len(self.recording_buffer)} frames for save...")
+        self.save_queue.put((self.recording_buffer, timestamp_us))
+
+        # Clear buffer
+        self.recording_buffer = []
+        self.frame_count = 0
+
+        print(f"[RecordingManager] 💾 Recording queued for save (timestamp: {timestamp_us})")
+
+    def cancel_recording(self):
+        """Cancel the current recording without saving."""
+        if not self.is_recording:
+            print(f"[RecordingManager] ⚠️ Not recording, nothing to cancel")
+            return
+
+        self.is_recording = False
+        frame_count = len(self.recording_buffer)
+        self.recording_buffer = []
+        self.frame_count = 0
+
+        print(f"[RecordingManager] ❌ Recording cancelled ({frame_count} frames discarded)")
+
+    def shutdown(self):
+        """Shutdown the recording manager and wait for pending saves."""
+        print(f"[RecordingManager] Shutting down...")
+
+        # Stop recording if active
+        if self.is_recording:
+            print(f"[RecordingManager] Recording in progress, cancelling...")
+            self.cancel_recording()
+
+        # Wait for queue to empty
+        if not self.save_queue.empty():
+            print(f"[RecordingManager] Waiting for {self.save_queue.qsize()} pending saves...")
+            self.save_queue.join()
+
+        # Stop worker thread
+        self.thread_running = False
+        self.save_queue.put(None)  # Poison pill
+
+        if self.save_thread and self.save_thread.is_alive():
+            self.save_thread.join(timeout=10.0)
+            if self.save_thread.is_alive():
+                print(f"[RecordingManager] ⚠️ Save thread did not stop gracefully")
+            else:
+                print(f"[RecordingManager] Save thread stopped")
+
+        print(f"[RecordingManager] Shutdown complete")
 
 
 class DDSRLActionProvider(ActionProvider):
@@ -32,6 +403,15 @@ class DDSRLActionProvider(ActionProvider):
         if not os.path.exists(self.policy_path):
             raise FileNotFoundError(f"[{self.name}] Policy file not found: {self.policy_path}")
         self.env = env
+        self.task_name = args_cli.task  # Store task name for recording
+
+        # Initialize RecordingManager
+        self.recording_manager = RecordingManager(
+            save_dir=args_cli.recording_save_dir,
+            task_name=args_cli.task,
+            max_frames=10000  # ~5 minutes @ 30Hz
+        )
+
         # Initialize DDS communication
         self.robot_dds = None
         self.gripper_dds = None
@@ -54,7 +434,7 @@ class DDSRLActionProvider(ActionProvider):
         self.n_mimic_obs = 35
         self.n_obs_single = 127  # 35 + 92
         self.history_len = 10
-        self.total_obs_size = self.n_obs_single * (self.history_len + 1) + self.n_mimic_obs  # 1402
+        self.total_obs_size = self.n_obs_single * (self.history_len + 1) + self.n_mimic_obs  # 127*11+35 = 1432
 
         # Buffers
         self._twist2_history = torch.zeros(self.history_len, self.n_obs_single, device=self.env.device,
@@ -73,6 +453,28 @@ class DDSRLActionProvider(ActionProvider):
         # SMPLX data storage
         self._twist2_smplx_data = None
         self._twist2_smplx_valid = False
+
+        # Human SMPLX data (before GMR retargeting) storage
+        self._twist2_human_smplx_data = None
+        self._twist2_human_smplx_valid = False
+
+        # Human info (height, etc.) storage
+        self._twist2_human_info = None
+        self._twist2_human_info_valid = False
+
+        # Recording control state
+        self._recording_active = False
+        self._recording_command = "none"  # "none", "start", "save", "cancel"
+
+        # Display state for overlay (persists for a few frames after command)
+        self._recording_display_state = "idle"  # "idle", "recording", "saved", "discard"
+        self._recording_display_counter = 0  # Counter for how long to show saved/discard
+        self._recording_display_duration = 10  # Show saved/discard for 60 frames (~2 seconds @ 30Hz)
+
+        # Debug control
+        self._debug_smpl_data = False  # Set to True to enable SMPL data debug output
+        self._debug_counter = 0
+        self._debug_interval = 100  # Print debug info every N steps
 
         # Default 35D mimic_obs when no Redis data available (prevents falling)
         # Structure: [xy_vel(2), z_pos(1), roll_pitch(2), yaw_vel(1), joints(29)] = 35D
@@ -427,22 +829,23 @@ class DDSRLActionProvider(ActionProvider):
 
         # Render control: only render when camera needs update
         self._render_counter = 0
-        self._render_interval = 3  # Render every 3 control steps (30Hz camera for 100Hz control)
+        self._render_interval = 1  # Render every 3 control steps (30Hz camera for 100Hz control)
 
         # Observation update control: reduce observation computation frequency
         self._obs_counter = 0
-        self._obs_interval = 3  # Update observations every 3 steps (30Hz camera updates)
+        self._obs_interval = 1  # Update observations every 3 steps (30Hz camera updates)
 
         # Performance profiling
         self._perf_stats = {
+            'redis_fetch': [],
             'policy_inference': [],
             'action_preparation': [],
+            'recording_data_collection': [],
             'physics_step': [],
             'scene_update': [],
+            'render_time': [],
             'observation_compute': [],
-            'total_get_action': [],
-            'redis_fetch': [],
-            'render_time': []
+            'total_get_action': []
         }
         self._perf_report_interval = 100  # Report every 100 steps
 
@@ -510,6 +913,8 @@ class DDSRLActionProvider(ActionProvider):
             # print("[XY_DEBUG] ⚠️ Redis pipeline is None!")
             self._twist2_hand_valid = False
             self._twist2_smplx_valid = False
+            self._twist2_human_smplx_valid = False
+            self._twist2_human_info_valid = False
             # Return default 35D mimic_obs to maintain stable standing pose
             return self._default_mimic_obs.clone()
         try:
@@ -519,6 +924,9 @@ class DDSRLActionProvider(ActionProvider):
                 "action_hand_right_unitree_g1_with_hands",
                 "action_neck_unitree_g1_with_hands",
                 "smplx_data_unitree_g1_with_hands",
+                "human_smplx_data_unitree_g1_with_hands",
+                "human_info_unitree_g1_with_hands",
+                "recording_control_unitree_g1_with_hands",
             ]
             for key in keys:
                 self.redis_pipeline.get(key)
@@ -535,6 +943,9 @@ class DDSRLActionProvider(ActionProvider):
             action_right_raw = res[2] if len(res) > 2 else None
             action_neck_raw = res[3] if len(res) > 3 else None
             smplx_data_raw = res[4] if len(res) > 4 else None
+            human_smplx_data_raw = res[5] if len(res) > 5 else None
+            human_info_raw = res[6] if len(res) > 6 else None
+            recording_control_raw = res[7] if len(res) > 7 else None
 
             action_body = self._twist2_parse_list(action_body_raw, self.n_mimic_obs)
             action_left = self._twist2_parse_list(action_left_raw, self._twist2_hand_dim)
@@ -598,6 +1009,65 @@ class DDSRLActionProvider(ActionProvider):
                 self._twist2_smplx_data = None
                 self._twist2_smplx_valid = False
 
+            # Parse human SMPLX data (before GMR retargeting)
+            if human_smplx_data_raw is not None:
+                try:
+                    if isinstance(human_smplx_data_raw, (bytes, bytearray)):
+                        human_smplx_data_raw = human_smplx_data_raw.decode("utf-8")
+                    self._twist2_human_smplx_data = json.loads(human_smplx_data_raw)
+                    self._twist2_human_smplx_valid = True
+                except Exception as e:
+                    # print(f"[{self.name}] Failed to parse human SMPLX data: {e}")
+                    self._twist2_human_smplx_data = None
+                    self._twist2_human_smplx_valid = False
+            else:
+                self._twist2_human_smplx_data = None
+                self._twist2_human_smplx_valid = False
+
+            # Parse human info (height, etc.)
+            if human_info_raw is not None:
+                try:
+                    if isinstance(human_info_raw, (bytes, bytearray)):
+                        human_info_raw = human_info_raw.decode("utf-8")
+                    self._twist2_human_info = json.loads(human_info_raw)
+                    self._twist2_human_info_valid = True
+                except Exception as e:
+                    # print(f"[{self.name}] Failed to parse human info: {e}")
+                    self._twist2_human_info = None
+                    self._twist2_human_info_valid = False
+            else:
+                self._twist2_human_info = None
+                self._twist2_human_info_valid = False
+
+            # Parse recording control state
+            if recording_control_raw is not None:
+                try:
+                    if isinstance(recording_control_raw, (bytes, bytearray)):
+                        recording_control_raw = recording_control_raw.decode("utf-8")
+                    recording_control = json.loads(recording_control_raw)
+                    new_recording_state = recording_control.get("active", False)
+                    new_recording_command = recording_control.get("command", "none")
+
+                    # Debug: print when state changes
+                    if new_recording_state != self._recording_active or new_recording_command != self._recording_command:
+                        print(f"[{self.name}] 🔄 Recording state changed: active={new_recording_state}, command={new_recording_command}")
+
+                    # Update state
+                    self._recording_active = new_recording_state
+                    self._recording_command = new_recording_command
+
+                    # Print status based on command
+                    if new_recording_command == "start":
+                        print(f"[{self.name}] 🔴 Recording started")
+                    elif new_recording_command == "save":
+                        print(f"[{self.name}] 💾 Recording saved and stopped")
+                    elif new_recording_command == "cancel":
+                        print(f"[{self.name}] ❌ Recording cancelled (not saved)")
+
+                except Exception as e:
+                    print(f"[{self.name}] Failed to parse recording control: {e}")
+                    pass
+
             self._twist2_hand_valid = action_left_raw is not None and action_right_raw is not None
             self._twist2_action_hand_left.copy_(
                 torch.tensor(action_left, device=self.env.device, dtype=torch.float32).unsqueeze(0))
@@ -616,6 +1086,8 @@ class DDSRLActionProvider(ActionProvider):
             # print(f"[{self.name}] Redis action fetch failed: {e}")
             self._twist2_hand_valid = False
             self._twist2_smplx_valid = False
+            self._twist2_human_smplx_valid = False
+            self._twist2_human_info_valid = False
             # Return default 35D mimic_obs on error to maintain stable standing pose
             return self._default_mimic_obs.clone()
 
@@ -649,6 +1121,59 @@ class DDSRLActionProvider(ActionProvider):
             bool: True if SMPLX data is available and valid, False otherwise.
         """
         return self._twist2_smplx_valid
+
+    def get_human_smplx_data(self):
+        """Get the most recent human SMPLX data (before GMR retargeting) from Redis.
+
+        Returns:
+            dict or None: Human SMPLX data dictionary if available and valid, None otherwise.
+        """
+        if self._twist2_human_smplx_valid:
+            return self._twist2_human_smplx_data
+        return None
+
+    def is_human_smplx_data_valid(self):
+        """Check if human SMPLX data is valid and available.
+
+        Returns:
+            bool: True if human SMPLX data is available and valid, False otherwise.
+        """
+        return self._twist2_human_smplx_valid
+
+    def get_human_info(self):
+        """Get the human information (height, etc.) from Redis.
+
+        Returns:
+            dict or None: Human info dictionary if available and valid, None otherwise.
+                         Expected keys: 'height', 'neck_retarget_scale'
+        """
+        if self._twist2_human_info_valid:
+            return self._twist2_human_info
+        return None
+
+    def is_human_info_valid(self):
+        """Check if human info is valid and available.
+
+        Returns:
+            bool: True if human info is available and valid, False otherwise.
+        """
+        return self._twist2_human_info_valid
+
+    def is_recording_active(self):
+        """Check if recording is currently active.
+
+        Returns:
+            bool: True if recording is active, False otherwise.
+        """
+        return self._recording_active
+
+    def get_recording_command(self):
+        """Get the current recording command.
+
+        Returns:
+            str: Recording command - "none", "start", "save", or "cancel"
+        """
+        return self._recording_command
 
     def _twist2_roll_pitch_from_quaternion(self, quat: torch.Tensor) -> torch.Tensor:
         """Compute (roll, pitch) from quaternion (w, x, y, z)."""
@@ -769,16 +1294,33 @@ class DDSRLActionProvider(ActionProvider):
         # Update last_action (TWIST2)
         if isinstance(action, torch.Tensor) and action.shape[-1] == 29:
             self._twist2_last_action.copy_(action.to(self.env.device, dtype=torch.float32))
-        return action
+        return action, obs  # Return both action and observation
 
     def get_action(self, env) -> Optional[torch.Tensor]:
         """Get action from DDS"""
         import time
         total_start = time.perf_counter()
 
+        # Debug SMPL data every 100 steps
+        if hasattr(self, 'sim_step_counter') and self.sim_step_counter % 100 == 0:
+            print(f"\n[SMPL DEBUG] Step {self.sim_step_counter}")
+            if self._twist2_human_smplx_valid:
+                print(f"  Human SMPLX data valid: True")
+                if isinstance(self._twist2_human_smplx_data, dict):
+                    print(f"  Human SMPLX keys: {list(self._twist2_human_smplx_data.keys())[:5]}...")  # Show first 5 keys
+            else:
+                print(f"  Human SMPLX data valid: False")
+
+            if self._twist2_human_info_valid:
+                print(f"  Human info valid: True")
+                print(f"  Human info: {self._twist2_human_info}")
+            else:
+                print(f"  Human info valid: False")
+
         # Timing variables
         policy_time = 0.0
         action_prep_time = 0.0
+        recording_data_time = 0.0
         physics_time = 0.0
         scene_update_time = 0.0
         obs_time = 0.0
@@ -790,7 +1332,7 @@ class DDSRLActionProvider(ActionProvider):
 
             # 1. Policy inference
             policy_start = time.perf_counter()
-            action_data = self.run_policy()
+            action_data, obs_buf = self.run_policy()  # Get both action and observation
             policy_time = time.perf_counter() - policy_start
 
             # 2. Action preparation
@@ -869,6 +1411,51 @@ class DDSRLActionProvider(ActionProvider):
                             full_action.index_copy_(0, self._inspire_special_target_idx_t, special_vals)
             action_prep_time = time.perf_counter() - action_prep_start
 
+            # 2.5. Collect recording data (before decimation loop)
+            # This captures the state before physics simulation steps
+            recording_data_start = time.perf_counter()
+            recording_data = self.collect_recording_data(obs_buf, target_29)
+            recording_data_time = time.perf_counter() - recording_data_start
+
+            # 2.6. Recording state machine
+            # Handle recording commands from Redis
+            if self._recording_command == "start":
+                self.recording_manager.start_recording()
+                self._recording_display_state = "recording"
+                self._recording_display_counter = 0
+                # Reset command after processing (one-time trigger)
+                self._recording_command = "none"
+
+            elif self._recording_command == "save":
+                self.recording_manager.save_recording()
+                self._recording_display_state = "saved"
+                self._recording_display_counter = 0
+                # Reset command after processing
+                self._recording_command = "none"
+
+            elif self._recording_command == "cancel":
+                self.recording_manager.cancel_recording()
+                self._recording_display_state = "discard"
+                self._recording_display_counter = 0
+                # Reset command after processing
+                self._recording_command = "none"
+
+            # Update display state counter
+            if self._recording_display_state in ["saved", "discard"]:
+                self._recording_display_counter += 1
+                if self._recording_display_counter >= self._recording_display_duration:
+                    self._recording_display_state = "idle"
+                    self._recording_display_counter = 0
+            elif self.recording_manager.is_recording:
+                self._recording_display_state = "recording"
+            elif not self.recording_manager.is_recording and self._recording_display_state == "recording":
+                # Recording stopped but no save/cancel command yet
+                self._recording_display_state = "idle"
+
+            # Add frame to recording buffer if recording is active
+            if self.recording_manager.is_recording:
+                self.recording_manager.add_frame(recording_data)
+
             # 3. Physics simulation loop
             physics_total = 0.0
             scene_update_total = 0.0
@@ -914,6 +1501,7 @@ class DDSRLActionProvider(ActionProvider):
             total_time = time.perf_counter() - total_start
             self._perf_stats['policy_inference'].append(policy_time * 1000)
             self._perf_stats['action_preparation'].append(action_prep_time * 1000)
+            self._perf_stats['recording_data_collection'].append(recording_data_time * 1000)
             self._perf_stats['physics_step'].append(physics_time * 1000)
             self._perf_stats['scene_update'].append(scene_update_time * 1000)
             self._perf_stats['observation_compute'].append(obs_time * 1000)
@@ -936,7 +1524,21 @@ class DDSRLActionProvider(ActionProvider):
         print(f"🔍 PERFORMANCE ANALYSIS (last {self._perf_report_interval} steps)")
         print("="*80)
 
-        for key, values in self._perf_stats.items():
+        # Define display order and labels
+        stat_labels = {
+            'redis_fetch': 'Redis Fetch (in obs)',
+            'policy_inference': 'Policy Inference',
+            'action_preparation': 'Action Preparation',
+            'recording_data_collection': 'Recording Data Collection',
+            'physics_step': 'Physics Step',
+            'scene_update': 'Scene Update',
+            'render_time': 'Render Time',
+            'observation_compute': 'Observation Compute',
+            'total_get_action': 'Total get_action'
+        }
+
+        for key in stat_labels.keys():
+            values = self._perf_stats.get(key, [])
             if not values:
                 continue
 
@@ -948,20 +1550,323 @@ class DDSRLActionProvider(ActionProvider):
             if key != 'total_get_action':
                 total_avg = sum(self._perf_stats['total_get_action']) / len(self._perf_stats['total_get_action'])
                 percentage = (avg / total_avg * 100) if total_avg > 0 else 0
-                print(f"  {key:25s}: avg={avg:6.2f}ms  min={min_val:6.2f}ms  max={max_val:6.2f}ms  ({percentage:5.1f}%)")
+                print(f"  {stat_labels[key]:30s}: avg={avg:6.2f}ms  min={min_val:6.2f}ms  max={max_val:6.2f}ms  ({percentage:5.1f}%)")
             else:
-                print(f"  {key:25s}: avg={avg:6.2f}ms  min={min_val:6.2f}ms  max={max_val:6.2f}ms")
+                print(f"  {stat_labels[key]:30s}: avg={avg:6.2f}ms  min={min_val:6.2f}ms  max={max_val:6.2f}ms")
 
         # Calculate theoretical max frequency
         total_avg = sum(self._perf_stats['total_get_action']) / len(self._perf_stats['total_get_action'])
         max_freq = 1000.0 / total_avg if total_avg > 0 else 0
         print(f"\n  Theoretical max frequency: {max_freq:.1f} Hz")
         print(f"  Render interval: {self._render_interval}, Obs interval: {self._obs_interval}")
+        print(f"  Recording active: {self._recording_active}, Command: {self._recording_command}")
         print("="*80 + "\n")
 
         # Clear stats for next interval
         for key in self._perf_stats:
             self._perf_stats[key].clear()
+
+    def _get_observation_semantics(self) -> dict:
+        """Get detailed semantics for observation buffer dimensions.
+
+        Returns:
+            dict: Detailed semantic description of observation buffer structure
+        """
+        semantics = {
+            "total_dims": self.total_obs_size,  # 1432
+            "structure": {
+                "obs_full": {
+                    "dims": [0, 127],
+                    "description": "Current full observation",
+                    "components": {
+                        "action_mimic": {
+                            "dims": [0, 35],
+                            "description": "Mimic action from Redis teleop",
+                            "components": {
+                                "xy_vel": {
+                                    "dims": [0, 2],
+                                    "description": "XY velocity command",
+                                    "unit": "m/s"
+                                },
+                                "z_pos": {
+                                    "dims": [2, 3],
+                                    "description": "Z position target",
+                                    "unit": "m"
+                                },
+                                "roll_pitch": {
+                                    "dims": [3, 5],
+                                    "description": "Roll and pitch angles",
+                                    "unit": "rad"
+                                },
+                                "yaw_vel": {
+                                    "dims": [5, 6],
+                                    "description": "Yaw angular velocity",
+                                    "unit": "rad/s"
+                                },
+                                "joint_targets": {
+                                    "dims": [6, 35],
+                                    "description": "29 DOF joint position targets",
+                                    "unit": "rad"
+                                }
+                            }
+                        },
+                        "obs_proprio": {
+                            "dims": [35, 127],
+                            "description": "Proprioceptive observations",
+                            "components": {
+                                "ang_vel_scaled": {
+                                    "dims": [35, 38],
+                                    "description": "Angular velocity * 0.25",
+                                    "unit": "rad/s"
+                                },
+                                "roll_pitch": {
+                                    "dims": [38, 40],
+                                    "description": "Roll and pitch from quaternion",
+                                    "unit": "rad"
+                                },
+                                "dof_pos_delta": {
+                                    "dims": [40, 69],
+                                    "description": "Joint position - default position (29 DOF)",
+                                    "unit": "rad"
+                                },
+                                "dof_vel_scaled": {
+                                    "dims": [69, 98],
+                                    "description": "Joint velocity * 0.05 (29 DOF)",
+                                    "unit": "rad/s"
+                                },
+                                "last_action": {
+                                    "dims": [98, 127],
+                                    "description": "Previous action output (29 DOF)",
+                                    "unit": "rad"
+                                }
+                            }
+                        }
+                    }
+                },
+                "obs_hist": {
+                    "dims": [127, 1397],
+                    "description": "10 frames of historical obs_full (127*10=1270)",
+                    "unit": "various"
+                },
+                "future_obs": {
+                    "dims": [1397, 1432],
+                    "description": "Current action_mimic (35D)",
+                    "unit": "various"
+                }
+            }
+        }
+        return semantics
+
+    def _add_recording_status_overlay(self, rgb_image):
+        """Add recording status overlay to RGB image for display.
+
+        Args:
+            rgb_image: numpy array [H, W, 3] in range [0, 1] (float) or [0, 255] (uint8)
+
+        Returns:
+            numpy array with recording status overlay
+        """
+        import cv2
+        import numpy as np
+
+        # Convert to uint8 if needed
+        if rgb_image.dtype == np.float32 or rgb_image.dtype == np.float64:
+            img = (rgb_image * 255).astype(np.uint8)
+        else:
+            img = rgb_image.copy()
+
+        # Get image dimensions
+        h, w = img.shape[:2]
+
+        # Define overlay parameters
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 1.0
+        thickness = 2
+        padding = 10
+        circle_radius = 15
+
+        # Determine status based on recording display state
+        if self._recording_display_state == "saved":
+            # Just saved - green dot
+            text = "SAVED"
+            color = (0, 255, 0)  # Green in BGR
+        elif self._recording_display_state == "discard":
+            # Just cancelled - red dot
+            text = "DISCARD"
+            color = (0, 0, 255)  # Red in BGR
+        elif self._recording_display_state == "recording":
+            # Currently recording - yellow dot
+            text = "RECORDING"
+            color = (0, 255, 255)  # Yellow in BGR (B=0, G=255, R=255)
+        else:  # idle
+            # Idle - green dot
+            text = "IDLE"
+            color = (0, 255, 0)  # Green in BGR
+
+        # Draw filled circle (status indicator)
+        circle_center = (padding + circle_radius, padding + circle_radius)
+        cv2.circle(img, circle_center, circle_radius, color, -1)
+
+        # Draw text next to circle
+        text_pos = (padding + circle_radius * 2 + 10, padding + circle_radius + 8)
+        cv2.putText(img, text, text_pos, font, font_scale, color, thickness, cv2.LINE_AA)
+
+        # Convert back to float if original was float
+        if rgb_image.dtype == np.float32 or rgb_image.dtype == np.float64:
+            img = img.astype(np.float32) / 255.0
+
+        return img
+
+    def collect_recording_data(self, obs_buf: torch.Tensor, target_29: torch.Tensor) -> dict:
+        """Collect all data needed for recording.
+
+        This method collects comprehensive data for recording, including:
+        - Human data (SMPLX, hand control)
+        - Environment objects (football position/velocity)
+        - Robot state (qpos, qvel, root state, vision)
+        - System info (control frequency, task name)
+
+        Args:
+            obs_buf: Observation buffer [1, 1402] from compute_observations()
+            target_29: Target joint positions [1, 29] from policy inference
+
+        Returns:
+            dict: Organized recording data with keys: human, env_obj, robot, system, task
+        """
+        import numpy as np
+        import time
+
+        recording_data = {}
+
+        # ===== HUMAN DATA =====
+        human_data = {}
+
+        # Human SMPLX data before GMR retargeting
+        if self._twist2_human_smplx_valid and self._twist2_human_smplx_data is not None:
+            human_data["smplx_data_before_gmr"] = self._twist2_human_smplx_data
+        else:
+            human_data["smplx_data_before_gmr"] = None
+
+        # Human info (height, etc.)
+        if self._twist2_human_info_valid and self._twist2_human_info is not None:
+            human_data["human_info"] = self._twist2_human_info
+        else:
+            human_data["human_info"] = None
+
+        # Hand control data
+        human_data["hand_control"] = {
+            "left": self._twist2_action_hand_left.cpu().numpy().squeeze(0),  # [7]
+            "right": self._twist2_action_hand_right.cpu().numpy().squeeze(0),  # [7]
+            "neck": self._twist2_action_neck.cpu().numpy().squeeze(0)  # [2]
+        }
+
+        recording_data["human"] = human_data
+
+        # ===== ENVIRONMENT OBJECTS =====
+        env_obj_data = {}
+
+        # Football object (extensible for other objects)
+        try:
+            if "object" in self.env.scene.keys():
+                football = self.env.scene["object"]
+                root_state = football.data.root_state_w  # [num_envs, 13]
+
+                # Extract position and velocity (world coordinates)
+                env_obj_data["football"] = {
+                    "position": root_state[0, 0:3].cpu().numpy(),  # [3] x, y, z
+                    "linear_velocity": root_state[0, 7:10].cpu().numpy(),  # [3] vx, vy, vz
+                    "angular_velocity": root_state[0, 10:13].cpu().numpy()  # [3] wx, wy, wz
+                }
+            else:
+                env_obj_data["football"] = None
+        except Exception as e:
+            print(f"[{self.name}] Failed to get football state: {e}")
+            env_obj_data["football"] = None
+
+        recording_data["env_obj"] = env_obj_data
+
+        # ===== ROBOT DATA =====
+        robot_data = {}
+
+        # Get robot state (before decimation)
+        root_state = self.env.scene["robot"].data.root_state_w  # [1, 13]
+
+        # Joint positions and velocities (29 DOF, before decimation)
+        idx = self.twist2_action_indices
+        robot_data["qpos_before_decimation"] = self.joint_pos[0, idx].cpu().numpy()  # [29]
+        robot_data["qvel_before_decimation"] = self.joint_vel[0, idx].cpu().numpy()  # [29]
+
+        # Root state
+        robot_data["root_lin_vel_local"] = self.env.scene["robot"].data.root_lin_vel_b[0].cpu().numpy()  # [3]
+        robot_data["root_position"] = root_state[0, 0:3].cpu().numpy()  # [3]
+        robot_data["root_orientation"] = root_state[0, 3:7].cpu().numpy()  # [4] quaternion (w,x,y,z)
+
+        # TWIST2 inference output
+        robot_data["twist2_inference_qpos"] = target_29.cpu().numpy().squeeze(0)  # [29]
+
+        # Observation data
+        robot_data["observation"] = {
+            "obs_buf": obs_buf.cpu().numpy().squeeze(0),  # [1402]
+            "semantics": self._get_observation_semantics()
+        }
+
+        # Vision data (from previous control cycle's last rendered frame)
+        vision_data = {}
+        try:
+            if "front_camera" in self.env.scene.keys():
+                camera = self.env.scene["front_camera"]
+
+                # RGB image
+                if "rgb" in camera.data.output:
+                    rgb_tensor = camera.data.output["rgb"][0]  # [H, W, 3]
+                    rgb_array = rgb_tensor.cpu().numpy()
+
+                    # Store original image for saving (without overlay)
+                    vision_data["rgb"] = rgb_array.copy()
+
+                    # Create a copy with recording status overlay for Redis display
+                    vision_data["rgb_display"] = self._add_recording_status_overlay(rgb_array.copy())
+                else:
+                    vision_data["rgb"] = None
+                    vision_data["rgb_display"] = None
+                    print(f"[{self.name}] Warning: RGB data not available in front_camera")
+
+                # Depth image
+                if "distance_to_image_plane" in camera.data.output:
+                    depth_tensor = camera.data.output["distance_to_image_plane"][0]  # [H, W]
+                    vision_data["depth"] = depth_tensor.cpu().numpy()
+                else:
+                    vision_data["depth"] = None
+                    print(f"[{self.name}] Warning: Depth data not available in front_camera")
+            else:
+                vision_data["rgb"] = None
+                vision_data["rgb_display"] = None
+                vision_data["depth"] = None
+                print(f"[{self.name}] Warning: front_camera not found in scene")
+        except Exception as e:
+            print(f"[{self.name}] Failed to get camera data: {e}")
+            vision_data["rgb"] = None
+            vision_data["rgb_display"] = None
+            vision_data["depth"] = None
+
+        robot_data["vision"] = vision_data
+
+        recording_data["robot"] = robot_data
+
+        # ===== SYSTEM DATA =====
+        system_data = {
+            "control_frequency": 1.0 / (self._twist2_decimation * self.env.physics_dt),  # Hz
+            "decimation": self._twist2_decimation,
+            "physics_dt": self.env.physics_dt,
+            "timestamp": time.time()
+        }
+
+        recording_data["system"] = system_data
+
+        # ===== TASK NAME =====
+        recording_data["task"] = self.task_name
+
+        return recording_data
 
     def _convert_to_joint_range(self, value):
         """Convert gripper control value to joint angle"""
@@ -971,8 +1876,13 @@ class DDSRLActionProvider(ActionProvider):
         return output_min + (output_max - output_min) * (value - input_min) / (input_max - input_min)
 
     def cleanup(self):
-        """Clean up DDS resources"""
+        """Clean up DDS resources and recording manager"""
         try:
+            # Shutdown recording manager first (wait for pending saves)
+            if hasattr(self, 'recording_manager'):
+                self.recording_manager.shutdown()
+
+            # Clean up DDS resources
             if self.robot_dds:
                 self.robot_dds.stop_communication()
             if self.gripper_dds:
@@ -982,4 +1892,4 @@ class DDSRLActionProvider(ActionProvider):
             if self.inspire_dds:
                 self.inspire_dds.stop_communication()
         except Exception as e:
-            print(f"[{self.name}] Clean up DDS resources failed: {e}")
+            print(f"[{self.name}] Clean up resources failed: {e}")
