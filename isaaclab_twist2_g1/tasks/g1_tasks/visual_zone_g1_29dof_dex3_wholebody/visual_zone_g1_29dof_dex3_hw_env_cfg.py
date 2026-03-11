@@ -52,7 +52,7 @@ class VisualZoneSceneCfg(VisualZonesSceneCfg):
     # G1 robot with Dex3 dexterous hands - positioned at origin
     robot: ArticulationCfg = G1RobotPresets.g1_29dof_dex3_wholebody(
         init_pos=(0.0, 0.0, 0.8),  # Start position (before target zone)
-        init_rot=(1.0, 0.0, 0.0, 0.0)  # Facing forward (+Y direction)
+        init_rot=(0.7071, 0.0, 0.0, 0.7071),  # 向左旋轉 90° (繞 Z 軸)
     )
 
     # Contact sensors for detecting collisions

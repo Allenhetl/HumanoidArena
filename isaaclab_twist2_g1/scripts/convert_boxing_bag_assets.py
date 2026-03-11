@@ -2,13 +2,13 @@
 # Copyright (c) 2025, HumanoidArena Project
 # License: Apache License, Version 2.0
 """
-Convert football and goal OBJ to USD with physics for use in Isaac Lab.
+Convert boxing bag OBJ to USD with physics for use in Isaac Lab.
 Uses MeshConverter to add RigidBody, Collision, Mass.
 
 Usage:
     cd isaaclab_twist2_g1
     conda activate unitree_sim_env
-    python scripts/convert_football_assets.py --headless --device cuda
+    python scripts/convert_boxing_bag_assets.py --headless --device cuda
 """
 
 import argparse
@@ -21,6 +21,7 @@ sys.path.insert(0, project_root)
 os.environ["PROJECT_ROOT"] = project_root
 
 from isaaclab.app import AppLauncher
+
 parser = argparse.ArgumentParser()
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
@@ -29,7 +30,6 @@ simulation_app = app_launcher.app
 
 from isaaclab.sim.converters import MeshConverter, MeshConverterCfg
 from isaaclab.sim.schemas import schemas_cfg
-from isaaclab.utils.assets import check_file_path
 
 
 def convert_obj_to_usd(
@@ -74,23 +74,18 @@ def convert_obj_to_usd(
 
 
 def main():
-    print("Converting football assets (OBJ -> USD with physics)...")
+    print("Converting boxing bag asset (OBJ -> USD with physics)...")
 
-    # Soccer ball: FIFA mass 0.43 kg
-    ball_obj = os.path.join(project_root, "assets/football/standard soccer ball/Soccer Ball.obj")
-    ball_usd = os.path.join(project_root, "assets/football/soccer_ball_physics.usd")
-    print("1. Soccer ball:")
-    convert_obj_to_usd(ball_obj, ball_usd, mass=0.43)
+    # Boxing bag: typical heavy bag mass 25-40 kg (we use 35 kg for stable swing)
+    # OBJ 平躺時長軸多為 X：繞 Y 軸 90° 使其直立，quat (w,x,y,z)
+    bag_rotation = (1, 0.0, 0.0, 0.0)  # 90° around Y: lay(X) -> stand(Z)
+    bag_obj = os.path.join(project_root, "assets/boxing_bag/frfrstnpnchbg.obj")
+    bag_usd = os.path.join(project_root, "assets/boxing_bag/boxing_bag_physics.usd")
+    print("1. Boxing bag (rotation baked: 90° Y for upright):")
+    convert_obj_to_usd(bag_obj, bag_usd, mass=35.0, rotation=bag_rotation)
 
-    # Goal: kinematic, need rigid body for collision (mass=1 unused when kinematic)
-    goal_obj = os.path.join(project_root, "assets/football_net/Football Goal/football goal.obj")
-    goal_usd = os.path.join(project_root, "assets/football_net/football_goal_physics.usd")
-    print("2. Football goal:")
-    convert_obj_to_usd(goal_obj, goal_usd, mass=1.0)
-
-    print("Done. USD files:")
-    print(f"  - {ball_usd}")
-    print(f"  - {goal_usd}")
+    print("Done. USD file:")
+    print(f"  - {bag_usd}")
 
 
 if __name__ == "__main__":

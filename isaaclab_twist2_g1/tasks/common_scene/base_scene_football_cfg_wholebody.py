@@ -17,14 +17,24 @@ from tasks.common_scene.base_scene_pickplace_cylindercfg_wholebody import TableC
 
 project_root = os.environ.get("PROJECT_ROOT")
 
-# Layout: 與 move_football_g1_29dof_dex3_hw_env_cfg 中的 robot init_pos 對齊
-# 修改以下參數可調整實驗佈局（單位：米）
-ROBOT_INIT_X = -3.9
-ROBOT_INIT_Y = -2.81811
-GOAL_DISTANCE = 6.0  # 球門與機器人的距離（機器人朝 +X，改此值即可調整射門距離）
-BALL_DISTANCE = 1.0  # 足球在機器人前方距離（射門時腳前擺放）
-GOAL_Z = 0.7  # 球門高度（Z 座標）：若球門懸空則調低，直至貼地為止
-GOAL_CENTER_Y_OFFSET = 2.5  # 若模型原點在邊角，調整此值使機器人對準球門中心（負值=向左移球門，正值=向右移）
+# Layout: 統一在此調整機器人、球、球門的初始位置
+# 機器人已向左旋轉 90° (init_rot=(0.7071,0,0,0.7071))，朝 +Y 方向
+# 球與球門的相對位置已同步旋轉，保持與機器人的相對位姿
+ROBOT_INIT_X = -1.9
+ROBOT_INIT_Y = -5.2
+ROBOT_INIT_Z = 0.8  # 機器人站立高度
+GOAL_DISTANCE = 6.0  # 球門與機器人距離（沿機器人朝向）
+BALL_DISTANCE = 1.0  # 足球在機器人前方距離
+GOAL_Z = 0.7  # 球門高度（Z 座標）
+GOAL_CENTER_Y_OFFSET = 2.5  # 球門中心相對於機器人朝向的橫向偏移
+
+# 90° 左旋後：原 (dx,dy) → (-dy, dx)，機器人朝 +Y
+# Ball: 原 (1,0) → (0, 1)
+# Goal: 原 (6, 2.5) → (-2.5, 6)
+BALL_OFFSET_X = 0.0  # -dy
+BALL_OFFSET_Y = BALL_DISTANCE  # dx
+GOAL_OFFSET_X = -GOAL_CENTER_Y_OFFSET  # -dy
+GOAL_OFFSET_Y = GOAL_DISTANCE  # dx
 
 # FIFA standard football specifications:
 # - Circumference: 68-70 cm -> diameter ~22 cm, radius = 0.11 m
@@ -48,7 +58,7 @@ class TableFootballSceneCfgWH(TableCylinderSceneCfgWH):
             rot=[1.0, 0.0, 0.0, 0.0],
         ),
         spawn=UsdFileCfg(
-            usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/warehouse.usd",
+            usd_path=f"{project_root}/assets/objects/small_warehouse/small_warehouse_digital_twin_boxtarget.usd",
         ),
     )
 
@@ -72,11 +82,11 @@ class TableFootballSceneCfgWH(TableCylinderSceneCfgWH):
         ),
     )
 
-    # Football - 在機器人前方 BALL_DISTANCE 處
+    # Football - 在機器人前方 BALL_DISTANCE 處（隨機器人 90° 左旋同步旋轉）
     object = RigidObjectCfg(
         prim_path="/World/envs/env_.*/Object",
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=[ROBOT_INIT_X + BALL_DISTANCE, ROBOT_INIT_Y, 0.11],
+            pos=[ROBOT_INIT_X + BALL_OFFSET_X, ROBOT_INIT_Y + BALL_OFFSET_Y, 0.11],
             rot=[1.0, 0.0, 0.0, 0.0],
         ),
         spawn=UsdFileCfg(
@@ -97,12 +107,12 @@ class TableFootballSceneCfgWH(TableCylinderSceneCfgWH):
         ),
     )
 
-    # Goal net - 機器人正前方 GOAL_DISTANCE，Y 軸用 GOAL_CENTER_Y_OFFSET 微調對準球門中心
+    # Goal net - 機器人正前方 GOAL_DISTANCE，隨機器人 90° 左旋同步旋轉，球門開口朝向機器人
     goal_net = AssetBaseCfg(
         prim_path="/World/envs/env_.*/GoalNet",
         init_state=AssetBaseCfg.InitialStateCfg(
-            pos=[ROBOT_INIT_X + GOAL_DISTANCE, ROBOT_INIT_Y + GOAL_CENTER_Y_OFFSET, GOAL_Z],
-            rot=[-0.7071, 0.0, 0.0, 0.7071],  # 270° around Z: goal opening faces robot
+            pos=[ROBOT_INIT_X + GOAL_OFFSET_X, ROBOT_INIT_Y + GOAL_OFFSET_Y, GOAL_Z],
+            rot=[1.0, 0.0, 0.0, 0.0],  # 球網在原有基礎上再向左旋轉 90°
         ),
         spawn=UsdFileCfg(
             usd_path=f"{project_root}/assets/football_net/football_goal_physics.usd",
