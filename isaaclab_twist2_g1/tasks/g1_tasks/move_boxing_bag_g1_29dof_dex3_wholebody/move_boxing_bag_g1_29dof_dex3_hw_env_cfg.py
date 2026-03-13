@@ -18,8 +18,8 @@ from . import mdp
 
 from tasks.common_config import G1RobotPresets, CameraPresets
 from tasks.common_event.event_manager import SimpleEvent, SimpleEventManager
-from tasks.common_scene.base_scene_football_cfg_wholebody import (
-    TableFootballSceneCfgWH,
+from tasks.common_scene.base_scene_boxing_bag_cfg_wholebody import (
+    TableBoxingBagSceneCfgWH,
     ROBOT_INIT_X,
     ROBOT_INIT_Y,
     ROBOT_INIT_Z,
@@ -32,8 +32,8 @@ from tasks.common_scene.base_scene_football_cfg_wholebody import (
 
 
 @configclass
-class FootballTableSceneCfg(TableFootballSceneCfgWH):
-    """Football table scene with G1 29DOF Dex3 wholebody robot."""
+class BoxingBagSceneCfg(TableBoxingBagSceneCfgWH):
+    """Boxing bag scene with G1 29DOF Dex3 wholebody robot."""
 
     robot: ArticulationCfg = G1RobotPresets.g1_29dof_dex3_wholebody(
         init_pos=(ROBOT_INIT_X, ROBOT_INIT_Y, ROBOT_INIT_Z),
@@ -48,7 +48,7 @@ class FootballTableSceneCfg(TableFootballSceneCfgWH):
     )
 
     front_camera = CameraPresets.g1_front_camera()
-    # world_camera = CameraPresets.g1_world_camera()
+    world_camera = CameraPresets.g1_world_camera()
 
 
 ##
@@ -58,8 +58,6 @@ class FootballTableSceneCfg(TableFootballSceneCfgWH):
 
 @configclass
 class ActionsCfg:
-    """Joint position action configuration."""
-
     joint_pos = mdp.JointPositionActionCfg(
         asset_name="robot",
         joint_names=[".*"],
@@ -70,12 +68,8 @@ class ActionsCfg:
 
 @configclass
 class ObservationsCfg:
-    """Observation configuration."""
-
     @configclass
     class PolicyCfg(ObsGroup):
-        """Policy observation group."""
-
         robot_joint_state = ObsTerm(func=mdp.get_robot_boy_joint_states)
         robot_gipper_state = ObsTerm(func=mdp.get_robot_dex3_joint_states)
         camera_image = ObsTerm(func=mdp.get_camera_image)
@@ -103,12 +97,10 @@ class EventCfg:
 
 
 @configclass
-class MoveFootballG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
-    """
-    Environment configuration for G1 29DOF Dex3 wholebody robot with football task.
-    """
+class MoveBoxingBagG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
+    """Environment for G1 29DOF Dex3 wholebody robot with boxing bag task (遙操作數據採集)."""
 
-    scene: FootballTableSceneCfg = FootballTableSceneCfg(
+    scene: BoxingBagSceneCfg = BoxingBagSceneCfg(
         num_envs=1,
         env_spacing=2.5,
         replicate_physics=True,
@@ -123,28 +115,20 @@ class MoveFootballG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
     curriculum = None
 
     def __post_init__(self):
-        self.decimation = 10  # Policy frequency: 1000Hz / 10 = 100Hz (matches TWIST2 training)
+        self.decimation = 10
         self.episode_length_s = 20.0
-
-        self.sim.dt = 0.002 # 1ms timestep = 1000Hz physics (matches cylinder task)
+        self.sim.dt = 0.001
         self.scene.contact_forces.update_period = self.sim.dt
         self.sim.render_interval = self.decimation
         self.sim.physx.bounce_threshold_velocity = 0.01
-        self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 1024 * 1024 * 1
-        self.sim.physx.gpu_total_aggregate_pairs_capacity = 1 * 1024
+        self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 1024 * 1024 * 4
+        self.sim.physx.gpu_total_aggregate_pairs_capacity = 16 * 1024
         self.sim.physx.friction_correlation_distance = 0.00625
 
         self.sim.physics_material.static_friction = 1.0
         self.sim.physics_material.dynamic_friction = 1.0
         self.sim.physics_material.friction_combine_mode = "max"
         self.sim.physics_material.restitution_combine_mode = "max"
-
-        # 全局 PhysX 求解器设置
-        # self.sim.physx.solver_type = 1  # TGS solver
-        # self.sim.physx.min_position_iteration_count = 16
-        # self.sim.physx.max_position_iteration_count = 16  # 增加
-        # self.sim.physx.min_velocity_iteration_count = 8
-        # self.sim.physx.max_velocity_iteration_count = 8  # 增加
 
         self.event_manager = SimpleEventManager()
 
@@ -154,7 +138,7 @@ class MoveFootballG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
                 func=lambda env: base_mdp.reset_root_state_uniform(
                     env,
                     torch.arange(env.num_envs, device=env.device),
-                    pose_range={"x": [-0.05, 0.05], "y": [0.0, 0.05]},
+                    pose_range={"x": [-0.05, 0.05], "y": [-0.05, 0.05]},
                     velocity_range={},
                     asset_cfg=SceneEntityCfg("object"),
                 )

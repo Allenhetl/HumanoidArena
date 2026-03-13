@@ -51,7 +51,7 @@ def _get_dex3_dds_instance():
             from dds.dds_master import dds_manager
             
             _dex3_dds = dds_manager.get_object("dex3")
-            print("[Observations Dex3] DDS communication instance obtained")
+            # print("[Observations Dex3] DDS communication instance obtained")
             
             # register the cleanup function
             import atexit

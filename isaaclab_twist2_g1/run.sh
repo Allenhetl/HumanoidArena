@@ -23,10 +23,39 @@ redis-cli DEL \
 #    --image_xrobot_ffmpeg /usr/bin/ffmpeg
 ##    --image_xrobot_host 172.20.10.2 \
 
+  # python sim_main.py \
+  #   --device cuda \
+  #   --enable_cameras \
+  #   --task Isaac-Move-Football-G129-Dex3-Wholebody \
+  #   --robot_type g129 \
+  #   --enable_dex3_dds \
+  #   --image_transport xrobot \
+  #   --image_xrobot_host 10.42.0.35 \
+  #   --image_xrobot_port 12345 \
+  #   --image_xrobot_width 480 \
+  #   --image_xrobot_height 320 \
+  #   --image_xrobot_bitrate 4194304 \
+  #   --image_fps 30 \
+  #   --image_xrobot_ffmpeg /usr/bin/ffmpeg \
+  #   --recording_save_dir /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data
+#    --enable_world_camera \
+#    --image_xrobot_host 172.20.10.2 \
+
+  # 可切換：
+  #   一般沙袋: Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody
+  #   吊掛沙袋: Isaac-Move-Boxing-Bag-Hanging-G129-Dex3-Wholebody
+  #   足球: Isaac-Move-Football-G129-Dex3-Wholebody
+  # TASK_NAME="${TASK_NAME:-Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody}"
+  TASK_NAME="${TASK_NAME:-Isaac-Move-Football-G129-Dex3-Wholebody}"
+  # TASK_NAME="${TASK_NAME:-Isaac-Move-Boxing-Bag-Hanging-G129-Dex3-Wholebody}"
+
+  # Random seed for reproducibility (set to fixed value for deterministic behavior)
+  SEED="${SEED:-42}"
+
   python sim_main.py \
     --device cuda \
     --enable_cameras \
-    --task Isaac-Move-Football-G129-Dex3-Wholebody \
+    --task "${TASK_NAME}" \
     --robot_type g129 \
     --enable_dex3_dds \
     --image_transport xrobot \
@@ -37,6 +66,5 @@ redis-cli DEL \
     --image_xrobot_bitrate 4194304 \
     --image_fps 30 \
     --image_xrobot_ffmpeg /usr/bin/ffmpeg \
-    --recording_save_dir /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data
-#    --enable_world_camera \
-#    --image_xrobot_host 172.20.10.2 \
+    --recording_save_dir /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data \
+    --seed "${SEED}"

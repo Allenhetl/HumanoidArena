@@ -127,6 +127,10 @@ class SimpleEventManager:
     def register(self, name, event):
         self._events[name] = event
 
+    def unregister(self, name):
+        """Unregister an event if it exists."""
+        self._events.pop(name, None)
+
     def trigger(self, name, env):
         event = self._events.get(name)
         if event:

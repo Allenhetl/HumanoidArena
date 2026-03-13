@@ -97,7 +97,7 @@ class DDSManager:
         """Get specified object"""
         obj = self.objects.get(name)
         if obj is None:
-            print(f"[DDSManager] object '{name}' not found, objects: {self.objects.keys()}")
+            # print(f"[DDSManager] object '{name}' not found, objects: {self.objects.keys()}")
             return None
         return obj
     

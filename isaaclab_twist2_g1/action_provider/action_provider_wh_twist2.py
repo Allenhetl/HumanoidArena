@@ -79,10 +79,14 @@ class RecordingManager:
                     break
 
                 # Unpack task
-                data_buffer, timestamp_us = task
+                data_buffer, timestamp_us, callback = task
 
                 # Save to disk
-                self._save_to_disk(data_buffer, timestamp_us)
+                success = self._save_to_disk(data_buffer, timestamp_us)
+
+                # Call callback to notify completion
+                if callback is not None:
+                    callback(success)
 
                 # Mark task as done
                 self.save_queue.task_done()
@@ -94,12 +98,15 @@ class RecordingManager:
                 import traceback
                 traceback.print_exc()
 
-    def _save_to_disk(self, data_buffer: list, timestamp_us: int):
+    def _save_to_disk(self, data_buffer: list, timestamp_us: int) -> bool:
         """Save recording data to disk.
 
         Args:
             data_buffer: List of recording data dictionaries
             timestamp_us: Timestamp in microseconds for filename
+
+        Returns:
+            bool: True if save was successful, False otherwise
         """
         try:
             # Generate filename with timestamp
@@ -150,6 +157,8 @@ class RecordingManager:
             print(f"  - Size: {file_size_mb:.2f} MB")
             print(f"  - Time: {save_time:.2f}s")
 
+            return True
+
         except Exception as e:
             print(f"[RecordingManager] ❌ Failed to save recording: {e}")
             import traceback
@@ -163,6 +172,8 @@ class RecordingManager:
                     print(f"[RecordingManager] Cleaned up temporary file")
                 except:
                     pass
+
+            return False
 
     def _organize_data_for_save(self, data_buffer: list) -> dict:
         """Organize list of frame data into arrays for npz format.
@@ -197,9 +208,13 @@ class RecordingManager:
             # Robot data
             'robot_qpos_before_decimation': np.zeros((num_frames, 29), dtype=np.float32),
             'robot_qvel_before_decimation': np.zeros((num_frames, 29), dtype=np.float32),
-            'robot_root_lin_vel_local': np.zeros((num_frames, 3), dtype=np.float32),
             'robot_root_position': np.zeros((num_frames, 3), dtype=np.float32),
             'robot_root_orientation': np.zeros((num_frames, 4), dtype=np.float32),
+            # Root velocities - both local and world frame
+            'robot_root_lin_vel_local': np.zeros((num_frames, 3), dtype=np.float32),
+            'robot_root_ang_vel_local': np.zeros((num_frames, 3), dtype=np.float32),
+            'robot_root_lin_vel_world': np.zeros((num_frames, 3), dtype=np.float32),
+            'robot_root_ang_vel_world': np.zeros((num_frames, 3), dtype=np.float32),
             'robot_twist2_inference_qpos': np.zeros((num_frames, 29), dtype=np.float32),
             'robot_obs_buf': np.zeros((num_frames, 1432), dtype=np.float32),  # 127*11+35 = 1432
 
@@ -221,7 +236,8 @@ class RecordingManager:
         env_obj_football_ang_vel = []
 
         # Collect vision data (store first and last frame only to save space)
-        vision_indices = [0, num_frames - 1] if num_frames > 1 else [0]
+        # vision_indices = [0, num_frames - 1] if num_frames > 1 else [0]
+        vision_indices = list(range(num_frames))
         vision_rgb_list = []
         vision_depth_list = []
         vision_frame_indices = []
@@ -250,9 +266,13 @@ class RecordingManager:
             # Robot data
             organized['robot_qpos_before_decimation'][i] = frame_data['robot']['qpos_before_decimation']
             organized['robot_qvel_before_decimation'][i] = frame_data['robot']['qvel_before_decimation']
-            organized['robot_root_lin_vel_local'][i] = frame_data['robot']['root_lin_vel_local']
             organized['robot_root_position'][i] = frame_data['robot']['root_position']
             organized['robot_root_orientation'][i] = frame_data['robot']['root_orientation']
+            # Root velocities - both local and world frame
+            organized['robot_root_lin_vel_local'][i] = frame_data['robot']['root_lin_vel_local']
+            organized['robot_root_ang_vel_local'][i] = frame_data['robot']['root_ang_vel_local']
+            organized['robot_root_lin_vel_world'][i] = frame_data['robot']['root_lin_vel_world']
+            organized['robot_root_ang_vel_world'][i] = frame_data['robot']['root_ang_vel_world']
             organized['robot_twist2_inference_qpos'][i] = frame_data['robot']['twist2_inference_qpos']
             organized['robot_obs_buf'][i] = frame_data['robot']['observation']['obs_buf']
 
@@ -317,8 +337,12 @@ class RecordingManager:
         self.recording_buffer.append(frame_copy)
         self.frame_count += 1
 
-    def save_recording(self):
-        """Save the current recording and stop recording."""
+    def save_recording(self, completion_callback=None):
+        """Save the current recording and stop recording.
+
+        Args:
+            completion_callback: Optional callback function(success: bool) called when save completes
+        """
         if not self.is_recording:
             print(f"[RecordingManager] ⚠️ Not recording, nothing to save")
             return
@@ -340,7 +364,7 @@ class RecordingManager:
 
         # Queue the save task (this will block if queue is full)
         print(f"[RecordingManager] 📦 Queuing {len(self.recording_buffer)} frames for save...")
-        self.save_queue.put((self.recording_buffer, timestamp_us))
+        self.save_queue.put((self.recording_buffer, timestamp_us, completion_callback))
 
         # Clear buffer
         self.recording_buffer = []
@@ -394,6 +418,26 @@ class DDSRLActionProvider(ActionProvider):
 
     def __init__(self, env, args_cli):
         super().__init__("DDSActionProvider")
+
+        # Set random seed for reproducibility
+        if hasattr(args_cli, 'seed') and args_cli.seed is not None:
+            import random
+            import numpy as np
+            seed = args_cli.seed
+            print(f"[{self.name}] Setting random seed: {seed}")
+            torch.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+            np.random.seed(seed)
+            random.seed(seed)
+            # Enable deterministic mode for PyTorch
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+            # Store seed for ONNX Runtime configuration
+            self.onnx_seed = seed
+        else:
+            self.onnx_seed = None
+            print(f"[{self.name}] No seed specified, using non-deterministic mode")
+
         self.enable_robot = args_cli.robot_type
         self.enable_gripper = args_cli.enable_dex1_dds
         self.enable_dex3 = args_cli.enable_dex3_dds
@@ -466,10 +510,14 @@ class DDSRLActionProvider(ActionProvider):
         self._recording_active = False
         self._recording_command = "none"  # "none", "start", "save", "cancel"
 
-        # Display state for overlay (persists for a few frames after command)
-        self._recording_display_state = "idle"  # "idle", "recording", "saved", "discard"
-        self._recording_display_counter = 0  # Counter for how long to show saved/discard
+        # Display state for overlay (persists until save completes)
+        self._recording_display_state = "idle"  # "idle", "recording", "saving", "saved", "discard"
+        self._recording_display_counter = 0  # Counter for how long to show saved/discard after completion
         self._recording_display_duration = 10  # Show saved/discard for 60 frames (~2 seconds @ 30Hz)
+        self._save_in_progress = False  # Track if save is currently in progress
+
+        # Thread-safe flag for save completion (set by background thread, read by main thread)
+        self._save_completion_state = None  # None, "success", or "failure"
 
         # Debug control
         self._debug_smpl_data = False  # Set to True to enable SMPL data debug output
@@ -878,7 +926,16 @@ class DDSRLActionProvider(ActionProvider):
             providers.append("CUDAExecutionProvider")
         providers.append("CPUExecutionProvider")
 
-        model = ort.InferenceSession(path, providers=providers)
+        # Configure session options for deterministic inference
+        sess_options = ort.SessionOptions()
+        if self.onnx_seed is not None:
+            # Enable deterministic compute
+            sess_options.intra_op_num_threads = 1
+            sess_options.inter_op_num_threads = 1
+            sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+            print(f"[{self.name}] ONNX Runtime configured for deterministic inference (seed={self.onnx_seed})")
+
+        model = ort.InferenceSession(path, sess_options=sess_options, providers=providers)
         input_name = model.get_inputs()[0].name
 
         def run_inference(input_tensor: torch.Tensor):
@@ -1423,13 +1480,24 @@ class DDSRLActionProvider(ActionProvider):
                 self.recording_manager.start_recording()
                 self._recording_display_state = "recording"
                 self._recording_display_counter = 0
+                self._save_in_progress = False
                 # Reset command after processing (one-time trigger)
                 self._recording_command = "none"
 
             elif self._recording_command == "save":
-                self.recording_manager.save_recording()
-                self._recording_display_state = "saved"
-                self._recording_display_counter = 0
+                # Define callback to update display state when save completes
+                def on_save_complete(success: bool):
+                    # Set completion flag (thread-safe: single write operation)
+                    self._save_completion_state = "success" if success else "failure"
+                    print(f"[{self.name}] 📝 Save completed: {self._save_completion_state}")
+
+                # Start save with callback
+                print(f"[{self.name}] 💾 Starting save, setting state to 'saving'")
+                self.recording_manager.save_recording(completion_callback=on_save_complete)
+                self._recording_display_state = "saving"  # Show "saving" while in progress
+                self._save_in_progress = True
+                self._save_completion_state = None  # Reset completion state
+                print(f"[{self.name}] 🔍 After save command: display_state={self._recording_display_state}, save_in_progress={self._save_in_progress}")
                 # Reset command after processing
                 self._recording_command = "none"
 
@@ -1437,20 +1505,48 @@ class DDSRLActionProvider(ActionProvider):
                 self.recording_manager.cancel_recording()
                 self._recording_display_state = "discard"
                 self._recording_display_counter = 0
+                self._save_in_progress = False
                 # Reset command after processing
                 self._recording_command = "none"
 
-            # Update display state counter
-            if self._recording_display_state in ["saved", "discard"]:
+            # Update display state counter and transitions
+            # Priority order: check save completion > saving > saved/discard countdown > recording > idle
+
+            # Debug: print state before transitions
+            if self.sim_step_counter % 10 == 0 and (self._save_in_progress or self._recording_display_state != "idle"):
+                print(f"[{self.name}] 🔍 State check (step {self.sim_step_counter}): display={self._recording_display_state}, save_in_progress={self._save_in_progress}, is_recording={self.recording_manager.is_recording}, completion={self._save_completion_state}")
+
+            # Check if save completed (set by background thread callback)
+            if self._save_completion_state is not None:
+                if self._save_completion_state == "success":
+                    self._recording_display_state = "saved"
+                else:  # "failure"
+                    self._recording_display_state = "discard"
+                self._recording_display_counter = 0
+                self._save_in_progress = False
+                self._save_completion_state = None  # Clear the flag
+                print(f"[{self.name}] 🔄 Display state updated to: {self._recording_display_state}")
+            # Normal state transitions (only if save didn't just complete)
+            elif self._save_in_progress:
+                # Keep showing "saving" while save is in progress
+                # State will be updated when _save_completion_state is set
+                # Don't change _recording_display_state here
+                pass
+            elif self._recording_display_state in ["saved", "discard"]:
+                # Count down the display duration for saved/discard states
                 self._recording_display_counter += 1
                 if self._recording_display_counter >= self._recording_display_duration:
                     self._recording_display_state = "idle"
                     self._recording_display_counter = 0
             elif self.recording_manager.is_recording:
+                # Currently recording
                 self._recording_display_state = "recording"
             elif not self.recording_manager.is_recording and self._recording_display_state == "recording":
-                # Recording stopped but no save/cancel command yet
-                self._recording_display_state = "idle"
+                # Recording stopped but no save/cancel command yet (shouldn't happen normally)
+                # Only transition to idle if we're not in the middle of saving
+                if not self._save_in_progress:
+                    print(f"[{self.name}] ⚠️ Recording stopped without save/cancel, transitioning to idle")
+                    self._recording_display_state = "idle"
 
             # Add frame to recording buffer if recording is active
             if self.recording_manager.is_recording:
@@ -1686,7 +1782,12 @@ class DDSRLActionProvider(ActionProvider):
         circle_radius = 15
 
         # Determine status based on recording display state
-        if self._recording_display_state == "saved":
+        # Priority order: saving > saved > discard > recording > idle
+        if self._recording_display_state == "saving":
+            # Currently saving - orange dot
+            text = "SAVING..."
+            color = (0, 165, 255)  # Orange in BGR (B=0, G=165, R=255)
+        elif self._recording_display_state == "saved":
             # Just saved - green dot
             text = "SAVED"
             color = (0, 255, 0)  # Green in BGR
@@ -1796,10 +1897,16 @@ class DDSRLActionProvider(ActionProvider):
         robot_data["qpos_before_decimation"] = self.joint_pos[0, idx].cpu().numpy()  # [29]
         robot_data["qvel_before_decimation"] = self.joint_vel[0, idx].cpu().numpy()  # [29]
 
-        # Root state
-        robot_data["root_lin_vel_local"] = self.env.scene["robot"].data.root_lin_vel_b[0].cpu().numpy()  # [3]
+        # Root state - Complete velocity information for replay
+        # Position and orientation
         robot_data["root_position"] = root_state[0, 0:3].cpu().numpy()  # [3]
         robot_data["root_orientation"] = root_state[0, 3:7].cpu().numpy()  # [4] quaternion (w,x,y,z)
+
+        # Velocities - Record both local and world frame for maximum compatibility
+        robot_data["root_lin_vel_local"] = self.env.scene["robot"].data.root_lin_vel_b[0].cpu().numpy()  # [3] local frame
+        robot_data["root_ang_vel_local"] = self.env.scene["robot"].data.root_ang_vel_b[0].cpu().numpy()  # [3] local frame
+        robot_data["root_lin_vel_world"] = root_state[0, 7:10].cpu().numpy()  # [3] world frame
+        robot_data["root_ang_vel_world"] = root_state[0, 10:13].cpu().numpy()  # [3] world frame
 
         # TWIST2 inference output
         robot_data["twist2_inference_qpos"] = target_29.cpu().numpy().squeeze(0)  # [29]

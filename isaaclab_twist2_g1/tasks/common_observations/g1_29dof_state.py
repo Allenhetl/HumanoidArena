@@ -94,9 +94,9 @@ def _get_g1_robot_dds_instance():
             # dynamically import the DDS module
             sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'dds'))
             from dds.dds_master import dds_manager
-            print(f"dds_manager: {dds_manager}")
+            # print(f"dds_manager: {dds_manager}")
             _g1_robot_dds = dds_manager.get_object("g129")
-            print("[g1_state] G1 robot DDS communication instance obtained")
+            # print("[g1_state] G1 robot DDS communication instance obtained")
             
             # register the cleanup function
             import atexit
@@ -174,8 +174,8 @@ def get_robot_boy_joint_states(
                         boy_joint_torque[0][:],  
                         imu_data[0] 
                     )
-            else:
-                print(f"g1_robot_dds is not initialized")
+            # else:
+                # print(f"g1_robot_dds is not initialized")
         except Exception as e:
             print(f"[g1_state] Error writing robot state to DDS: {e}")
     

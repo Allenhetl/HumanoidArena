@@ -82,7 +82,11 @@ def _add_recording_status_overlay(rgb_image, recording_display_state):
     circle_radius = 15
 
     # Determine status based on recording display state
-    if recording_display_state == "saved":
+    if recording_display_state == "saving":
+        # Currently saving - orange dot
+        text = "SAVING..."
+        color = (0, 165, 255)  # Orange in BGR (B=0, G=165, R=255)
+    elif recording_display_state == "saved":
         # Just saved - green dot
         text = "SAVED"
         color = (0, 255, 0)  # Green in BGR
@@ -304,16 +308,16 @@ def get_camera_image(
 
     # write the multi-image data (RGB + depth) to shared memory
     if images:
-        print(f"[CAMERA_STATE] Writing {len(images)} images to shared memory: {list(images.keys())}")
-        if depths:
-            print(f"[CAMERA_STATE] Writing {len(depths)} depth maps to shared memory: {list(depths.keys())}")
+        # print(f"[CAMERA_STATE] Writing {len(images)} images to shared memory: {list(images.keys())}")
+        # if depths:
+            # print(f"[CAMERA_STATE] Writing {len(depths)} depth maps to shared memory: {list(depths.keys())}")
         success = multi_image_writer.write_images(images, depths if depths else None)
-        if success:
-            print(f"[CAMERA_STATE] ✅ Successfully wrote images and depth maps to shared memory!")
-        else:
-            print(f"[CAMERA_STATE] ❌ Failed to write images to shared memory!")
-    else:
-        print("[camera_state] No camera images found in the environment")
+        # if success:
+        #     print(f"[CAMERA_STATE] ✅ Successfully wrote images and depth maps to shared memory!")
+        # else:
+        #     print(f"[CAMERA_STATE] ❌ Failed to write images to shared memory!")
+    # else:
+    #     print("[camera_state] No camera images found in the environment")
 
     return torch.zeros((1, 480, 640, 3))
 
