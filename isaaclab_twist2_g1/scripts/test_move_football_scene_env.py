@@ -72,6 +72,9 @@ from isaaclab.envs import ManagerBasedRLEnv
 from tasks.g1_tasks.move_football_g1_29dof_dex3_wholebody.move_football_g1_29dof_dex3_hw_env_cfg import (
     MoveFootballG129Dex3WholebodyEnvCfg,
 )
+from tools.grass_ground_material import apply_grass_pbr_to_ground
+from tools.pitch_lines import create_simple_debug_lines
+from tools.football_physics_material import apply_football_physics_material
 
 
 def main():
@@ -86,8 +89,14 @@ def main():
     try:
         env_cfg = MoveFootballG129Dex3WholebodyEnvCfg()
         env_cfg.scene.num_envs = args.num_envs
+        # 同步 AppLauncher 的 --device 到 sim（避免出現 fabric cpu 而非 fabric gpu）
+        sim_device = getattr(args, "device", "cuda")
+        if sim_device == "cuda":
+            sim_device = "cuda:0"
+        env_cfg.sim.device = sim_device
         print("   ✓ Configuration created")
         print(f"   - Num envs: {env_cfg.scene.num_envs}")
+        print(f"   - Sim device: {env_cfg.sim.device} (fabric 將使用 GPU)")
         print(f"   - Decimation: {env_cfg.decimation}")
         print(f"   - dt: {env_cfg.sim.dt}")
     except Exception as e:
@@ -142,6 +151,22 @@ def main():
     try:
         env.reset()
         print("   ✓ Environment reset")
+        # 套用草坪 PBR 材質（需在 reset 後）
+        try:
+            apply_grass_pbr_to_ground(prim_path="/World/GroundPlane", uv_scale=(150.0, 150.0))
+        except Exception as e:
+            print(f"   [grass] 貼圖未準備或跳過: {e}")
+        try:
+            apply_football_physics_material(restitution=0.75)
+        except Exception as e:
+            print(f"   [football_physics] 跳過: {e}")
+        # 簡化測試標線：球門前 7.32m 標線 + 機器人周圍 2m 圓圈
+        try:
+            import omni.usd
+            stage = omni.usd.get_context().get_stage()
+            create_simple_debug_lines(stage, axis_mode="z_up")
+        except Exception as e:
+            print(f"   [pitch_lines] 標線未建立或跳過: {e}")
         if args.no_limit:
             print("   Running until Ctrl+C (no step limit)...")
 

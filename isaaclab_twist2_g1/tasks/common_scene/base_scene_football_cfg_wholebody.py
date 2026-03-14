@@ -2,28 +2,28 @@
 # License: Apache License, Version 2.0
 """
 Football (soccer ball) scene configuration for G1 wholebody tasks.
-Uses textured soccer ball USD (ImageToStl.com_Soccer+Ball.usdc) and goal net USD.
-Uses ISAAC_NUCLEUS Simple_Warehouse for room (no local project assets required).
+Uses textured soccer ball USD and goal net USD. 完全移除 warehouse / room / box，
+僅保留 ground + 球 + 球門 + 燈光 + 相機。
 """
 import os
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
+from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
-from tasks.common_scene.base_scene_pickplace_cylindercfg_wholebody import TableCylinderSceneCfgWH
+from tasks.common_config import CameraBaseCfg
 
 project_root = os.environ.get("PROJECT_ROOT")
 
 # Layout: 統一在此調整機器人、球、球門的初始位置
 # 機器人已向左旋轉 90° (init_rot=(0.7071,0,0,0.7071))，朝 +Y 方向
 # 球與球門的相對位置已同步旋轉，保持與機器人的相對位姿
-ROBOT_INIT_X = -1.9
-ROBOT_INIT_Y = -5.2
+ROBOT_INIT_X = 0.0
+ROBOT_INIT_Y = 0.0
 ROBOT_INIT_Z = 0.8  # 機器人站立高度
-GOAL_DISTANCE = 6.0  # 球門與機器人距離（沿機器人朝向）
+GOAL_DISTANCE = 5.0  # 球門與機器人距離（沿機器人朝向）
 BALL_DISTANCE = 1.0  # 足球在機器人前方距離
 GOAL_Z = 0.7  # 球門高度（Z 座標）
 GOAL_CENTER_Y_OFFSET = 2.5  # 球門中心相對於機器人朝向的橫向偏移
@@ -39,48 +39,15 @@ GOAL_OFFSET_Y = GOAL_DISTANCE  # dx
 # FIFA standard football specifications:
 # - Circumference: 68-70 cm -> diameter ~22 cm, radius = 0.11 m
 # - Mass: 410-450 g -> 0.43 kg
-# - Restitution (bounciness): typical soccer ball ~0.7-0.8
+# - Restitution (bounciness): FIFA 合格足球約 0.7–0.8，設 0.75 接近真實觸感
 # ImageToStl STL/USD typically uses mm units -> scale 0.001 for 220mm ball
 
 
 @configclass
-class TableFootballSceneCfgWH(TableCylinderSceneCfgWH):
-    """Football table scene configuration.
-    Extends TableCylinderSceneCfgWH with textured soccer ball USD and goal net.
-    Uses ISAAC_NUCLEUS Simple_Warehouse for room.
+class TableFootballSceneCfgWH(InteractiveSceneCfg):
+    """Football scene configuration.
+    足球場景：完全移除 warehouse / room_walls / box，僅保留 ground + 球 + 球門 + 燈光 + 相機。
     """
-
-    # Override room to use Isaac Nucleus warehouse (avoids dependency on local small_warehouse USD)
-    room_walls = AssetBaseCfg(
-        prim_path="/World/envs/env_.*/Room",
-        init_state=AssetBaseCfg.InitialStateCfg(
-            pos=[0.0, 0.0, 0],
-            rot=[1.0, 0.0, 0.0, 0.0],
-        ),
-        spawn=UsdFileCfg(
-            usd_path=f"{project_root}/assets/objects/small_warehouse/small_warehouse_digital_twin_boxtarget.usd",
-        ),
-    )
-
-    # Hide box (no table needed for football task - ball on floor)
-    box = RigidObjectCfg(
-        prim_path="/World/envs/env_.*/Box",
-        init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(-50.0, -50.0, -10.0),  # Move out of view
-            rot=[1.0, 0.0, 0.0, 0.0],
-        ),
-        spawn=sim_utils.CuboidCfg(
-            size=(0.01, 0.01, 0.01),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                rigid_body_enabled=True,
-                kinematic_enabled=True,
-                disable_gravity=True,
-            ),
-            mass_props=sim_utils.MassPropertiesCfg(mass=0.01),
-            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.6, 0.4, 0.2)),
-        ),
-    )
 
     # Football - 在機器人前方 BALL_DISTANCE 處（隨機器人 90° 左旋同步旋轉）
     object = RigidObjectCfg(
@@ -104,15 +71,41 @@ class TableFootballSceneCfgWH(TableCylinderSceneCfgWH):
                 contact_offset=0.005,
                 rest_offset=0.0,
             ),
+            # UsdFileCfg 不支援 physics_material，需於 reset 後由 apply_football_physics_material() 動態套用
         ),
     )
 
-    # Goal net - 機器人正前方 GOAL_DISTANCE，隨機器人 90° 左旋同步旋轉，球門開口朝向機器人
+    # Ground plane - 10×10m 草地渲染區域（非 UV），UV 維持 150×150
+    # 使用 Cuboid 取代 GroundPlane 以限制渲染範圍為 10×10m，視覺 PBR 由 apply_grass_pbr_to_ground() 動態套用
+    ground = RigidObjectCfg(
+        prim_path="/World/GroundPlane",
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=[0.0, 0.0, -0.005],
+            rot=[1.0, 0.0, 0.0, 0.0],
+        ),
+        spawn=sim_utils.CuboidCfg(
+            size=(14.0, 14.0, 0.01),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                rigid_body_enabled=True,
+                kinematic_enabled=True,
+                disable_gravity=True,
+            ),
+            mass_props=sim_utils.MassPropertiesCfg(mass=0.0),
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=0.7,
+                dynamic_friction=0.5,
+                restitution=0.1,
+            ),
+        ),
+    )
+
+    # Goal net 1 - 機器人正前方，球門開口朝向機器人
     goal_net = AssetBaseCfg(
         prim_path="/World/envs/env_.*/GoalNet",
         init_state=AssetBaseCfg.InitialStateCfg(
             pos=[ROBOT_INIT_X + GOAL_OFFSET_X, ROBOT_INIT_Y + GOAL_OFFSET_Y, GOAL_Z],
-            rot=[1.0, 0.0, 0.0, 0.0],  # 球網在原有基礎上再向左旋轉 90°
+            rot=[1.0, 0.0, 0.0, 0.0],
         ),
         spawn=UsdFileCfg(
             usd_path=f"{project_root}/assets/football_net/football_goal_physics.usd",
@@ -123,4 +116,36 @@ class TableFootballSceneCfgWH(TableCylinderSceneCfgWH):
                 disable_gravity=True,
             ),
         ),
+    )
+
+    # Goal net 2 - 對稱於另一側，球門開口朝向場中央
+    goal_net_2 = AssetBaseCfg(
+        prim_path="/World/envs/env_.*/GoalNet2",
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=[ROBOT_INIT_X - GOAL_OFFSET_X, ROBOT_INIT_Y - GOAL_OFFSET_Y, GOAL_Z],
+            rot=[0.0, 0.0, 0.0, 1.0],  # 180° 繞 Z，開口朝中心
+        ),
+        spawn=UsdFileCfg(
+            usd_path=f"{project_root}/assets/football_net/football_goal_physics.usd",
+            scale=(0.01, 0.01, 0.01),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                rigid_body_enabled=True,
+                kinematic_enabled=True,
+                disable_gravity=True,
+            ),
+        ),
+    )
+
+    # 燈光與相機
+    light = AssetBaseCfg(
+        prim_path="/World/light",
+        spawn=sim_utils.DomeLightCfg(
+            color=(0.75, 0.75, 0.75),
+            intensity=3000.0,
+        ),
+    )
+    world_camera = CameraBaseCfg.get_camera_config(
+        prim_path="/World/PerspectiveCamera",
+        pos_offset=(-1.9, -5.0, 1.8),
+        rot_offset=(-0.40614, 0.78544, 0.4277, -0.16986),
     )

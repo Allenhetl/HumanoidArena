@@ -127,6 +127,9 @@ from tools.augmentation_utils import (
     update_light,
     batch_augment_cameras_by_name,
 )
+from tools.grass_ground_material import apply_grass_pbr_to_ground
+from tools.pitch_lines import create_simple_debug_lines
+from tools.football_physics_material import apply_football_physics_material
 
 from tools.data_json_load import sim_state_to_json
 from dds.sim_state_dds import *
@@ -319,6 +322,20 @@ def main():
         )
     env.sim.reset()
     env.reset()
+    # 足球任務：套用草坪 PBR 材質到地面（需在 reset 後，確保 stage 已完整載入）
+    # uv_scale=(150,150) 維持草地 UV 密度，渲染區域由地面尺寸（10×10m）控制
+    if "football" in args_cli.task.lower():
+        apply_grass_pbr_to_ground(prim_path="/World/GroundPlane", uv_scale=(150.0, 150.0))
+        try:
+            apply_football_physics_material(restitution=0.75)
+        except Exception as e:
+            print(f"[football_physics] 跳過: {e}")
+        try:
+            import omni.usd
+            stage = omni.usd.get_context().get_stage()
+            create_simple_debug_lines(stage)
+        except Exception as e:
+            print(f"[pitch_lines] 標線未建立或跳過: {e}")
 
     # ================= Debug: print Box & Cube physics properties =================
     print("\n" + "=" * 60)

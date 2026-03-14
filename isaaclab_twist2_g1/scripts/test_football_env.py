@@ -48,6 +48,8 @@ import tasks.g1_tasks.move_football_g1_29dof_dex3_wholebody  # noqa: F401
 
 # Import parse_cfg for loading env config (required by IsaacLab gym envs)
 from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
+from tools.grass_ground_material import apply_grass_pbr_to_ground
+from tools.pitch_lines import create_simple_debug_lines
 
 
 def main():
@@ -102,6 +104,18 @@ def main():
     try:
         obs, _ = env.reset()
         print(f"   ✓ Environment reset")
+        # 套用草坪 PBR 材質（需在 reset 後）
+        try:
+            apply_grass_pbr_to_ground(prim_path="/World/GroundPlane", uv_scale=(150.0, 150.0))
+        except Exception as e:
+            print(f"   [grass] 貼圖未準備或跳過: {e}")
+        # 建立球場白色標線
+        try:
+            import omni.usd
+            stage = omni.usd.get_context().get_stage()
+            create_simple_debug_lines(stage)
+        except Exception as e:
+            print(f"   [pitch_lines] 標線未建立或跳過: {e}")
         if isinstance(obs, dict):
             print(f"   Observation keys: {list(obs.keys())}")
         else:
