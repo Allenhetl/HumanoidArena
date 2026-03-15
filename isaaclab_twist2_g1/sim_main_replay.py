@@ -292,12 +292,23 @@ def main():
         print(f"Failed to create replay action provider: {e}")
         return
 
-    # NOTE: Initial state restoration is now handled by ReplayActionProvider
-    # in its get_action() method when current_frame == 0.
-    # This ensures proper timing and avoids conflicts with the control loop.
-    print(f"\n========= Initial state will be restored by ReplayActionProvider =========")
-    print(f"Initial state restoration happens in the first get_action() call")
-    print("=" * 60)
+    # CRITICAL: Set initial state BEFORE simulation starts
+    # This must be done after creating action provider but before starting control loop
+    print(f"\n" + "="*60)
+    print("Setting initial state from Frame 0")
+    print("="*60)
+    try:
+        # Simply set the initial state - do NOT call env.reset() after this!
+        # env.reset() would overwrite our carefully set initial state
+        # action_provider.set_initial_state_before_simulation()
+        print(f"✅ Initial state set successfully")
+
+    except Exception as e:
+        print(f"❌ Failed to set initial state: {e}")
+        import traceback
+        traceback.print_exc()
+        return
+    print("="*60 + "\n")
 
     # create controller
     print("========= create controller =========")

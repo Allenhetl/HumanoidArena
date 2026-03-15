@@ -47,7 +47,7 @@ redis-cli DEL \
   #   足球: Isaac-Move-Football-G129-Dex3-Wholebody
   # TASK_NAME="${TASK_NAME:-Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody}"
   TASK_NAME="${TASK_NAME:-Isaac-Move-Football-G129-Dex3-Wholebody}"
-  # TASK_NAME="${TASK_NAME:-Isaac-Move-Boxing-Bag-Hanging-G129-Dex3-Wholebody}"
+#   TASK_NAME="${TASK_NAME:-Isaac-Move-Boxing-Bag-Hanging-G129-Dex3-Wholebody}"
 
   # Random seed for reproducibility (set to fixed value for deterministic behavior)
   SEED="${SEED:-42}"

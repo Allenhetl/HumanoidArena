@@ -456,6 +456,54 @@ class DDSRLActionProvider(ActionProvider):
             max_frames=10000  # ~5 minutes @ 30Hz
         )
 
+        # Always start recording immediately on initialization (removed idle state)
+        print(f"[{self.name}] 🔴 AUTO-START RECORDING ENABLED")
+        print(f"[{self.name}] Recording will start immediately")
+        print(f"[{self.name}] This ensures Frame 0 is the first state after initialization")
+        self.recording_manager.start_recording()
+
+        # Create debug log file immediately
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_dir = "./recording_debug_logs"
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, f"recording_debug_{timestamp}.log")
+        self._debug_log_file = open(log_path, 'w')
+        self._debug_log_enabled = True
+        self._debug_log_file.write(f"=== Recording Debug Log (AUTO-START) ===\n")
+        self._debug_log_file.write(f"Started immediately after initialization\n")
+        self._debug_log_file.write(f"Log file: {log_path}\n\n")
+        self._debug_log_file.flush()
+        print(f"[{self.name}] Debug log enabled: {log_path}")
+
+        # Simple replay mode (hardcoded for testing)
+        self._simple_replay_mode = False
+        self._simple_replay_data = None
+        self._simple_replay_frame = 0
+
+        # Check if replay file exists (hardcoded path)
+        simple_replay_path = "/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/Isaac-Move-Football-G129-Dex3-Wholebody_1773495310633878.npz"
+        if os.path.exists(simple_replay_path):
+            print(f"[{self.name}] 🎬 SIMPLE REPLAY MODE ENABLED")
+            print(f"[{self.name}] Loading replay data from: {simple_replay_path}")
+            try:
+                self._simple_replay_data = np.load(simple_replay_path, allow_pickle=True)
+                # Print available keys
+                print(f"[{self.name}] Available keys in npz: {list(self._simple_replay_data.keys())}")
+
+                # Check if robot_twist2_inference_qpos exists
+                if 'robot_twist2_inference_qpos' in self._simple_replay_data:
+                    self._simple_replay_mode = True
+                    num_frames = self._simple_replay_data['robot_twist2_inference_qpos'].shape[0]
+                    print(f"[{self.name}] ✅ Loaded {num_frames} frames for replay")
+                    print(f"[{self.name}] Action shape: {self._simple_replay_data['robot_twist2_inference_qpos'].shape}")
+                else:
+                    print(f"[{self.name}] ❌ 'robot_twist2_inference_qpos' not found in npz file")
+                    self._simple_replay_mode = False
+            except Exception as e:
+                print(f"[{self.name}] ❌ Failed to load replay data: {e}")
+                self._simple_replay_mode = False
+
         # Initialize DDS communication
         self.robot_dds = None
         self.gripper_dds = None
@@ -518,6 +566,11 @@ class DDSRLActionProvider(ActionProvider):
 
         # Thread-safe flag for save completion (set by background thread, read by main thread)
         self._save_completion_state = None  # None, "success", or "failure"
+
+        # Reset control state
+        self._reset_requested = False  # Flag to indicate reset is requested
+        self._waiting_for_reset_complete = False  # Flag to indicate waiting for reset completion
+        self._reset_complete_received = False  # Flag set when reset complete signal received
 
         # Debug control
         self._debug_smpl_data = False  # Set to True to enable SMPL data debug output
@@ -1475,8 +1528,18 @@ class DDSRLActionProvider(ActionProvider):
             recording_data_time = time.perf_counter() - recording_data_start
 
             # 2.6. Recording state machine
+            # Debug: Print recording command state
+            if self._recording_command != "none":
+                print(f"[{self.name}] 🔍 Recording command received: {self._recording_command}")
+                print(f"[{self.name}] 🔍 Recording manager state: is_recording={self.recording_manager.is_recording}, buffer_size={len(self.recording_manager.recording_buffer)}")
+
+            # If already recording and receive "start" command, treat it as "save"
+            if self._recording_command == "start" and self.recording_manager.is_recording:
+                print(f"[{self.name}] 🔄 Already recording: Converting 'start' command to 'save'")
+                self._recording_command = "save"
+
             # Handle recording commands from Redis
-            if self._recording_command == "start":
+            if self._recording_command == "start" and not self.recording_manager.is_recording:
                 self.recording_manager.start_recording()
                 self._recording_display_state = "recording"
                 self._recording_display_counter = 0
@@ -1508,6 +1571,66 @@ class DDSRLActionProvider(ActionProvider):
                 self._save_in_progress = False
                 # Reset command after processing
                 self._recording_command = "none"
+
+            elif self._recording_command == "save_and_reset":
+                # Save recording, wait for completion, then trigger reset
+                print(f"[{self.name}] 💾 save_and_reset command received")
+
+                # Start save and block until complete
+                print(f"[{self.name}] 💾 Saving recording...")
+                self.recording_manager.save_recording(completion_callback=None)
+
+                # Block and wait for save to complete
+                print(f"[{self.name}] ⏳ Waiting for save to complete...")
+                self.recording_manager.save_queue.join()  # Block until all saves are done
+                print(f"[{self.name}] ✅ Save completed")
+
+                # Trigger complete reset via Redis
+                print(f"[{self.name}] 🔄 Triggering complete reset...")
+                self._trigger_complete_reset()
+
+                # Wait for reset complete signal
+                print(f"[{self.name}] ⏳ Waiting for reset to complete...")
+                self._waiting_for_reset_complete = True
+                self._reset_complete_received = False
+
+                # Reset command after processing
+                self._recording_command = "none"
+
+            elif self._recording_command == "discard_and_reset":
+                # Discard recording, then trigger reset
+                print(f"[{self.name}] ❌ discard_and_reset command received")
+
+                # Discard recording (immediate)
+                print(f"[{self.name}] ❌ Discarding recording...")
+                self.recording_manager.cancel_recording()
+                print(f"[{self.name}] ✅ Recording discarded")
+
+                # Trigger complete reset via Redis
+                print(f"[{self.name}] 🔄 Triggering complete reset...")
+                self._trigger_complete_reset()
+
+                # Wait for reset complete signal
+                print(f"[{self.name}] ⏳ Waiting for reset to complete...")
+                self._waiting_for_reset_complete = True
+                self._reset_complete_received = False
+
+                # Reset command after processing
+                self._recording_command = "none"
+
+            # Check for reset complete signal from sim_main
+            if self._waiting_for_reset_complete:
+                reset_complete = self._check_reset_complete()
+                if reset_complete:
+                    print(f"[{self.name}] ✅ Reset complete signal received")
+                    self._waiting_for_reset_complete = False
+                    self._reset_complete_received = True
+
+                    # Start new recording immediately after reset
+                    print(f"[{self.name}] 🔴 Starting new recording after reset...")
+                    self.recording_manager.start_recording()
+                    self._recording_display_state = "recording"
+                    print(f"[{self.name}] ✅ New recording started")
 
             # Update display state counter and transitions
             # Priority order: check save completion > saving > saved/discard countdown > recording > idle
@@ -1975,6 +2098,57 @@ class DDSRLActionProvider(ActionProvider):
 
         return recording_data
 
+    def _trigger_complete_reset(self):
+        """Trigger complete reset (including PhysX) via Redis."""
+        import redis
+        import json
+        import time
+
+        try:
+            redis_client = redis.Redis(host='localhost', port=6379, db=0)
+
+            # Send complete reset command (category 3 = complete reset including PhysX)
+            reset_command = {
+                "reset_category": "3",  # Complete reset (PhysX + all entities)
+                "timestamp": int(time.time() * 1000)
+            }
+
+            redis_client.set("isaac_reset_trigger", json.dumps(reset_command))
+            redis_client.expire("isaac_reset_trigger", 5)  # Auto-expire after 5 seconds
+
+            print(f"[{self.name}] ✅ Complete reset command sent via Redis")
+
+        except Exception as e:
+            print(f"[{self.name}] ❌ Failed to send reset command: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _check_reset_complete(self) -> bool:
+        """Check if reset complete signal has been received from sim_main."""
+        try:
+            import redis
+            import json
+
+            redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+
+            # Check for reset complete signal
+            reset_complete_signal = redis_client.get("isaac_reset_complete_unitree_g1_with_hands")
+
+            if reset_complete_signal:
+                reset_data = json.loads(reset_complete_signal)
+                status = reset_data.get("status", "")
+
+                if status == "complete":
+                    # Clear the signal
+                    redis_client.delete("isaac_reset_complete_unitree_g1_with_hands")
+                    return True
+
+            return False
+
+        except Exception as e:
+            print(f"[{self.name}] ❌ Failed to check reset complete: {e}")
+            return False
+
     def _convert_to_joint_range(self, value):
         """Convert gripper control value to joint angle"""
         input_min, input_max = 0.0, 5.6
@@ -1985,6 +2159,12 @@ class DDSRLActionProvider(ActionProvider):
     def cleanup(self):
         """Clean up DDS resources and recording manager"""
         try:
+            # Close debug log file
+            if hasattr(self, '_debug_log_file') and self._debug_log_file is not None:
+                print(f"[{self.name}] Closing debug log file...")
+                self._debug_log_file.close()
+                self._debug_log_file = None
+
             # Shutdown recording manager first (wait for pending saves)
             if hasattr(self, 'recording_manager'):
                 self.recording_manager.shutdown()

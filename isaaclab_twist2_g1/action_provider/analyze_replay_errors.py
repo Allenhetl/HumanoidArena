@@ -9,6 +9,8 @@ Replay误差分析工具 - 可视化录制数据与仿真状态的差异
 import json
 import argparse
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # 使用非交互式后端，避免GUI相关错误
 import matplotlib.pyplot as plt
 from pathlib import Path
 
@@ -34,8 +36,15 @@ def plot_errors(data, output_dir):
         'joint_vel': [f['errors']['joint_vel_l2'] for f in data['frames']],
     }
 
+    # 检查是否有力矩数据
+    has_torque = 'applied_torque_l2' in data['frames'][0]['errors']
+    if has_torque:
+        errors['applied_torque'] = [f['errors']['applied_torque_l2'] for f in data['frames']]
+
     # 创建图表
-    fig, axes = plt.subplots(3, 2, figsize=(15, 12))
+    num_plots = 7 if has_torque else 6
+    num_rows = 4 if has_torque else 3
+    fig, axes = plt.subplots(num_rows, 2, figsize=(15, 5 * num_rows))
     fig.suptitle('Replay Error Analysis', fontsize=16)
 
     titles = [
@@ -47,8 +56,13 @@ def plot_errors(data, output_dir):
         ('joint_vel', 'Joint Velocity Error (rad/s)'),
     ]
 
+    if has_torque:
+        titles.append(('applied_torque', 'Applied Torque Error (Nm)'))
+
     for idx, (key, title) in enumerate(titles):
-        ax = axes[idx // 2, idx % 2]
+        row = idx // 2
+        col = idx % 2
+        ax = axes[row, col]
         ax.plot(frames, errors[key], linewidth=1.5)
         ax.set_xlabel('Frame')
         ax.set_ylabel('L2 Error')
@@ -65,6 +79,11 @@ def plot_errors(data, output_dir):
                    xytext=(10, 10), textcoords='offset points',
                    bbox=dict(boxstyle='round,pad=0.5', fc='yellow', alpha=0.7),
                    arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0'))
+
+    # 隐藏多余的子图（如果有）
+    if has_torque:
+        # 7个图，隐藏第8个位置
+        axes[3, 1].axis('off')
 
     plt.tight_layout()
 
@@ -87,7 +106,11 @@ def analyze_error_patterns(data, errors):
 
     # 1. 误差增长趋势
     print("\n1. 误差增长趋势:")
-    for key in ['root_pos', 'joint_pos']:
+    analysis_keys = ['root_pos', 'joint_pos']
+    if 'applied_torque' in errors:
+        analysis_keys.append('applied_torque')
+
+    for key in analysis_keys:
         err = np.array(errors[key])
         # 计算前10%和后10%的平均误差
         early_avg = np.mean(err[:total_frames//10])
@@ -99,7 +122,11 @@ def analyze_error_patterns(data, errors):
 
     # 2. 误差突变检测
     print("\n2. 误差突变检测 (误差增长 > 50%):")
-    for key in ['root_pos', 'root_lin_vel', 'joint_pos']:
+    spike_keys = ['root_pos', 'root_lin_vel', 'joint_pos']
+    if 'applied_torque' in errors:
+        spike_keys.append('applied_torque')
+
+    for key in spike_keys:
         err = np.array(errors[key])
         # 计算相邻帧的误差变化率
         err_diff = np.diff(err)
@@ -118,7 +145,11 @@ def analyze_error_patterns(data, errors):
 
     # 3. 周期性分析
     print("\n3. 误差周期性分析:")
-    for key in ['root_pos', 'joint_pos']:
+    period_keys = ['root_pos', 'joint_pos']
+    if 'applied_torque' in errors:
+        period_keys.append('applied_torque')
+
+    for key in period_keys:
         err = np.array(errors[key])
         # 简单的自相关分析
         if len(err) > 20:
@@ -190,7 +221,11 @@ def generate_report(data, errors, output_dir):
         # 误差分布
         f.write("\n误差分布 (百分位数):\n")
         f.write("-"*80 + "\n")
-        for key in ['root_pos', 'joint_pos']:
+        percentile_keys = ['root_pos', 'joint_pos']
+        if 'applied_torque' in errors:
+            percentile_keys.append('applied_torque')
+
+        for key in percentile_keys:
             err = np.array(errors[key])
             p50 = np.percentile(err, 50)
             p90 = np.percentile(err, 90)

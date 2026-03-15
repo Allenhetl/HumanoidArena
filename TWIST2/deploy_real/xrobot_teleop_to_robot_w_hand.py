@@ -119,10 +119,11 @@ class StateMachine:
         self.left_key_two_was_pressed = False
         self.left_axis_click_was_pressed = False
 
-        # Recording control state
-        self.recording_active = False
-        self.recording_command = "none"  # "none", "start", "save", "cancel"
+        # Recording control state - Start recording immediately on initialization
+        self.recording_active = True  # Changed: Start recording immediately
+        self.recording_command = "start"  # Changed: Set initial command to start
         self.recording_command_frame_count = 0  # Counter to keep command visible for a few frames
+        print("🔴 Recording will start immediately on initialization")
         # Interpolation state
         self.is_interpolating = False
         self.interpolation_start_time = None
@@ -191,25 +192,23 @@ class StateMachine:
                 # Emergency stop
                 self._emergency_stop()
 
-        # Handle left key press - trigger Isaac Lab reset via Redis
+        # Handle left key press - Save recording and trigger complete reset
         if left_key_just_pressed:
-            print("🔄 Left key pressed - Triggering Isaac Lab reset...")
-            self._trigger_isaac_reset()
+            print("💾 Left key pressed - Save recording and trigger complete reset...")
+            # Set recording command to save_and_reset
+            self.recording_active = False
+            self.recording_command = "save_and_reset"
+            self.recording_command_frame_count = 0
+            print("💾 Recording will be saved, then environment will be completely reset")
 
-        # Handle left key_two press - toggle recording state
+        # Handle left key_two press - Discard recording and trigger complete reset
         if left_key_two_just_pressed:
-            if not self.recording_active:
-                # Start recording
-                self.recording_active = True
-                self.recording_command = "start"
-                self.recording_command_frame_count = 0
-                print("🔴 Recording started")
-            else:
-                # Save and stop recording
-                self.recording_active = False
-                self.recording_command = "save"
-                self.recording_command_frame_count = 0
-                print("💾 Recording saved and stopped")
+            print("❌ Left key_two pressed - Discard recording and trigger complete reset...")
+            # Set recording command to discard_and_reset
+            self.recording_active = False
+            self.recording_command = "discard_and_reset"
+            self.recording_command_frame_count = 0
+            print("❌ Recording will be discarded, then environment will be completely reset")
 
         # Handle right key press - cycle between idle, teleop, pause
         if right_key_just_pressed:

@@ -105,6 +105,7 @@ parser.add_argument("--setpgrp", action="store_true", default=False, help="detac
 
 # recording parameters
 parser.add_argument("--recording_save_dir", type=str, default="./recording_data", help="directory to save recording data")
+parser.add_argument("--auto_start_recording", action="store_true", default=False, help="automatically start recording on startup (for testing from-reset reproducibility)")
 
 # random seed for reproducibility
 parser.add_argument("--seed", type=int, default=None, help="random seed for reproducibility (default: None)")
@@ -736,6 +737,26 @@ def main():
                                 elif reset_category == "2":
                                     print("🔄 Resetting all (robot + objects)...")
                                     env_cfg.event_manager.trigger("reset_all_self", env)
+                                elif reset_category == "3":
+                                    print("🔄 Complete reset (PhysX + all entities)...")
+                                    # Complete reset: clear PhysX internal state
+                                    env.sim.reset()  # Clear PhysX internal state
+                                    env.reset()      # Reset environment
+                                    env_cfg.event_manager.trigger("reset_all_self", env)
+                                    print("✅ Complete reset finished")
+
+                                    # Send reset complete signal via Redis
+                                    try:
+                                        reset_complete_signal = {
+                                            "status": "complete",
+                                            "timestamp": int(time.time() * 1000)
+                                        }
+                                        redis_client.set("isaac_reset_complete_unitree_g1_with_hands",
+                                                       json.dumps(reset_complete_signal))
+                                        redis_client.expire("isaac_reset_complete_unitree_g1_with_hands", 5)
+                                        print("✅ Reset complete signal sent via Redis")
+                                    except Exception as e:
+                                        print(f"❌ Failed to send reset complete signal: {e}")
 
                                 # Clear the trigger
                                 redis_client.delete("isaac_reset_trigger")

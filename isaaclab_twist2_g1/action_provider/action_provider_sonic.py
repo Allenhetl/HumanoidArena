@@ -133,6 +133,78 @@ def quat_to_rotation_6d(quat: np.ndarray) -> np.ndarray:
     return rot6d.astype(np.float32)
 
 
+def quat_xyzw_to_wxyz(quat: np.ndarray) -> np.ndarray:
+    """Convert quaternion from xyzw to wxyz."""
+    quat = np.asarray(quat, dtype=np.float32)
+    return np.concatenate([quat[..., 3:4], quat[..., 0:3]], axis=-1).astype(np.float32)
+
+
+def quat_normalize_wxyz(quat: np.ndarray) -> np.ndarray:
+    """Normalize quaternion in wxyz format."""
+    quat = np.asarray(quat, dtype=np.float32)
+    norm = np.linalg.norm(quat, axis=-1, keepdims=True)
+    return (quat / np.clip(norm, 1e-12, None)).astype(np.float32)
+
+
+def quat_conjugate_wxyz(quat: np.ndarray) -> np.ndarray:
+    """Quaternion conjugate in wxyz format."""
+    quat = np.asarray(quat, dtype=np.float32)
+    out = quat.copy()
+    out[..., 1:] *= -1.0
+    return out.astype(np.float32)
+
+
+def quat_mul_wxyz(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
+    """Quaternion multiply in wxyz format."""
+    q1 = np.asarray(q1, dtype=np.float32)
+    q2 = np.asarray(q2, dtype=np.float32)
+
+    w1, x1, y1, z1 = q1[..., 0], q1[..., 1], q1[..., 2], q1[..., 3]
+    w2, x2, y2, z2 = q2[..., 0], q2[..., 1], q2[..., 2], q2[..., 3]
+
+    out = np.stack(
+        [
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        ],
+        axis=-1,
+    )
+    return quat_normalize_wxyz(out)
+
+
+def quat_angle_deg_wxyz(quat: np.ndarray) -> float:
+    """Return rotation angle in degrees for a wxyz quaternion."""
+    quat = quat_normalize_wxyz(quat)
+    w = float(np.clip(np.abs(quat[..., 0]), -1.0, 1.0))
+    return float(np.degrees(2.0 * np.arccos(w)))
+
+
+def quat_heading_wxyz(quat: np.ndarray) -> np.ndarray:
+    """Extract z-up yaw-only quaternion in wxyz format."""
+    quat = quat_normalize_wxyz(quat)
+    w, x, y, z = quat[..., 0], quat[..., 1], quat[..., 2], quat[..., 3]
+    yaw = np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    half_yaw = 0.5 * yaw
+    out = np.stack(
+        [np.cos(half_yaw), np.zeros_like(half_yaw), np.zeros_like(half_yaw), np.sin(half_yaw)],
+        axis=-1,
+    )
+    return quat_normalize_wxyz(out)
+
+
+def quat_heading_inv_wxyz(quat: np.ndarray) -> np.ndarray:
+    """Inverse of yaw-only quaternion in wxyz format."""
+    return quat_conjugate_wxyz(quat_heading_wxyz(quat))
+
+
+def array_range_str(arr: np.ndarray) -> str:
+    """Compact range formatter for debug logs."""
+    arr = np.asarray(arr)
+    return f"[{arr.min():.4f}, {arr.max():.4f}]"
+
+
 # ---------------------------------------------------------------------------
 # SONIC 关节顺序（SONIC IsaacLab order，对应 GR00T 部署代码中的 IsaacLab order）
 # 注意：SONIC encoder/decoder 输入输出都是这个顺序，不需要转换
@@ -244,6 +316,49 @@ G1_ACTION_SCALE_ISAACLAB = np.array([
 # SMPL 参数维度
 _N_SMPL_JOINTS = 24   # smpl_joints: (N, 24, 3)
 _N_SMPL_POSES  = 21   # smpl_pose:   (N, 21, 3)
+_STEP1_FRAMES = 10
+_STEP5_FRAMES = 10
+_STEP5_STRIDE = 5
+_STEP5_HISTORY_LEN = (_STEP5_FRAMES - 1) * _STEP5_STRIDE + 1
+
+OFFICIAL_WRIST_INDICES = [23, 24, 25, 26, 27, 28]
+OFFICIAL_LOWERBODY_INDICES = [0, 3, 6, 9, 13, 17, 1, 4, 7, 10, 14, 18]
+SMPL_MODE_ACTIVE_BLOCKS = [
+    "encoder_mode_4",
+    "smpl_joints_10frame_step1",
+    "smpl_anchor_orientation_10frame_step1",
+    "motion_joint_positions_wrists_10frame_step1",
+]
+SMPL_MODE_ZEROED_BLOCKS = [
+    "motion_joint_positions_10frame_step5",
+    "motion_joint_velocities_10frame_step5",
+    "motion_root_z_position_10frame_step5",
+    "motion_root_z_position",
+    "motion_anchor_orientation",
+    "motion_anchor_orientation_10frame_step5",
+    "motion_joint_positions_lowerbody_10frame_step5",
+    "motion_joint_velocities_lowerbody_10frame_step5",
+    "vr_3point_local_target",
+    "vr_3point_local_orn_target",
+]
+
+
+def gather_temporal_window(hist: np.ndarray, num_frames: int, stride: int) -> np.ndarray:
+    """Take the latest temporal window using `stride` over a history buffer."""
+    hist = np.asarray(hist, dtype=np.float32)
+    required = (num_frames - 1) * stride + 1
+    if hist.shape[0] < required:
+        raise ValueError(
+            f"History too short for num_frames={num_frames}, stride={stride}: "
+            f"len={hist.shape[0]}, required={required}"
+        )
+    start = hist.shape[0] - required
+    window = hist[start::stride]
+    if window.shape[0] != num_frames:
+        raise ValueError(
+            f"Temporal window shape mismatch: got {window.shape[0]}, expected {num_frames}"
+        )
+    return window.astype(np.float32)
 
 
 class SonicActionProvider(ActionProvider):
@@ -265,6 +380,9 @@ class SonicActionProvider(ActionProvider):
         self.zmq_port       = getattr(args_cli, "sonic_zmq_port",    5556)
         self.encoder_path   = getattr(args_cli, "sonic_encoder_path", "")
         self.decoder_path   = getattr(args_cli, "sonic_decoder_path", "")
+        # self._sonic_warmup_steps = int(getattr(args_cli, "sonic_warmup_steps", 50))  # warmup 已注释，仅用 history_ready
+        self._sonic_warmup_steps = 0
+        self._sonic_smooth_steps = int(getattr(args_cli, "sonic_smooth_steps", 20))
         cfg = getattr(env, "cfg", None)
         self._decimation    = int(getattr(cfg, "decimation", 4))
 
@@ -308,6 +426,7 @@ class SonicActionProvider(ActionProvider):
         print(f"  right_shoulder_pitch (idx 12): {default_sonic[12]:.3f}")
         print(f"  right_shoulder_roll (idx 16): {default_sonic[16]:.3f}")
         print(f"  right_elbow (idx 22): {default_sonic[22]:.3f}")
+        self._init_sonic_target_np = default_sonic.astype(np.float32).copy()
 
         # SONIC 默认姿态（SONIC IsaacLab order）
         self._sonic_default_np = SONIC_DEFAULT_POS.copy()
@@ -377,26 +496,36 @@ class SonicActionProvider(ActionProvider):
     def _setup_buffers(self):
         # SMPL 历史帧缓冲（encoder 需要 10 帧）
         self._smpl_joints_buf = np.zeros(
-            (10, _N_SMPL_JOINTS, 3), dtype=np.float32)   # (10, 24, 3)
+            (_STEP1_FRAMES, _N_SMPL_JOINTS, 3), dtype=np.float32)   # (10, 24, 3)
         self._smpl_pose_buf   = np.zeros(
-            (10, _N_SMPL_POSES,  3), dtype=np.float32)   # (10, 21, 3)
+            (_STEP1_FRAMES, _N_SMPL_POSES,  3), dtype=np.float32)   # (10, 21, 3)
         self._body_rot6d_buf  = np.tile(
-            np.array([1., 0., 0., 1., 0., 0.], dtype=np.float32), (10, 1))  # (10, 6)
+            np.array([1., 0., 0., 1., 0., 0.], dtype=np.float32), (_STEP1_FRAMES, 1))  # (10, 6)
 
         # 机器人状态历史缓冲（SONIC IsaacLab order）
         # 用于 encoder 输入（step5 采样）和 decoder 输入（step1 连续10帧）
         self._robot_joint_pos_hist = np.tile(
-            self._sonic_default_np[np.newaxis], (10, 1))  # (10, 29)
-        self._robot_joint_vel_hist = np.zeros((10, 29), dtype=np.float32)
+            self._sonic_default_np[np.newaxis], (_STEP1_FRAMES, 1))  # (10, 29)
+        self._robot_joint_vel_hist = np.zeros((_STEP1_FRAMES, 29), dtype=np.float32)
+
+        # 参考 motion 历史缓冲（来自 ZMQ replay/reference，而不是当前仿真机器人）
+        self._motion_joint_pos_hist = np.tile(
+            self._sonic_default_np[np.newaxis], (_STEP5_HISTORY_LEN, 1)
+        )
+        self._motion_joint_vel_hist = np.zeros((_STEP5_HISTORY_LEN, 29), dtype=np.float32)
+        self._motion_root_z_hist = np.zeros((_STEP5_HISTORY_LEN,), dtype=np.float32)
+        self._motion_anchor_rot6d_hist = np.tile(
+            np.array([1., 0., 0., 1., 0., 0.], dtype=np.float32), (_STEP5_HISTORY_LEN, 1)
+        )
 
         # Decoder 需要的额外历史缓冲
         # his_base_angular_velocity_10frame_step1: (10, 3)
-        self._ang_vel_hist    = np.zeros((10, 3),  dtype=np.float32)
+        self._ang_vel_hist    = np.zeros((_STEP1_FRAMES, 3),  dtype=np.float32)
         # his_gravity_dir_10frame_step1: (10, 3)
-        self._grav_dir_hist   = np.zeros((10, 3),  dtype=np.float32)
+        self._grav_dir_hist   = np.zeros((_STEP1_FRAMES, 3),  dtype=np.float32)
         # his_last_actions_10frame_step1: (10, 29)
         self._last_action_hist = np.tile(
-            self._sonic_default_np[np.newaxis], (10, 1))  # (10, 29)
+            self._sonic_default_np[np.newaxis], (_STEP1_FRAMES, 1))  # (10, 29)
 
         # 手部关节目标
         self._left_hand_target  = np.zeros(7, dtype=np.float32)
@@ -407,6 +536,49 @@ class SonicActionProvider(ActionProvider):
 
         # SMPL数据有效性标志（用于检测是否接收到有效的遥操数据）
         self._smpl_data_valid = False
+        self._frame_count = 0
+        self._smpl_history_fill = 0
+        self._anchor_heading_initialized = False
+        self._anchor_use_heading_align = False
+        self._anchor_init_base_quat_wxyz = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        self._anchor_init_ref_quat_wxyz = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        self._anchor_heading_align_quat_wxyz = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+
+    def on_env_reset(self):
+        try:
+            robot = self.env.scene["robot"].data
+            joint_pos_sonic = robot.joint_pos[0, self._sonic_idx].cpu().numpy().astype(np.float32)
+            joint_vel_sonic = robot.joint_vel[0, self._sonic_idx].cpu().numpy().astype(np.float32)
+        except Exception:
+            joint_pos_sonic = self._init_sonic_target_np.copy()
+            joint_vel_sonic = np.zeros(29, dtype=np.float32)
+            root_z = 0.0
+        else:
+            root_z = float(robot.root_state_w[0, 2].cpu().numpy())
+
+        self._frame_count = 0
+        self._smpl_data_valid = False
+        self._smpl_history_fill = 0
+        self._latent = None
+        self._anchor_heading_initialized = False
+        self._anchor_use_heading_align = False
+        self._anchor_init_base_quat_wxyz[:] = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        self._anchor_init_ref_quat_wxyz[:] = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        self._anchor_heading_align_quat_wxyz[:] = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        self._smpl_joints_buf.fill(0.0)
+        self._smpl_pose_buf.fill(0.0)
+        self._body_rot6d_buf[:] = np.array([1., 0., 0., 1., 0., 0.], dtype=np.float32)
+        self._robot_joint_pos_hist[:] = joint_pos_sonic
+        self._robot_joint_vel_hist[:] = joint_vel_sonic
+        self._motion_joint_pos_hist[:] = joint_pos_sonic
+        self._motion_joint_vel_hist[:] = joint_vel_sonic
+        self._motion_root_z_hist[:] = root_z
+        self._motion_anchor_rot6d_hist[:] = self._body_rot6d_buf[-1]
+        self._ang_vel_hist.fill(0.0)
+        self._grav_dir_hist.fill(0.0)
+        self._last_action_hist.fill(0.0)
+        # print(f"[SONIC] on_env_reset: frame_count reset, warmup={self._sonic_warmup_steps}")  # warmup 已注释
+        print(f"[SONIC] on_env_reset: frame_count and history reset")
 
     def _setup_hand_dds(self, args_cli):
         self._dex3_dds = None
@@ -416,6 +588,22 @@ class SonicActionProvider(ActionProvider):
                 self._dex3_dds = dds_manager.get_object("dex3")
         except Exception as e:
             print(f"[SonicActionProvider] hand DDS init skipped: {e}")
+
+    def _update_robot_hist_from_env(self):
+        """仅用当前仿真中的机器人状态更新 _robot_joint_pos_hist / _robot_joint_vel_hist（原 warmup/现 history 未满时填历史用）。"""
+        try:
+            robot = self.env.scene["robot"].data
+            joint_pos_sonic = robot.joint_pos[0, self._sonic_idx].cpu().numpy()
+            joint_vel_sonic = robot.joint_vel[0, self._sonic_idx].cpu().numpy()
+            root_z = float(robot.root_state_w[0, 2].cpu().numpy())
+
+            self._robot_joint_pos_hist = np.roll(self._robot_joint_pos_hist, -1, axis=0)
+            self._robot_joint_pos_hist[-1] = joint_pos_sonic
+            self._robot_joint_vel_hist = np.roll(self._robot_joint_vel_hist, -1, axis=0)
+            self._robot_joint_vel_hist[-1] = joint_vel_sonic
+
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Per-step: 读取 ZMQ POSE 消息
@@ -433,6 +621,7 @@ class SonicActionProvider(ActionProvider):
             return
 
         print(f"[ZMQ] Received data keys: {list(data.keys())}")
+        got_pose_frame = False
 
         # smpl_joints: (N, 24, 3) — 取最新一帧
         if "smpl_joints" in data:
@@ -446,6 +635,7 @@ class SonicActionProvider(ActionProvider):
                 print(f"[ZMQ] SMPL data marked as VALID")
             self._smpl_joints_buf = np.roll(self._smpl_joints_buf, -1, axis=0)
             self._smpl_joints_buf[-1] = frame
+            got_pose_frame = True
 
         # smpl_pose: (N, 21, 3)
         if "smpl_pose" in data:
@@ -458,19 +648,112 @@ class SonicActionProvider(ActionProvider):
         if "body_quat_w" in data:
             bq = data["body_quat_w"].astype(np.float32)  # (N, 4)
             print(f"[ZMQ] body_quat_w shape: {bq.shape}, latest: {bq[-1]}")
-            # 转换为6D旋转表示
-            rot6d = quat_to_rotation_6d(bq)  # (N, 6)
-            print(f"[ZMQ] converted to rot6d shape: {rot6d.shape}, latest: {rot6d[-1]}")
+            got_pose_frame = True
+
+            try:
+                robot = self.env.scene["robot"].data
+                base_quat_xyzw = robot.root_state_w[0, 3:7].detach().cpu().numpy().astype(np.float32)
+                base_quat_wxyz = quat_xyzw_to_wxyz(base_quat_xyzw)
+                ref_quat_wxyz = quat_normalize_wxyz(bq[-1])
+                if not self._anchor_heading_initialized:
+                    self._anchor_init_base_quat_wxyz = base_quat_wxyz.copy()
+                    self._anchor_init_ref_quat_wxyz = ref_quat_wxyz.copy()
+                    heading_align_candidate = quat_mul_wxyz(
+                        quat_heading_wxyz(self._anchor_init_base_quat_wxyz),
+                        quat_heading_inv_wxyz(self._anchor_init_ref_quat_wxyz),
+                    )
+                    raw_rel_init_quat = quat_mul_wxyz(
+                        quat_conjugate_wxyz(self._anchor_init_base_quat_wxyz),
+                        self._anchor_init_ref_quat_wxyz,
+                    )
+                    aligned_rel_init_quat = quat_mul_wxyz(
+                        quat_conjugate_wxyz(self._anchor_init_base_quat_wxyz),
+                        quat_mul_wxyz(heading_align_candidate, self._anchor_init_ref_quat_wxyz),
+                    )
+                    raw_init_angle_deg = quat_angle_deg_wxyz(raw_rel_init_quat)
+                    aligned_init_angle_deg = quat_angle_deg_wxyz(aligned_rel_init_quat)
+                    self._anchor_heading_align_quat_wxyz = heading_align_candidate
+                    self._anchor_use_heading_align = aligned_init_angle_deg + 1e-3 < raw_init_angle_deg
+                    self._anchor_heading_initialized = True
+                    print(
+                        "[ZMQ][ANCHOR_INIT] "
+                        f"init_base={self._anchor_init_base_quat_wxyz} "
+                        f"init_ref={self._anchor_init_ref_quat_wxyz} "
+                        f"heading_align={self._anchor_heading_align_quat_wxyz} "
+                        f"raw_init_angle_deg={raw_init_angle_deg:.2f} "
+                        f"aligned_init_angle_deg={aligned_init_angle_deg:.2f} "
+                        f"use_heading_align={self._anchor_use_heading_align}"
+                    )
+
+                raw_rel_quat_wxyz = quat_mul_wxyz(quat_conjugate_wxyz(base_quat_wxyz), ref_quat_wxyz)
+                aligned_ref_quat_wxyz = quat_mul_wxyz(self._anchor_heading_align_quat_wxyz, ref_quat_wxyz)
+                aligned_rel_quat_wxyz = quat_mul_wxyz(
+                    quat_conjugate_wxyz(base_quat_wxyz), aligned_ref_quat_wxyz
+                )
+                rel_quat_wxyz = (
+                    aligned_rel_quat_wxyz if self._anchor_use_heading_align else raw_rel_quat_wxyz
+                )
+                rot6d_latest = quat_to_rotation_6d(rel_quat_wxyz.reshape(1, 4))[0]
+
+                if self._frame_count <= 3 or self._frame_count % 25 == 0:
+                    rel_angle_deg = quat_angle_deg_wxyz(rel_quat_wxyz)
+                    raw_rel_angle_deg = quat_angle_deg_wxyz(raw_rel_quat_wxyz)
+                    aligned_rel_angle_deg = quat_angle_deg_wxyz(aligned_rel_quat_wxyz)
+                    print(
+                        "[ZMQ][ANCHOR] "
+                        f"base_quat_xyzw={base_quat_xyzw} "
+                        f"ref_quat_wxyz={ref_quat_wxyz} "
+                        f"aligned_ref_quat_wxyz={aligned_ref_quat_wxyz} "
+                        f"raw_rel_angle_deg={raw_rel_angle_deg:.2f} "
+                        f"aligned_rel_angle_deg={aligned_rel_angle_deg:.2f} "
+                        f"rel_angle_deg={rel_angle_deg:.2f} "
+                        f"selected={'aligned' if self._anchor_use_heading_align else 'raw'} "
+                        f"rel_rot6d={rot6d_latest}"
+                    )
+            except Exception as e:
+                print(f"[ZMQ][ANCHOR] relative anchor fallback to ref quat only: {e}")
+                rel_quat_wxyz = quat_normalize_wxyz(bq[-1])
+                rot6d_latest = quat_to_rotation_6d(rel_quat_wxyz.reshape(1, 4))[0]
+
+            print(f"[ZMQ] converted to relative rot6d latest: {rot6d_latest}")
             self._body_rot6d_buf = np.roll(self._body_rot6d_buf, -1, axis=0)
-            self._body_rot6d_buf[-1] = rot6d[-1]  # (6,)
+            self._body_rot6d_buf[-1] = rot6d_latest  # (6,)
+            self._motion_anchor_rot6d_hist = np.roll(self._motion_anchor_rot6d_hist, -1, axis=0)
+            self._motion_anchor_rot6d_hist[-1] = rot6d_latest
+
+        if got_pose_frame:
+            self._smpl_history_fill = min(_STEP1_FRAMES, self._smpl_history_fill + 1)
+            if self._frame_count <= 3 or self._frame_count % 25 == 0:
+                print(
+                    "[ZMQ][HISTORY] "
+                    f"smpl_history_fill={self._smpl_history_fill}/{_STEP1_FRAMES} "
+                    f"smpl_valid={self._smpl_data_valid}"
+                )
 
         # 机器人关节状态（来自 ZMQ，用于 obs 构建）
         if "joint_pos" in data:
             jp = data["joint_pos"].astype(np.float32)
-            self._robot_joint_pos = jp[-1]  # (29,)
+            self._robot_joint_pos = jp[-1]
+            self._motion_joint_pos_hist = np.roll(self._motion_joint_pos_hist, -1, axis=0)
+            self._motion_joint_pos_hist[-1] = self._robot_joint_pos
+            if self._frame_count <= 3 or self._frame_count % 25 == 0:
+                wrist_ref = self._motion_joint_pos_hist[-1, OFFICIAL_WRIST_INDICES]
+                print(
+                    "[ZMQ][REF_JOINT_POS] "
+                    f"range={array_range_str(self._robot_joint_pos)} "
+                    f"wrist_range={array_range_str(wrist_ref)} "
+                    f"heading_init={'YES' if self._anchor_heading_initialized else 'NO'}"
+                )
         if "joint_vel" in data:
             jv = data["joint_vel"].astype(np.float32)
-            self._robot_joint_vel = jv[-1]  # (29,)
+            self._robot_joint_vel = jv[-1]
+            self._motion_joint_vel_hist = np.roll(self._motion_joint_vel_hist, -1, axis=0)
+            self._motion_joint_vel_hist[-1] = self._robot_joint_vel
+            if self._frame_count <= 3 or self._frame_count % 25 == 0:
+                print(
+                    "[ZMQ][REF_JOINT_VEL] "
+                    f"range={array_range_str(self._robot_joint_vel)}"
+                )
 
         # 手部关节
         if "left_hand_joints" in data:
@@ -488,20 +771,20 @@ class SonicActionProvider(ActionProvider):
         """运行 GEAR-SONIC encoder+decoder，返回 SONIC IsaacLab 顺序的 29 DOF 关节目标。
 
         Encoder输入: 1762维，包含所有启用的观察值
-        - encoder_mode_4: 4
-        - motion_joint_positions_10frame_step5: 290
-        - motion_joint_velocities_10frame_step5: 290
-        - motion_root_z_position_10frame_step5: 10
-        - motion_root_z_position: 1
-        - motion_anchor_orientation: 6
-        - motion_anchor_orientation_10frame_step5: 60
-        - motion_joint_positions_lowerbody_10frame_step5: 120
-        - motion_joint_velocities_lowerbody_10frame_step5: 120
-        - vr_3point_local_target: 9
-        - vr_3point_local_orn_target: 12
-        - smpl_joints_10frame_step1: 720
-        - smpl_anchor_orientation_10frame_step1: 60
-        - motion_joint_positions_wrists_10frame_step1: 60
+        - encoder_mode_4: 4   固定 SMPL 模式
+        - motion_joint_positions_10frame_step5: 290  机器人关节位置历史，step5采样
+        - motion_joint_velocities_10frame_step5: 290  机器人关节速度历史，step5采样
+        - motion_root_z_position_10frame_step5: 10  机器人根位置历史，step5采样
+        - motion_root_z_position: 1  机器人根位置
+        - motion_anchor_orientation: 6  机器人锚点旋转（6D）
+        - motion_anchor_orientation_10frame_step5: 60  机器人锚点旋转历史，step5采样
+        - motion_joint_positions_lowerbody_10frame_step5: 120  机器人下半身关节位置历史，step5采样
+        - motion_joint_velocities_lowerbody_10frame_step5: 120  机器人下半身关节速度历史，step5采样
+        - vr_3point_local_target: 9  虚拟目标点位置（3个点，每个3维）
+        - vr_3point_local_orn_target: 12  虚拟目标点旋转（3个点，每个6D）
+        - smpl_joints_10frame_step1: 720  SMPL 关节位置历史，step1采样
+        - smpl_anchor_orientation_10frame_step1: 60  SMPL 锚点旋转历史，step1采样
+        - motion_joint_velocities_wrists_10frame_step1: 60  机器人手腕关节速度历史，step1采样
         """
         print(f"[SONIC] _run_gear_sonic called")
         print(f"[SONIC] encoder={self._encoder is not None}, decoder={self._decoder is not None}")
@@ -541,62 +824,36 @@ class SonicActionProvider(ActionProvider):
             # 构建完整的1762维encoder输入
             # 按照observation_config.yaml的顺序
 
-            # 1. encoder_mode_4 (4) - SMPL模式 (mode_id=2)
+            # 1. encoder_mode_4 (4) - 官方格式不是 one-hot，而是 [mode_id, 0, 0, 0]
+            # 参考 g1_deploy_onnx_ref.cpp: GatherEncoderMode(..., fill_zeros_num=3)
             encoder_mode = np.array([0., 0., 1., 0.], dtype=np.float32)
 
-            # 2. motion_joint_positions_10frame_step5 (290) - 每隔5帧采样
-            motion_joint_pos_step5 = self._robot_joint_pos_hist[::5].reshape(-1)  # (2, 29) → (58,)
-            # 需要10帧，但我们只有2帧，用零填充
-            motion_joint_pos_step5_full = np.zeros(290, dtype=np.float32)
-            motion_joint_pos_step5_full[:58] = motion_joint_pos_step5
+            motion_joint_pos_step5_ref = gather_temporal_window(
+                self._motion_joint_pos_hist, _STEP5_FRAMES, _STEP5_STRIDE
+            )
+            motion_joint_vel_step5_ref = gather_temporal_window(
+                self._motion_joint_vel_hist, _STEP5_FRAMES, _STEP5_STRIDE
+            )
+            lowerbody_indices = OFFICIAL_LOWERBODY_INDICES
+            motion_joint_pos_lowerbody_ref = motion_joint_pos_step5_ref[:, lowerbody_indices]
+            motion_joint_vel_lowerbody_ref = motion_joint_vel_step5_ref[:, lowerbody_indices]
 
-            # 3. motion_joint_velocities_10frame_step5 (290)
-            motion_joint_vel_step5 = self._robot_joint_vel_hist[::5].reshape(-1)
-            motion_joint_vel_step5_full = np.zeros(290, dtype=np.float32)
-            motion_joint_vel_step5_full[:58] = motion_joint_vel_step5
-
-            # 4. motion_root_z_position_10frame_step5 (10) - 用零填充（没有motion数据）
-            motion_root_z_step5 = np.zeros(10, dtype=np.float32)
-
-            # 5. motion_root_z_position (1)
-            motion_root_z = np.zeros(1, dtype=np.float32)
-
-            # 6. motion_anchor_orientation (6) - 当前帧的6D旋转
-            motion_anchor_orient = self._body_rot6d_buf[-1]  # (6,)
-
-            # 7. motion_anchor_orientation_10frame_step5 (60)
-            motion_anchor_orient_step5 = self._body_rot6d_buf[::5].reshape(-1)  # (2, 6) → (12,)
-            motion_anchor_orient_step5_full = np.zeros(60, dtype=np.float32)
-            motion_anchor_orient_step5_full[:12] = motion_anchor_orient_step5
-
-            # 8. motion_joint_positions_lowerbody_10frame_step5 (120) - 12个下半身关节
-            # 下半身关节索引（前12个关节）
-            lowerbody_indices = list(range(12))
-            motion_joint_pos_lowerbody = self._robot_joint_pos_hist[::5, :12].reshape(-1)  # (2, 12) → (24,)
-            motion_joint_pos_lowerbody_full = np.zeros(120, dtype=np.float32)
-            motion_joint_pos_lowerbody_full[:24] = motion_joint_pos_lowerbody
-
-            # 9. motion_joint_velocities_lowerbody_10frame_step5 (120)
-            motion_joint_vel_lowerbody = self._robot_joint_vel_hist[::5, :12].reshape(-1)
-            motion_joint_vel_lowerbody_full = np.zeros(120, dtype=np.float32)
-            motion_joint_vel_lowerbody_full[:24] = motion_joint_vel_lowerbody
-
-            # 10. vr_3point_local_target (9) - 用零填充（SMPL模式不需要）
+            motion_joint_pos_step5_full = np.zeros((_STEP5_FRAMES * 29,), dtype=np.float32)
+            motion_joint_vel_step5_full = np.zeros((_STEP5_FRAMES * 29,), dtype=np.float32)
+            motion_root_z_step5 = np.zeros((_STEP5_FRAMES,), dtype=np.float32)
+            motion_root_z = np.zeros((1,), dtype=np.float32)
+            motion_anchor_orient = np.zeros((6,), dtype=np.float32)
+            motion_anchor_orient_step5_full = np.zeros((_STEP5_FRAMES * 6,), dtype=np.float32)
+            motion_joint_pos_lowerbody_full = np.zeros((_STEP5_FRAMES * len(lowerbody_indices),), dtype=np.float32)
+            motion_joint_vel_lowerbody_full = np.zeros((_STEP5_FRAMES * len(lowerbody_indices),), dtype=np.float32)
             vr_3pt_pos = np.zeros(9, dtype=np.float32)
-
-            # 11. vr_3point_local_orn_target (12)
             vr_3pt_orn = np.zeros(12, dtype=np.float32)
 
-            # 12. smpl_joints_10frame_step1 (720) - 10帧连续SMPL关节
             smpl_joints_flat = self._smpl_joints_buf.reshape(-1)  # (10, 24, 3) → (720,)
-
-            # 13. smpl_anchor_orientation_10frame_step1 (60) - 10帧连续6D旋转
             smpl_anchor_orient_flat = self._body_rot6d_buf.reshape(-1)  # (10, 6) → (60,)
-
-            # 14. motion_joint_positions_wrists_10frame_step1 (60) - 6个手腕关节
-            # 手腕关节索引（肩部3个关节 × 2）
-            wrist_indices = [12, 13, 14, 15, 16, 17]  # left_shoulder_*, right_shoulder_*
-            motion_wrist_pos = self._robot_joint_pos_hist[:, wrist_indices].reshape(-1)  # (10, 6) → (60,)
+            wrist_indices = OFFICIAL_WRIST_INDICES
+            motion_wrist_window = gather_temporal_window(self._motion_joint_pos_hist, _STEP1_FRAMES, 1)
+            motion_wrist_pos = motion_wrist_window[:, wrist_indices].reshape(-1)
 
             # 拼接所有观察值
             encoder_input = np.concatenate([
@@ -620,6 +877,47 @@ class SonicActionProvider(ActionProvider):
             print(f"[SONIC] Encoder input dtype: {encoder_input.dtype}")
             print(f"[SONIC] Encoder input range: [{encoder_input.min():.4f}, {encoder_input.max():.4f}]")
             print(f"[SONIC] SMPL joints sum: {np.abs(smpl_joints_flat).sum():.4f}")
+
+            if self._frame_count <= 3 or self._frame_count % 25 == 0 or np.max(np.abs(encoder_input)) > 8.0:
+                sim_wrist_pos = self._robot_joint_pos_hist[:, wrist_indices].reshape(-1)
+                wrist_l2 = float(np.linalg.norm(motion_wrist_pos - sim_wrist_pos))
+                print(
+                    "[SONIC][SMPL_MODE] "
+                    f"encoder_mode_vec={encoder_mode.tolist()} "
+                    f"active={SMPL_MODE_ACTIVE_BLOCKS} "
+                    f"zeroed={SMPL_MODE_ZEROED_BLOCKS}"
+                )
+                print(
+                    "[SONIC][ENCODER_BLOCKS] "
+                    f"motion_pos_step5={array_range_str(motion_joint_pos_step5_full)} "
+                    f"motion_vel_step5={array_range_str(motion_joint_vel_step5_full)} "
+                    f"motion_root_z_step5={array_range_str(motion_root_z_step5)} "
+                    f"anchor={array_range_str(motion_anchor_orient)} "
+                    f"anchor_step5={array_range_str(motion_anchor_orient_step5_full)}"
+                )
+                print(
+                    "[SONIC][REF_DIAG] "
+                    f"ignored_ref_motion_pos_step5={array_range_str(motion_joint_pos_step5_ref.reshape(-1))} "
+                    f"ignored_ref_motion_vel_step5={array_range_str(motion_joint_vel_step5_ref.reshape(-1))} "
+                    f"ignored_ref_lowerbody_pos={array_range_str(motion_joint_pos_lowerbody_ref.reshape(-1))} "
+                    f"ignored_ref_lowerbody_vel={array_range_str(motion_joint_vel_lowerbody_ref.reshape(-1))}"
+                )
+                print(
+                    "[SONIC][ENCODER_BLOCKS] "
+                    f"lowerbody_pos={array_range_str(motion_joint_pos_lowerbody_full)} "
+                    f"lowerbody_vel={array_range_str(motion_joint_vel_lowerbody_full)} "
+                    f"smpl_joints={array_range_str(smpl_joints_flat)} "
+                    f"smpl_anchor={array_range_str(smpl_anchor_orient_flat)} "
+                    f"wrist_pos={array_range_str(motion_wrist_pos)}"
+                )
+                print(
+                    "[SONIC][WRIST_DIAG] "
+                    f"ref_wrist={array_range_str(motion_wrist_pos)} "
+                    f"sim_wrist={array_range_str(sim_wrist_pos)} "
+                    f"ref_vs_sim_l2={wrist_l2:.4f} "
+                    f"lowerbody_idx={lowerbody_indices} "
+                    f"wrist_idx={wrist_indices}"
+                )
 
             # Encoder推理
             enc_inputs = {
@@ -730,52 +1028,73 @@ class SonicActionProvider(ActionProvider):
     #         return None
 
     def get_action(self, env) -> Optional[torch.Tensor]:
-        """测试：持续设置 SONIC 默认姿态，让 PD 控制器维持平衡"""
-        if not hasattr(self, '_test_logged'):
-            self._test_logged = True
-            self._frame_count = 0
-            print(f"\n[TEST] Setting joint targets to SONIC default pose")
-            print(f"[TEST] SONIC_DEFAULT_POS shape: {self._sonic_default_np.shape}")
-            print(f"[TEST] Target joint values:")
-            print(f"  left_shoulder_pitch (idx 11): {self._sonic_default_np[11]}")
-            print(f"  right_shoulder_pitch (idx 12): {self._sonic_default_np[12]}")
-            print(f"  left_shoulder_roll (idx 15): {self._sonic_default_np[15]}")
-            print(f"  right_shoulder_roll (idx 16): {self._sonic_default_np[16]}")
-            print(f"  left_elbow (idx 21): {self._sonic_default_np[21]}")
-            print(f"  right_elbow (idx 22): {self._sonic_default_np[22]}")
-
-            # 读取当前关节位置
-            current_pos = env.scene["robot"].data.joint_pos[0, self._sonic_idx].cpu().numpy()
-            print(f"\n[TEST] Current joint positions:")
-            print(f"  left_shoulder_pitch (idx 11): {current_pos[11]:.3f}")
-            print(f"  right_shoulder_pitch (idx 12): {current_pos[12]:.3f}")
-            print(f"  left_shoulder_roll (idx 15): {current_pos[15]:.3f}")
-            print(f"  right_shoulder_roll (idx 16): {current_pos[16]:.3f}")
-            print(f"  left_elbow (idx 21): {current_pos[21]:.3f}")
-            print(f"  right_elbow (idx 22): {current_pos[22]:.3f}")
-
         try:
+            if not hasattr(self, "_runtime_logged"):
+                self._runtime_logged = True
+                self._frame_count = 0
+                print("\n[SONIC] Real get_action path enabled")
+
             self._frame_count += 1
 
-            # 使用 SONIC 默认姿态作为关节目标
-            sonic_targets = self._sonic_default_np.copy()
+            # 1. 读取 ZMQ POSE 消息（完整 SMPL 全身数据）
+            self._fetch_zmq_pose()
 
-            # 构建完整 Isaac 动作
-            full_action = self._default_pos.clone().squeeze(0)  # (N,)
+            # warmup_active = self._frame_count <= self._sonic_warmup_steps  # warmup 已注释
+            history_ready = self._smpl_history_fill >= _STEP1_FRAMES and self._smpl_data_valid
+
+            # if warmup_active or not history_ready:  # 原 warmup 逻辑：前 N 步或历史未满则 hold
+            if not history_ready:
+                self._update_robot_hist_from_env()
+                robot = self.env.scene["robot"].data
+                sonic_targets = (
+                    robot.joint_pos[0, self._sonic_idx].detach().cpu().numpy().astype(np.float32)
+                )
+                if self._frame_count <= 3 or self._frame_count % 10 == 0:
+                    # print("[SONIC][WARMUP] " f"frame=..." f"warmup_active={warmup_active} " ...)  # warmup 已注释
+                    print(
+                        "[SONIC][HISTORY] "
+                        f"frame={self._frame_count} "
+                        f"smpl_history_fill={self._smpl_history_fill}/{_STEP1_FRAMES} "
+                        f"smpl_valid={self._smpl_data_valid} "
+                        "action=hold_current_pose"
+                    )
+            else:
+                sonic_targets = self._run_gear_sonic()
+
+            sonic_targets_str = np.array2string(
+                sonic_targets,
+                precision=6,
+                separator=", ",
+                suppress_small=False,
+                max_line_width=2000
+            )
+            print("\n" + "=" * 120)
+            print(
+                f"🔥🔥🔥 [SONIC_29_QPOS] frame={self._frame_count}  "
+                f"history_ready={history_ready}"  # 原: warmup='ON' if (warmup_active or not history_ready) else 'OFF'
+            )
+            print(f"[SONIC_29_QPOS_VALUES] {sonic_targets_str}")
+            print(f"[SONIC_29_QPOS_RANGE] min={sonic_targets.min():.6f}, max={sonic_targets.max():.6f}")
+            print("=" * 120)
+
+            # 3. 构建完整 Isaac 动作
+            full_action = self._default_pos.clone().squeeze(0)
             sonic_t = torch.tensor(sonic_targets, dtype=torch.float32, device=self.device)
             full_action.index_copy_(0, self._sonic_idx, sonic_t)
 
-            # 步进仿真（decimation）
+            # 4. 手部关节
+            self._apply_hand_targets(full_action)
+
+            # 5. 步进仿真（decimation）
             for _ in range(self._decimation):
                 env.scene["robot"].set_joint_position_target(full_action)
                 env.scene.write_data_to_sim()
                 env.sim.step(render=False)
                 env.scene.update(dt=env.physics_dt)
 
-            # 每50帧打印一次当前位置
             if self._frame_count % 50 == 0:
                 current_pos = env.scene["robot"].data.joint_pos[0, self._sonic_idx].cpu().numpy()
-                print(f"\n[TEST] Frame {self._frame_count} - Current positions:")
+                print(f"\n[SONIC] Frame {self._frame_count} tracking snapshot:")
                 print(f"  left_elbow: {current_pos[21]:.3f} (target: {sonic_targets[21]:.3f})")
                 print(f"  right_elbow: {current_pos[22]:.3f} (target: {sonic_targets[22]:.3f})")
                 print(f"  left_shoulder_roll: {current_pos[15]:.3f} (target: {sonic_targets[15]:.3f})")
@@ -783,11 +1102,10 @@ class SonicActionProvider(ActionProvider):
 
             env.sim.render()
             env.observation_manager.compute()
-
             return full_action
 
         except Exception as e:
-            print(f"[TEST] Error: {e}")
+            print(f"[SonicActionProvider] get_action error: {e}")
             import traceback
             traceback.print_exc()
             return None

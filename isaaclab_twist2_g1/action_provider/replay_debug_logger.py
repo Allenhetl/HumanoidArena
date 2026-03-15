@@ -55,6 +55,7 @@ class ReplayDebugLogger:
             'root_ang_vel': 0.0,
             'joint_pos': 0.0,
             'joint_vel': 0.0,
+            'applied_torque': 0.0,
         }
         self.max_error_frames = {
             'root_pos': -1,
@@ -63,6 +64,7 @@ class ReplayDebugLogger:
             'root_ang_vel': -1,
             'joint_pos': -1,
             'joint_vel': -1,
+            'applied_torque': -1,
         }
 
         # 写入文件头
@@ -92,6 +94,7 @@ class ReplayDebugLogger:
                 - root_ang_vel: [3] 根节点角速度
                 - joint_pos: [29] 关节位置
                 - joint_vel: [29] 关节速度
+                - applied_torque: [29] 施加的力矩 (可选)
             simulated: 仿真数据字典（格式同上）
         """
         # 转换为numpy数组
@@ -127,7 +130,7 @@ class ReplayDebugLogger:
         errors = {}
 
         # L2范数误差
-        for key in ['root_pos', 'root_quat', 'root_lin_vel', 'root_ang_vel', 'joint_pos', 'joint_vel']:
+        for key in ['root_pos', 'root_quat', 'root_lin_vel', 'root_ang_vel', 'joint_pos', 'joint_vel', 'applied_torque']:
             if key in rec and key in sim:
                 diff = rec[key] - sim[key]
                 errors[f'{key}_l2'] = float(np.linalg.norm(diff))
@@ -199,6 +202,19 @@ class ReplayDebugLogger:
         self.log_fp.write(f"  Error (Max): {errors['joint_vel_max']:.6f} rad/s (joint {max_vel_idx})\n")
         self.log_fp.write(f"  Error (Mean): {errors['joint_vel_mean']:.6f} rad/s\n\n")
 
+        # 施加的力矩（如果有）
+        if 'applied_torque' in rec and 'applied_torque' in sim:
+            torque_diff = np.abs(rec['applied_torque'] - sim['applied_torque'])
+            max_torque_idx = np.argmax(torque_diff)
+            self.log_fp.write("Applied Torques (29 DOFs):\n")
+            self.log_fp.write(f"  Error (L2): {errors['applied_torque_l2']:.6f} Nm\n")
+            self.log_fp.write(f"  Error (Max): {errors['applied_torque_max']:.6f} Nm (joint {max_torque_idx})\n")
+            self.log_fp.write(f"  Error (Mean): {errors['applied_torque_mean']:.6f} Nm\n")
+            self.log_fp.write(f"  First 5 joints recorded:  {self._format_array(rec['applied_torque'][:5])}\n")
+            self.log_fp.write(f"  First 5 joints simulated: {self._format_array(sim['applied_torque'][:5])}\n")
+            self.log_fp.write(f"  Max error joint [{max_torque_idx}]: rec={rec['applied_torque'][max_torque_idx]:.6f}, "
+                             f"sim={sim['applied_torque'][max_torque_idx]:.6f}\n\n")
+
         # 刷新缓冲区
         self.log_fp.flush()
 
@@ -251,6 +267,11 @@ class ReplayDebugLogger:
                 f.write(f"⚠️  关节位置误差较大 ({self.max_errors['joint_pos']:.3f}rad)，"
                        f"在Frame {self.max_error_frames['joint_pos']}达到峰值\n")
                 f.write("   建议检查: 1) PD控制器参数 2) 关节限位 3) 动作目标设置\n\n")
+
+            if 'applied_torque' in self.max_errors and self.max_errors['applied_torque'] > 5.0:
+                f.write(f"⚠️  施加力矩误差较大 ({self.max_errors['applied_torque']:.3f}Nm)，"
+                       f"在Frame {self.max_error_frames['applied_torque']}达到峰值\n")
+                f.write("   建议检查: 1) PD控制器参数一致性 2) 关节位置/速度误差 3) 力矩限制设置\n\n")
 
         print(f"[ReplayDebugLogger] 摘要已保存: {self.summary_file}")
 
