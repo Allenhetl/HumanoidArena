@@ -52,7 +52,7 @@ class CameraBaseCfg:
         """
         if data_types is None:
             data_types = ["rgb", "distance_to_image_plane"]
-        
+
         return CameraCfg(
             prim_path=prim_path,
             update_period=update_period,
@@ -91,8 +91,9 @@ class CameraPresets:
         """world camera configuration (third-person view, fixed in world space)"""
         return CameraBaseCfg.get_camera_config(
             prim_path="/World/PerspectiveCamera",
-            pos_offset=(-1.9, -5.0, 1.8),
-            rot_offset=(-0.40614, 0.78544, 0.4277, -0.16986),
+            pos_offset=(-2.01826, 3.33365, 1.26749),  # Shifted right (y: -5.0 -> -4.0)
+            rot_offset=(-0.18516, 0.30284,-0.62933,0.69916),  # Rotated slightly right
+
             focal_length=12,
             horizontal_aperture=27
         )

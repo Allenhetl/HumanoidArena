@@ -116,6 +116,11 @@ parser.add_argument("--gravity_z", type=float, default=-9.8, help="override grav
 parser.add_argument("--enable_world_camera", action="store_true", default=False, help="enable world camera (third-person view)")
 parser.add_argument("--world_camera_port", type=int, default=5556, help="ZMQ port for world camera streaming")
 
+# camera configuration parameters
+parser.add_argument("--camera_enable_depth", action="store_true", default=False, help="enable depth data (distance_to_image_plane) for cameras")
+parser.add_argument("--camera_width", type=int, default=640, help="camera image width")
+parser.add_argument("--camera_height", type=int, default=480, help="camera image height")
+
 # add AppLauncher parameters
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -145,11 +150,18 @@ from tools.augmentation_utils import (
     batch_augment_cameras_by_name,
 )
 
+from tools.grass_ground_material import apply_grass_pbr_to_ground
+import tools.pitch_lines as pitch_lines_mod
+from tools.pitch_lines import create_simple_debug_lines
+from tools.football_physics_material import apply_football_physics_material
+
 from tools.data_json_load import sim_state_to_json
 from dds.sim_state_dds import *
 from action_provider.create_action_provider import create_action_provider
 from tools.get_stiffness import get_robot_stiffness_from_env
 from tools.get_reward import get_step_reward_value,get_current_rewards
+# Use text-based tracker instead of GUI visualizer to avoid matplotlib issues
+from tools.joint_position_tracker import JointPositionTracker
 
 def setup_signal_handlers(controller, dds_manager=None, image_servers=None, simulation_app=None):
     """set signal handlers
@@ -261,63 +273,78 @@ def main():
     # create environment
     print("\ncreate environment...")
     try:
+        # Apply camera configuration from command line arguments
+        if hasattr(env_cfg.scene, 'front_camera'):
+            # Set data types based on depth flag
+            data_types = ["rgb"]
+            if args_cli.camera_enable_depth:
+                data_types.append("distance_to_image_plane")
+
+            env_cfg.scene.front_camera.data_types = data_types
+            env_cfg.scene.front_camera.width = args_cli.camera_width
+            env_cfg.scene.front_camera.height = args_cli.camera_height
+
+            print(f"[CONFIG] Camera settings:")
+            print(f"  - Resolution: {args_cli.camera_width}x{args_cli.camera_height}")
+            print(f"  - Data types: {data_types}")
+
         env = gym.make(args_cli.task, cfg=env_cfg).unwrapped
         print(f"\ncreate environment success ...")
         print("robot cfg init pos:", env.cfg.scene.robot.init_state.pos)
         print("robot usd:", env.cfg.scene.robot.spawn.usd_path)
 
         # Set rendering mode via viewport API
-        try:
-            from omni.kit.viewport.utility import get_active_viewport
-            viewport = get_active_viewport()
-            if viewport:
-                # Switch to Real-Time mode (RaytracedLighting) - fastest RTX mode
-                viewport.set_hd_engine("rtx", "RaytracedLighting")
-                print("[RENDER] ✅ Switched to Real-Time (RaytracedLighting) mode via viewport API")
-                # === Other render modes (commented out for comparison) ===
-                # viewport.set_hd_engine("rtx", "PathTracing")        # Path Tracing (slower, higher quality)
-                # viewport.set_hd_engine("iray", "iray")              # iray (not available in Isaac Sim)
-
-                # Verify viewport settings
-                print(f"[RENDER] Viewport hydra_engine: {viewport.hydra_engine}")
-                print(f"[RENDER] Viewport render_mode: {viewport.render_mode}")
-
-                # Print current render settings
-                import carb
-                settings = carb.settings.get_settings()
-                print("\n" + "="*60)
-                print(" REAL-TIME RENDER PARAMETERS")
-                print("="*60)
-                print(f"  /rtx/rendermode: {settings.get('/rtx/rendermode')}")
-                print(f"  Antialiasing: DLAA (configured in env_cfg)")
-                print("="*60 + "\n")
-
-                # === Path Tracing code (commented out for comparison) ===
-                # viewport.set_hd_engine("rtx", "PathTracing")
-                # print("[RENDER] ✅ Switched to Path Tracing mode via viewport API")
-                # settings.set("/rtx/pathtracing/spp", 1)  # Samples per pixel per frame = 1
-                # settings.set("/rtx/pathtracing/totalSpp", 1)  # Total samples per pixel
-                # settings.set("/rtx/pathtracing/maxBounces", 4)  # Max light bounces
-                # pt_settings = [
-                #     "/rtx/rendermode",
-                #     "/rtx/pathtracing/spp",
-                #     "/rtx/pathtracing/totalSpp",
-                #     "/rtx/pathtracing/maxBounces",
-                #     "/rtx/pathtracing/maxSpecularAndTransmissionBounces",
-                #     "/rtx/pathtracing/maxVolumeBounces",
-                #     "/rtx/pathtracing/clampSpp",
-                #     "/rtx/pathtracing/optixDenoiser/enabled",
-                #     "/rtx/pathtracing/cached/enabled",
-                #     "/rtx/pathtracing/aa/op",
-                # ]
-                # for setting in pt_settings:
-                #     value = settings.get(setting)
-                #     print(f"  {setting}: {value}")
-                # === End Path Tracing code ===
-            else:
-                print("[RENDER] ⚠️ No active viewport found, cannot set render mode")
-        except Exception as e:
-            print(f"[RENDER] ⚠️ Failed to set render mode: {e}")
+        # try:
+        #     from omni.kit.viewport.utility import get_active_viewport
+        #     viewport = get_active_viewport()
+        #     if viewport:
+        #         # Switch to Real-Time mode (RaytracedLighting) - fastest RTX mode
+        #         viewport.set_hd_engine("rtx", "RaytracedLighting")
+        #         print("[RENDER] ✅ Switched to Real-Time (RaytracedLighting) mode via viewport API")
+        #         # === Other render modes (commented out for comparison) ===
+        #         # viewport.set_hd_engine("rtx", "PathTracing")        # Path Tracing (slower, higher quality)
+        #         # viewport.set_hd_engine("iray", "iray")              # iray (not available in Isaac Sim)
+        #
+        #         # Verify viewport settings
+        #         print(f"[RENDER] Viewport hydra_engine: {viewport.hydra_engine}")
+        #         print(f"[RENDER] Viewport render_mode: {viewport.render_mode}")
+        #
+        #         # Print current render settings
+        #         import carb
+        #         settings = carb.settings.get_settings()
+        #         print("\n" + "="*60)
+        #         print(" REAL-TIME RENDER PARAMETERS")
+        #         print("="*60)
+        #         print(f"  /rtx/rendermode: {settings.get('/rtx/rendermode')}")
+        #         print(f"  Antialiasing: DLAA (configured in env_cfg)")
+        #         print("="*60 + "\n")
+        #
+        #         # === Path Tracing code (commented out for comparison) ===
+        #         # viewport.set_hd_engine("rtx", "PathTracing")
+        #         # print("[RENDER] ✅ Switched to Path Tracing mode via viewport API")
+        #         # settings.set("/rtx/pathtracing/spp", 1)  # Samples per pixel per frame = 1
+        #         # settings.set("/rtx/pathtracing/totalSpp", 1)  # Total samples per pixel
+        #         # settings.set("/rtx/pathtracing/maxBounces", 4)  # Max light bounces
+        #         # pt_settings = [
+        #         #     "/rtx/rendermode",
+        #         #     "/rtx/pathtracing/spp",
+        #         #     "/rtx/pathtracing/totalSpp",
+        #         #     "/rtx/pathtracing/maxBounces",
+        #         #     "/rtx/pathtracing/maxSpecularAndTransmissionBounces",
+        #         #     "/rtx/pathtracing/maxVolumeBounces",
+        #         #     "/rtx/pathtracing/clampSpp",
+        #         #     "/rtx/pathtracing/optixDenoiser/enabled",
+        #         #     "/rtx/pathtracing/cached/enabled",
+        #         #     "/rtx/pathtracing/aa/op",
+        #         # ]
+        #         # for setting in pt_settings:
+        #         #     value = settings.get(setting)
+        #         #     print(f"  {setting}: {value}")
+        #         # === End Path Tracing code ===
+        #     else:
+        #         print("[RENDER] ⚠️ No active viewport found, cannot set render mode")
+        # except Exception as e:
+        #     print(f"[RENDER] ⚠️ Failed to set render mode: {e}")
 
         # Optional: override gravity (IsaacLab/IsaacSim APIs differ across versions)
         if args_cli.gravity_z is not None:
@@ -391,58 +418,83 @@ def main():
             exposure=0.8,
             focus_distance=1.2
         )
+        
+    # 足球任務：套用草坪 PBR 材質到地面（需在 reset 前，確保 stage 已完整載入）
+    # uv_scale=(150,150) 維持草地 UV 密度，渲染區域由地面尺寸（10×10m）控制
+    if "football" in args_cli.task.lower():
+        grass_ok_pre = apply_grass_pbr_to_ground(prim_path="/World/GroundPlane", uv_scale=(100.0, 100.0))
+        print(f"[grass_ground_material] before reset apply result: {grass_ok_pre}")
+        try:
+            apply_football_physics_material(restitution=0.75)
+        except Exception as e:
+            print(f"[football_physics] 跳過: {e}")
+        try:
+            import omni.usd
+            from tasks.g1_tasks.move_football_g1_29dof_dex3_wholebody.move_football_g1_29dof_dex3_hw_env_cfg import (
+                GOAL_REFERENCE_LINE_ABSOLUTE_CENTERS,
+                GOAL_REFERENCE_LINE_COLOR,
+                GOAL_REFERENCE_LINE_LENGTH,
+                GOAL_REFERENCE_LINE_RELATIVE_OFFSETS,
+                GOAL_REFERENCE_LINE_WIDTH_RATIO,
+            )
+            from tools.pitch_lines import DEFAULT_LINE_WIDTH
+            stage = omni.usd.get_context().get_stage()
+            print(f"[pitch_lines] module file: {pitch_lines_mod.__file__}")
+            create_simple_debug_lines(
+                stage,
+                line_color=(32.0 / 255.0, 32.0 / 255.0, 32.0 / 255.0),
+                draw_goal_reference_lines=True,
+                goal_centers=GOAL_REFERENCE_LINE_ABSOLUTE_CENTERS,
+                goal_relative_offsets=GOAL_REFERENCE_LINE_RELATIVE_OFFSETS,
+                goal_line_length=GOAL_REFERENCE_LINE_LENGTH,
+                goal_line_width=DEFAULT_LINE_WIDTH * GOAL_REFERENCE_LINE_WIDTH_RATIO,
+                goal_line_color=GOAL_REFERENCE_LINE_COLOR,
+            )
+            print(
+                f"[pitch_lines] goal reference lines color={GOAL_REFERENCE_LINE_COLOR}, "
+                f"centers={GOAL_REFERENCE_LINE_ABSOLUTE_CENTERS}, offsets={GOAL_REFERENCE_LINE_RELATIVE_OFFSETS}"
+            )
+        except Exception as e:
+            print(f"[pitch_lines] 標線未建立或跳過: {e}")
+
     env.sim.reset()
     env.reset()
+    if "football" in args_cli.task.lower():
+        grass_ok_post = apply_grass_pbr_to_ground(prim_path="/World/GroundPlane", uv_scale=(15.0, 15.0))
+        print(f"[grass_ground_material] after reset apply result: {grass_ok_post}")
 
     # ================= Debug: print Box & Cube physics properties =================
     print("\n" + "=" * 60)
     print("[DEBUG] Inspecting physics properties using IsaacLab API")
 
-    # Get Box properties
-    if "box" in env.scene.keys():
-        box_obj = env.scene["box"]
-        print(f"\n[BOX] Prim path: {box_obj.cfg.prim_path}")
-
-        # Get mass (before modification)
-        masses_before = box_obj.root_physx_view.get_masses()
-        print(f"  Mass (original from USD): {masses_before[0] if len(masses_before) > 0 else 'N/A'} kg")
-        print(f"  Mass (from config): {box_obj.cfg.spawn.mass_props.mass if hasattr(box_obj.cfg.spawn, 'mass_props') and box_obj.cfg.spawn.mass_props else 'Not set in config'} kg")
-
-        # Try to set mass using correct format
-        print(f"\n  Attempting to set mass to 0.3 kg...")
-        try:
-            # PhysX requires CPU tensors (device -1 or 'cpu')
-            new_mass = torch.tensor([[0.3]], dtype=torch.float32, device='cpu')
-            box_obj.root_physx_view.set_masses(new_mass, indices=torch.tensor([0], device='cpu'))
-
-            # Verify the change
-            masses_after = box_obj.root_physx_view.get_masses()
-            print(f"  Mass (after setting): {masses_after[0]} kg")
-            print(f"  ✅ Successfully set mass to 0.3 kg!")
-        except Exception as e:
-            print(f"  ❌ Failed to set mass: {e}")
-            print(f"  Note: mass_props in config is ignored for USD files")
-
-        # Get friction and restitution from PhysX runtime
-        print(f"\n  Gravity disabled: {box_obj.cfg.spawn.rigid_props.disable_gravity}")
-
-        # Try to get material properties from PhysX view
-        try:
-            # Get material properties using PhysX view API
-            materials = box_obj.root_physx_view.get_material_properties()
-            if materials is not None and len(materials) > 0:
-                mat = materials[0]
-                print(f"  Static friction (from PhysX): {mat[0].item()}")
-                print(f"  Dynamic friction (from PhysX): {mat[1].item()}")
-                print(f"  Restitution (from PhysX): {mat[2].item()}")
-            else:
-                print(f"  Material properties: Unable to retrieve via PhysX view API")
-        except Exception as e:
-            print(f"  Material properties: Unable to retrieve ({e})")
-
-        print(f"\n  Note: Box uses USD file - friction/restitution from USD defaults")
-        print(f"        USD file does NOT contain explicit mass/friction/restitution properties")
-        print(f"        Physics engine auto-calculates mass from geometry volume + default density")
+    inspect_targets = ["object_l", "object", "box", "hurdle"]
+    for target_name in inspect_targets:
+        if target_name not in env.scene.keys():
+            continue
+        target_obj = env.scene[target_name]
+        print(f"\n[{target_name.upper()}] Prim path: {target_obj.cfg.prim_path}")
+        print(f"  Scene object type: {type(target_obj).__name__}")
+        has_physx_view = hasattr(target_obj, "root_physx_view") and target_obj.root_physx_view is not None
+        if has_physx_view:
+            masses = target_obj.root_physx_view.get_masses()
+            print(f"  Mass (runtime): {masses[0] if len(masses) > 0 else 'N/A'} kg")
+            print(f"  Mass (from config): {target_obj.cfg.spawn.mass_props.mass if hasattr(target_obj.cfg.spawn, 'mass_props') and target_obj.cfg.spawn.mass_props else 'Not set in config'} kg")
+            try:
+                materials = target_obj.root_physx_view.get_material_properties()
+                if materials is not None and len(materials) > 0:
+                    mat = materials[0]
+                    print(f"  Static friction (from PhysX): {mat[0].item()}")
+                    print(f"  Dynamic friction (from PhysX): {mat[1].item()}")
+                    print(f"  Restitution (from PhysX): {mat[2].item()}")
+                else:
+                    print(f"  Material properties: Unable to retrieve via PhysX view API")
+            except Exception as e:
+                print(f"  Material properties: Unable to retrieve ({e})")
+        else:
+            print("  Runtime mass/material inspection skipped (no root_physx_view)")
+        if hasattr(target_obj.cfg, "spawn") and hasattr(target_obj.cfg.spawn, "rigid_props") and target_obj.cfg.spawn.rigid_props:
+            print(f"  Gravity disabled: {target_obj.cfg.spawn.rigid_props.disable_gravity}")
+        break
 
     # Get Cube properties
     if "cube" in env.scene.keys():
@@ -488,16 +540,20 @@ def main():
         if not camera_paths:
             print("  ⚠️ No cameras found in stage!")
 
-        # Try to find front_cam
+        # Try to find world camera first (third-person view), then fallback to front_cam
+        world_cam_candidates = [p for p in camera_paths if "PerspectiveCamera" in p or "world_camera" in p.lower()]
         front_cam_candidates = [p for p in camera_paths if "front_cam" in p.lower()]
 
-        if front_cam_candidates:
+        if world_cam_candidates:
+            cam_path = world_cam_candidates[0]
+            print(f"\n✅ Found world_camera at: {cam_path}")
+        elif front_cam_candidates:
             cam_path = front_cam_candidates[0]
             print(f"\n✅ Found front_cam at: {cam_path}")
         else:
             # Fallback to the expected path
             cam_path = "/World/envs/env_0/Robot/d435_link/front_cam"
-            print(f"\n⚠️ No front_cam found, trying expected path: {cam_path}")
+            print(f"\n⚠️ No camera found, trying expected path: {cam_path}")
 
         vp = vp_utils.get_active_viewport()
         if vp is not None:
@@ -663,6 +719,18 @@ def main():
     env.action_provider = action_provider
     print(f"[sim_main] Set action_provider on env: {type(action_provider)}")
 
+    # 立即启动录制（在第一次 get_action() 之前）
+    # 这确保从 env.reset() 后就开始捕获所有状态，避免随机序列不同步
+    if hasattr(action_provider, '_should_start_recording_on_first_call'):
+        if action_provider._should_start_recording_on_first_call:
+            print("\n" + "="*80)
+            print("🔴 STARTING RECORDING IMMEDIATELY AFTER ENV.RESET()")
+            print("="*80)
+            action_provider.recording_manager.start_recording()
+            action_provider._should_start_recording_on_first_call = False
+            print("✅ Recording started to capture all random state from the beginning")
+            print("="*80 + "\n")
+
     print("========= create controller success =========")
     
     # configure performance analysis
@@ -680,12 +748,34 @@ def main():
     else:
         setup_signal_handlers(controller, None, None, simulation_app)
     print("Note: The DDS in Sim transmits messages on channel 1. Please ensure that other DDS instances use the same channel for message exchange by setting: ChannelFactoryInitialize(1).")
+
+    # Initialize joint position tracker (text-based, no GUI)
+    joint_tracker = None
+    try:
+        print("\n" + "="*80)
+        print("Initializing Joint Position Tracker (Text-based)")
+        print("="*80)
+        robot = env.scene["robot"]
+        joint_tracker = JointPositionTracker(
+            num_joints=robot.num_joints,
+            window_size=200
+        )
+        # Update joint names
+        if hasattr(robot.data, 'joint_names'):
+            joint_tracker.joint_names = robot.data.joint_names
+        print(f"Tracking {robot.num_joints} joints")
+        print("Statistics will be printed every 10 seconds")
+        print("="*80 + "\n")
+    except Exception as e:
+        print(f"Warning: Failed to initialize joint tracker: {e}")
+        print("Continuing without tracking...")
+
     try:
         # start controller - start asynchronous components
         print("========= start controller =========")
         controller.start()
         print("========= start controller success =========")
-        
+
         # main loop - execute in main thread to support rendering
         last_stats_time = time.time()
         loop_start_time = time.time()
@@ -839,6 +929,20 @@ def main():
                     # execute control step (in main thread, support rendering)
                     controller.step()
 
+                    # Update joint tracker
+                    if joint_tracker and loop_count % 2 == 0:  # Update every 2 steps
+                        try:
+                            target_pos = env.scene["robot"].data.joint_pos_target[0].cpu().numpy()
+                            current_pos = env.scene["robot"].data.joint_pos[0].cpu().numpy()
+                            joint_tracker.update_data(target_pos, current_pos, timestamp=loop_count)
+
+                            # Print compact summary every 100 steps
+                            if loop_count % 100 == 0:
+                                joint_tracker.print_compact_summary()
+                        except Exception as e:
+                            if loop_count % 500 == 0:  # Print error occasionally
+                                print(f"Warning: Joint tracker update failed: {e}")
+
                     # print statistics and loop frequency periodically
                     if current_time - last_stats_time >= args_cli.stats_interval:
                         # calculate while loop execution frequency
@@ -869,6 +973,13 @@ def main():
                         if recent_loop_times:
                             print(f"recent loop time: {(avg_loop_time*1000):.2f} ms")
                         print(f"=============================")
+
+                        # Print joint tracking statistics
+                        if joint_tracker:
+                            try:
+                                joint_tracker.print_statistics(top_n=joint_tracker.num_joints)  # Print all joints
+                            except Exception as e:
+                                print(f"Warning: Failed to print joint statistics: {e}")
 
                         # print_stats(controller)
                         last_stats_time = current_time

@@ -456,11 +456,12 @@ class DDSRLActionProvider(ActionProvider):
             max_frames=10000  # ~5 minutes @ 30Hz
         )
 
-        # Always start recording immediately on initialization (removed idle state)
+        # Recording will start on first get_action() call (after env.reset())
+        # This ensures Frame 0 captures real physics state, not default values
+        self._should_start_recording_on_first_call = True
         print(f"[{self.name}] 🔴 AUTO-START RECORDING ENABLED")
-        print(f"[{self.name}] Recording will start immediately")
-        print(f"[{self.name}] This ensures Frame 0 is the first state after initialization")
-        self.recording_manager.start_recording()
+        print(f"[{self.name}] Recording will start on first get_action() call")
+        print(f"[{self.name}] This ensures Frame 0 captures real physics state")
 
         # Create debug log file immediately
         import datetime
@@ -475,6 +476,19 @@ class DDSRLActionProvider(ActionProvider):
         self._debug_log_file.write(f"Log file: {log_path}\n\n")
         self._debug_log_file.flush()
         print(f"[{self.name}] Debug log enabled: {log_path}")
+
+        # Debug: Fix root in air for PID tuning
+        # Set to True to fix robot root at a fixed height, preventing falls during teleop debugging
+        # NOTE: Disabled because without ground contact, robot lacks damping force and may move erratically
+        self._debug_fix_root_in_air = False
+        if self._debug_fix_root_in_air:
+            # Fixed position: [x, y, z] in world frame (z=0.9m keeps robot suspended in air)
+            self._debug_fixed_root_position = torch.tensor([0.0, 0.0, 0.9], device=self.env.device, dtype=torch.float32)
+            # Fixed orientation: [w, x, y, z] quaternion (identity = upright)
+            self._debug_fixed_root_orientation = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.env.device, dtype=torch.float32)
+            print(f"[{self.name}] 🔧 DEBUG MODE: Root fixed in air at z={self._debug_fixed_root_position[2]:.2f}m")
+            print(f"[{self.name}] 🔧 This prevents falling during PID tuning and teleop debugging")
+            print(f"[{self.name}] 🔧 Set self._debug_fix_root_in_air = False to disable")
 
         # Simple replay mode (hardcoded for testing)
         self._simple_replay_mode = False
@@ -541,10 +555,6 @@ class DDSRLActionProvider(ActionProvider):
                                                      dtype=torch.float32)
         self._twist2_action_neck = torch.zeros(1, self._twist2_neck_dim, device=self.env.device, dtype=torch.float32)
         self._twist2_hand_valid = False
-
-        # SMPLX data storage
-        self._twist2_smplx_data = None
-        self._twist2_smplx_valid = False
 
         # Human SMPLX data (before GMR retargeting) storage
         self._twist2_human_smplx_data = None
@@ -1022,7 +1032,6 @@ class DDSRLActionProvider(ActionProvider):
         if self.redis_pipeline is None:
             # print("[XY_DEBUG] ⚠️ Redis pipeline is None!")
             self._twist2_hand_valid = False
-            self._twist2_smplx_valid = False
             self._twist2_human_smplx_valid = False
             self._twist2_human_info_valid = False
             # Return default 35D mimic_obs to maintain stable standing pose
@@ -1033,7 +1042,6 @@ class DDSRLActionProvider(ActionProvider):
                 "action_hand_left_unitree_g1_with_hands",
                 "action_hand_right_unitree_g1_with_hands",
                 "action_neck_unitree_g1_with_hands",
-                "smplx_data_unitree_g1_with_hands",
                 "human_smplx_data_unitree_g1_with_hands",
                 "human_info_unitree_g1_with_hands",
                 "recording_control_unitree_g1_with_hands",
@@ -1052,10 +1060,9 @@ class DDSRLActionProvider(ActionProvider):
             action_left_raw = res[1] if len(res) > 1 else None
             action_right_raw = res[2] if len(res) > 2 else None
             action_neck_raw = res[3] if len(res) > 3 else None
-            smplx_data_raw = res[4] if len(res) > 4 else None
-            human_smplx_data_raw = res[5] if len(res) > 5 else None
-            human_info_raw = res[6] if len(res) > 6 else None
-            recording_control_raw = res[7] if len(res) > 7 else None
+            human_smplx_data_raw = res[4] if len(res) > 4 else None
+            human_info_raw = res[5] if len(res) > 5 else None
+            recording_control_raw = res[6] if len(res) > 6 else None
 
             action_body = self._twist2_parse_list(action_body_raw, self.n_mimic_obs)
             action_left = self._twist2_parse_list(action_left_raw, self._twist2_hand_dim)
@@ -1104,21 +1111,6 @@ class DDSRLActionProvider(ActionProvider):
                 # No valid teleop data, return default standing pose
                 return self._default_mimic_obs.clone()
 
-            # Parse SMPLX data
-            if smplx_data_raw is not None:
-                try:
-                    if isinstance(smplx_data_raw, (bytes, bytearray)):
-                        smplx_data_raw = smplx_data_raw.decode("utf-8")
-                    self._twist2_smplx_data = json.loads(smplx_data_raw)
-                    self._twist2_smplx_valid = True
-                except Exception as e:
-                    # print(f"[{self.name}] Failed to parse SMPLX data: {e}")
-                    self._twist2_smplx_data = None
-                    self._twist2_smplx_valid = False
-            else:
-                self._twist2_smplx_data = None
-                self._twist2_smplx_valid = False
-
             # Parse human SMPLX data (before GMR retargeting)
             if human_smplx_data_raw is not None:
                 try:
@@ -1150,7 +1142,8 @@ class DDSRLActionProvider(ActionProvider):
                 self._twist2_human_info_valid = False
 
             # Parse recording control state
-            if recording_control_raw is not None:
+            # Skip reading new commands if we're waiting for reset to complete
+            if recording_control_raw is not None and not self._waiting_for_reset_complete:
                 try:
                     if isinstance(recording_control_raw, (bytes, bytearray)):
                         recording_control_raw = recording_control_raw.decode("utf-8")
@@ -1177,6 +1170,9 @@ class DDSRLActionProvider(ActionProvider):
                 except Exception as e:
                     print(f"[{self.name}] Failed to parse recording control: {e}")
                     pass
+            elif self._waiting_for_reset_complete:
+                # While waiting for reset, ignore new commands from Redis
+                pass
 
             self._twist2_hand_valid = action_left_raw is not None and action_right_raw is not None
             self._twist2_action_hand_left.copy_(
@@ -1195,7 +1191,6 @@ class DDSRLActionProvider(ActionProvider):
         except Exception as e:
             # print(f"[{self.name}] Redis action fetch failed: {e}")
             self._twist2_hand_valid = False
-            self._twist2_smplx_valid = False
             self._twist2_human_smplx_valid = False
             self._twist2_human_info_valid = False
             # Return default 35D mimic_obs on error to maintain stable standing pose
@@ -1213,24 +1208,6 @@ class DDSRLActionProvider(ActionProvider):
             self.redis_pipeline.execute()
         except Exception as e:
             print(f"[{self.name}] Redis state publish failed: {e}")
-
-    def get_smplx_data(self):
-        """Get the most recent SMPLX data from Redis.
-
-        Returns:
-            dict or None: SMPLX data dictionary if available and valid, None otherwise.
-        """
-        if self._twist2_smplx_valid:
-            return self._twist2_smplx_data
-        return None
-
-    def is_smplx_data_valid(self):
-        """Check if SMPLX data is valid and available.
-
-        Returns:
-            bool: True if SMPLX data is available and valid, False otherwise.
-        """
-        return self._twist2_smplx_valid
 
     def get_human_smplx_data(self):
         """Get the most recent human SMPLX data (before GMR retargeting) from Redis.
@@ -1411,21 +1388,12 @@ class DDSRLActionProvider(ActionProvider):
         import time
         total_start = time.perf_counter()
 
-        # Debug SMPL data every 100 steps
-        if hasattr(self, 'sim_step_counter') and self.sim_step_counter % 100 == 0:
-            print(f"\n[SMPL DEBUG] Step {self.sim_step_counter}")
-            if self._twist2_human_smplx_valid:
-                print(f"  Human SMPLX data valid: True")
-                if isinstance(self._twist2_human_smplx_data, dict):
-                    print(f"  Human SMPLX keys: {list(self._twist2_human_smplx_data.keys())[:5]}...")  # Show first 5 keys
-            else:
-                print(f"  Human SMPLX data valid: False")
-
-            if self._twist2_human_info_valid:
-                print(f"  Human info valid: True")
-                print(f"  Human info: {self._twist2_human_info}")
-            else:
-                print(f"  Human info valid: False")
+        # Auto-start recording on first call (after env.reset() has been called)
+        if hasattr(self, '_should_start_recording_on_first_call') and self._should_start_recording_on_first_call:
+            print(f"[{self.name}] 🔴 Starting recording on first get_action() call")
+            print(f"[{self.name}] This ensures Frame 0 captures real physics state")
+            self.recording_manager.start_recording()
+            self._should_start_recording_on_first_call = False
 
         # Timing variables
         policy_time = 0.0
@@ -1626,6 +1594,10 @@ class DDSRLActionProvider(ActionProvider):
                     self._waiting_for_reset_complete = False
                     self._reset_complete_received = True
 
+                    # Reset internal buffers after environment reset
+                    print(f"[{self.name}] 🔄 Resetting internal buffers...")
+                    self._reset_internal_buffers()
+
                     # Start new recording immediately after reset
                     print(f"[{self.name}] 🔴 Starting new recording after reset...")
                     self.recording_manager.start_recording()
@@ -1703,6 +1675,19 @@ class DDSRLActionProvider(ActionProvider):
                 update_start = time.perf_counter()
                 self.env.scene.update(dt=self.env.physics_dt)
                 scene_update_total += time.perf_counter() - update_start
+
+                # Debug: Fix root in air (after scene update to override physics)
+                if self._debug_fix_root_in_air:
+                    # Get current root state [1, 13]: [pos(3), quat(4), lin_vel(3), ang_vel(3)]
+                    root_state = self.env.scene["robot"].data.root_state_w.clone()
+                    # Fix position to target height
+                    root_state[0, 0:3] = self._debug_fixed_root_position
+                    # Fix orientation to upright
+                    root_state[0, 3:7] = self._debug_fixed_root_orientation
+                    # Zero out all velocities (prevents drift)
+                    root_state[0, 7:13] = 0.0
+                    # Write back to simulation
+                    self.env.scene["robot"].write_root_state_to_sim(root_state, env_ids=torch.tensor([0], device=self.env.device))
 
             physics_time = physics_total
             scene_update_time = scene_update_total
@@ -2148,6 +2133,41 @@ class DDSRLActionProvider(ActionProvider):
         except Exception as e:
             print(f"[{self.name}] ❌ Failed to check reset complete: {e}")
             return False
+
+    def _reset_internal_buffers(self):
+        """Reset internal buffers after environment reset to ensure clean state."""
+        try:
+            # Reset TWIST2 history buffer
+            self._twist2_history.zero_()
+
+            # Reset last action buffer
+            self._twist2_last_action.zero_()
+
+            # Reset observation buffer
+            self._twist2_obs_buf.zero_()
+
+            # Reset hand action buffers
+            self._twist2_action_hand_left.zero_()
+            self._twist2_action_hand_right.zero_()
+            self._twist2_action_neck.zero_()
+
+            # Reset hand validity flag
+            self._twist2_hand_valid = False
+
+            # Reset SMPLX data validity flags
+            self._twist2_smplx_valid = False
+            self._twist2_human_smplx_valid = False
+            self._twist2_human_info_valid = False
+
+            # Reset recording command state
+            self._recording_command = "none"
+
+            print(f"[{self.name}] ✅ Internal buffers reset successfully")
+
+        except Exception as e:
+            print(f"[{self.name}] ❌ Failed to reset internal buffers: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _convert_to_joint_range(self, value):
         """Convert gripper control value to joint angle"""

@@ -20,7 +20,7 @@ RECORDING_DIR="${SCRIPT_DIR}/recording_data_for_debug"
 
 # 选择 npz（默认使用固定的调试 npz 文件，也可通过参数覆盖）
 # DEFAULT_NPZ="/home/dreams/Users/Alyssa/HumanoidArena/isaaclab_twist2_g1/recording_data_for_debug/Isaac-Move-Football-G129-Dex3-Wholebody_smpl_Left_Shoulder_global_0_to_-3_to_0_aggressive.npz"
-DEFAULT_NPZ="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/Isaac-Move-Football-G129-Dex3-Wholebody_1773495310633878.npz"
+DEFAULT_NPZ="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/former/Isaac-Move-Football-G129-Dex3-Wholebody_1773495310633878.npz"
 NPZ="${1:-$DEFAULT_NPZ}"
 if [ -z "$NPZ" ]; then
   echo "Error: NPZ path is empty"
@@ -37,7 +37,7 @@ NPZ="$(realpath "$NPZ")"
 
 # SONIC encoder/decoder：默认使用 GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/
 # 若未下载过，请到 GR00T-WholeBodyControl 下执行: python download_from_hf.py
-GROOT_ROOT="/home/dreams/Users/Alyssa/HumanoidArena/GR00T-WholeBodyControl"
+GROOT_ROOT="/home/dreams/Users/Alyssa/HumanoidArena_V1/GR00T-WholeBodyControl"
 SONIC_POLICY_DIR="${GROOT_ROOT}/gear_sonic_deploy/policy/release"
 ENCODER_PATH="${SONIC_ENCODER_PATH:-${SONIC_POLICY_DIR}/model_encoder.onnx}"
 DECODER_PATH="${SONIC_DECODER_PATH:-${SONIC_POLICY_DIR}/model_decoder.onnx}"

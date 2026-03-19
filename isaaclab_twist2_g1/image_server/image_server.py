@@ -292,9 +292,13 @@ class _XRobotImagePublisher(_ImagePublisher):
         if not self.proc or not self.proc.stdout:
             return
         while self.running:
+            # Check if proc is still valid before reading
+            if not self.proc:
+                break
             chunk = self.proc.stdout.read(4096)
             if not chunk:
-                if self.proc.poll() is not None:
+                # Check if proc is still valid before polling
+                if self.proc and self.proc.poll() is not None:
                     break
                 time.sleep(0.01)
                 continue

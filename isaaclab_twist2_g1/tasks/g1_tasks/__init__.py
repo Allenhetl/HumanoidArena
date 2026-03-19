@@ -16,6 +16,8 @@ def _safe_import(name):
 # Import move_football first (no pink dependency) so football test works when others fail
 from . import move_football_g1_29dof_dex3_wholebody
 from . import move_boxing_bag_g1_29dof_dex3_wholebody
+from . import move_pickplace_doubledesk_g1_29dof_dex3_wholebody
+from . import push_t_g1_29dof_dex3_wholebody
 
 # Other tasks may use pink/pinocchio - wrap in _safe_import to tolerate ImportError
 _safe_import("tasks.g1_tasks.pick_place_cylinder_g1_29dof_dex3")
@@ -49,4 +51,6 @@ __all__ = [
         "visual_zone_g1_29dof_dex3_wholebody",
         "move_football_g1_29dof_dex3_wholebody",
         "move_boxing_bag_g1_29dof_dex3_wholebody",
+        "move_pickplace_doubledesk_g1_29dof_dex3_wholebody",
+        "push_t_g1_29dof_dex3_wholebody",
 ]

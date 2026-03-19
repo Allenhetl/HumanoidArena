@@ -83,6 +83,11 @@ import tasks
 from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
 from action_provider.action_provider_wh_twist2_replay import ReplayActionProvider
 
+from tools.grass_ground_material import apply_grass_pbr_to_ground
+import tools.pitch_lines as pitch_lines_mod
+from tools.pitch_lines import create_simple_debug_lines
+from tools.football_physics_material import apply_football_physics_material
+from tools.get_stiffness import get_robot_stiffness_from_env
 
 def setup_signal_handlers(controller, image_server=None, simulation_app=None):
     """set signal handlers
@@ -190,13 +195,118 @@ def main():
         print(f"\nFailed to create environment: {e}")
         return
 
+    # get robot stiffness and damping parameters from runtime environment
+    print("\n" + "=" * 60)
+    print("🔍 Getting robot stiffness and damping parameters from runtime environment")
+    print("=" * 60)
+
+    try:
+        stiffness_data = get_robot_stiffness_from_env(env)
+        if stiffness_data:
+            print("✅ Successfully got robot parameters!")
+        else:
+            print("⚠️ Failed to get robot parameters, will try again after environment reset")
+    except Exception as e:
+        print(f"⚠️ Error getting robot parameters: {e}")
+
+    print("=" * 60)
+
     print("\n")
     print("***  Please left-click on the Sim window to activate rendering. ***")
     print("\n")
 
     # reset environment
+
+    
+    # if "football" in args_cli.task.lower():
+    #     grass_ok_pre = apply_grass_pbr_to_ground(prim_path="/World/GroundPlane", uv_scale=(100.0, 100.0))
+    #     print(f"[grass_ground_material] before reset apply result: {grass_ok_pre}")
+    #     try:
+    #         apply_football_physics_material(restitution=0.75)
+    #     except Exception as e:
+    #         print(f"[football_physics] 跳過: {e}")
+    #     try:
+    #         import omni.usd
+    #         stage = omni.usd.get_context().get_stage()
+    #         print(f"[pitch_lines] module file: {pitch_lines_mod.__file__}")
+    #         create_simple_debug_lines(stage, line_color=(32.0 / 255.0, 32.0 / 255.0, 32.0 / 255.0))
+    #     except Exception as e:
+    #         print(f"[pitch_lines] 標線未建立或跳過: {e}")
+
+    if "football" in args_cli.task.lower():
+        grass_ok_pre = apply_grass_pbr_to_ground(prim_path="/World/GroundPlane", uv_scale=(100.0, 100.0))
+        print(f"[grass_ground_material] before reset apply result: {grass_ok_pre}")
+        try:
+            apply_football_physics_material(restitution=0.75)
+        except Exception as e:
+            print(f"[football_physics] 跳過: {e}")
+        try:
+            import omni.usd
+            from tasks.g1_tasks.move_football_g1_29dof_dex3_wholebody.move_football_g1_29dof_dex3_hw_env_cfg import (
+                GOAL_REFERENCE_LINE_ABSOLUTE_CENTERS,
+                GOAL_REFERENCE_LINE_COLOR,
+                GOAL_REFERENCE_LINE_LENGTH,
+                GOAL_REFERENCE_LINE_RELATIVE_OFFSETS,
+                GOAL_REFERENCE_LINE_WIDTH_RATIO,
+            )
+            from tools.pitch_lines import DEFAULT_LINE_WIDTH
+            stage = omni.usd.get_context().get_stage()
+            print(f"[pitch_lines] module file: {pitch_lines_mod.__file__}")
+            create_simple_debug_lines(
+                stage,
+                line_color=(32.0 / 255.0, 32.0 / 255.0, 32.0 / 255.0),
+                draw_goal_reference_lines=True,
+                goal_centers=GOAL_REFERENCE_LINE_ABSOLUTE_CENTERS,
+                goal_relative_offsets=GOAL_REFERENCE_LINE_RELATIVE_OFFSETS,
+                goal_line_length=GOAL_REFERENCE_LINE_LENGTH,
+                goal_line_width=DEFAULT_LINE_WIDTH * GOAL_REFERENCE_LINE_WIDTH_RATIO,
+                goal_line_color=GOAL_REFERENCE_LINE_COLOR,
+            )
+            print(
+                f"[pitch_lines] goal reference lines color={GOAL_REFERENCE_LINE_COLOR}, "
+                f"centers={GOAL_REFERENCE_LINE_ABSOLUTE_CENTERS}, offsets={GOAL_REFERENCE_LINE_RELATIVE_OFFSETS}"
+            )
+        except Exception as e:
+            print(f"[pitch_lines] 標線未建立或跳過: {e}")
+
     env.sim.reset()
     env.reset()
+    if "football" in args_cli.task.lower():
+        grass_ok_post = apply_grass_pbr_to_ground(prim_path="/World/GroundPlane", uv_scale=(15.0, 15.0))
+        print(f"[grass_ground_material] after reset apply result: {grass_ok_post}")
+
+    # ================= Debug: print Box & Cube physics properties =================
+    print("\n" + "=" * 60)
+    print("[DEBUG] Inspecting physics properties using IsaacLab API")
+
+    inspect_targets = ["object_l", "object", "box", "hurdle"]
+    for target_name in inspect_targets:
+        if target_name not in env.scene.keys():
+            continue
+        target_obj = env.scene[target_name]
+        print(f"\n[{target_name.upper()}] Prim path: {target_obj.cfg.prim_path}")
+        print(f"  Scene object type: {type(target_obj).__name__}")
+        has_physx_view = hasattr(target_obj, "root_physx_view") and target_obj.root_physx_view is not None
+        if has_physx_view:
+            masses = target_obj.root_physx_view.get_masses()
+            print(f"  Mass (runtime): {masses[0] if len(masses) > 0 else 'N/A'} kg")
+            print(f"  Mass (from config): {target_obj.cfg.spawn.mass_props.mass if hasattr(target_obj.cfg.spawn, 'mass_props') and target_obj.cfg.spawn.mass_props else 'Not set in config'} kg")
+            try:
+                materials = target_obj.root_physx_view.get_material_properties()
+                if materials is not None and len(materials) > 0:
+                    mat = materials[0]
+                    print(f"  Static friction (from PhysX): {mat[0].item()}")
+                    print(f"  Dynamic friction (from PhysX): {mat[1].item()}")
+                    print(f"  Restitution (from PhysX): {mat[2].item()}")
+                else:
+                    print(f"  Material properties: Unable to retrieve via PhysX view API")
+            except Exception as e:
+                print(f"  Material properties: Unable to retrieve ({e})")
+        else:
+            print("  Runtime mass/material inspection skipped (no root_physx_view)")
+        if hasattr(target_obj.cfg, "spawn") and hasattr(target_obj.cfg.spawn, "rigid_props") and target_obj.cfg.spawn.rigid_props:
+            print(f"  Gravity disabled: {target_obj.cfg.spawn.rigid_props.disable_gravity}")
+        break
 
     # --- set default viewport camera to first-person view (GUI only) ---
     try:
@@ -475,4 +585,3 @@ if __name__ == "__main__":
 
         # Force exit
         os._exit(0)
-

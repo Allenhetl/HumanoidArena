@@ -1,55 +1,31 @@
-# Copyright (c) 2025, Unitree Robotics Co., Ltd. All Rights Reserved.
-# License: Apache License, Version 2.0
-
 import torch
 
 import isaaclab.envs.mdp as base_mdp
+from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
-from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
-from isaaclab.managers import TerminationTermCfg as DoneTerm
-from isaaclab.utils import configclass
-from isaaclab.assets import ArticulationCfg
+from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensorCfg
+from isaaclab.utils import configclass
 
 from . import mdp
-
-from tasks.common_config import G1RobotPresets, CameraPresets
+from tasks.common_config import CameraPresets, G1RobotPresets
 from tasks.common_event.event_manager import SimpleEvent, SimpleEventManager
-from tasks.common_scene.base_scene_football_cfg_wholebody import (
-    TableFootballSceneCfgWH,
+from tasks.common_scene.base_scene_push_t_cfg_wholebody import (
+    PushTSceneCfgWH,
     ROBOT_INIT_X,
     ROBOT_INIT_Y,
     ROBOT_INIT_Z,
 )
 
-GOAL_REFERENCE_LINE_RELATIVE_OFFSETS = (
-    (0.0, 0.0),
-    (0.0, 0.0),
-)
-GOAL_REFERENCE_LINE_ABSOLUTE_CENTERS = (
-    (0.0, 50.0),
-    (0.0, -50.0),
-)
-GOAL_REFERENCE_LINE_LENGTH = 5.0
-GOAL_REFERENCE_LINE_WIDTH_RATIO = 0.5
-GOAL_REFERENCE_LINE_COLOR = (1.0, 1.0, 1.0)
-
-
-##
-# Scene definition
-##
-
 
 @configclass
-class FootballTableSceneCfg(TableFootballSceneCfgWH):
-    """Football table scene with G1 29DOF Dex3 wholebody robot."""
-
+class PushTSceneCfg(PushTSceneCfgWH):
     robot: ArticulationCfg = G1RobotPresets.g1_29dof_dex3_wholebody(
         init_pos=(ROBOT_INIT_X, ROBOT_INIT_Y, ROBOT_INIT_Z),
-        init_rot=(0.7071, 0.0, 0.0, 0.7071),  # 向左旋轉 90° (繞 Z 軸)
+        init_rot=(1.0, 0.0, 0.0, 0.0),
     )
 
     contact_forces = ContactSensorCfg(
@@ -63,15 +39,8 @@ class FootballTableSceneCfg(TableFootballSceneCfgWH):
     world_camera = CameraPresets.g1_world_camera()
 
 
-##
-# MDP settings
-##
-
-
 @configclass
 class ActionsCfg:
-    """Joint position action configuration."""
-
     joint_pos = mdp.JointPositionActionCfg(
         asset_name="robot",
         joint_names=[".*"],
@@ -82,12 +51,8 @@ class ActionsCfg:
 
 @configclass
 class ObservationsCfg:
-    """Observation configuration."""
-
     @configclass
     class PolicyCfg(ObsGroup):
-        """Policy observation group."""
-
         robot_joint_state = ObsTerm(func=mdp.get_robot_boy_joint_states)
         robot_gipper_state = ObsTerm(func=mdp.get_robot_dex3_joint_states)
         camera_image = ObsTerm(func=mdp.get_camera_image)
@@ -106,7 +71,7 @@ class TerminationsCfg:
 
 @configclass
 class RewardsCfg:
-    reward = RewTerm(func=mdp.compute_reward, weight=1.0)
+    reward = RewTerm(func=mdp.compute_reward_push_t, weight=1.0)
 
 
 @configclass
@@ -115,12 +80,8 @@ class EventCfg:
 
 
 @configclass
-class MoveFootballG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
-    """
-    Environment configuration for G1 29DOF Dex3 wholebody robot with football task.
-    """
-
-    scene: FootballTableSceneCfg = FootballTableSceneCfg(
+class PushTG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
+    scene: PushTSceneCfg = PushTSceneCfg(
         num_envs=1,
         env_spacing=2.5,
         replicate_physics=True,
@@ -154,14 +115,27 @@ class MoveFootballG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
         self.event_manager = SimpleEventManager()
 
         self.event_manager.register(
-            "reset_object_self",
+            "reset_t_top_self",
             SimpleEvent(
                 func=lambda env: base_mdp.reset_root_state_uniform(
                     env,
                     torch.arange(env.num_envs, device=env.device),
-                    pose_range={"x": [-0.05, 0.05], "y": [0.0, 0.05]},
+                    pose_range={"x": [-0.04, 0.04], "y": [-0.04, 0.04]},
                     velocity_range={},
-                    asset_cfg=SceneEntityCfg("object"),
+                    asset_cfg=SceneEntityCfg("object_t_top"),
+                )
+            ),
+        )
+
+        self.event_manager.register(
+            "reset_t_stem_self",
+            SimpleEvent(
+                func=lambda env: base_mdp.reset_root_state_uniform(
+                    env,
+                    torch.arange(env.num_envs, device=env.device),
+                    pose_range={"x": [-0.04, 0.04], "y": [-0.04, 0.04]},
+                    velocity_range={},
+                    asset_cfg=SceneEntityCfg("object_t_stem"),
                 )
             ),
         )

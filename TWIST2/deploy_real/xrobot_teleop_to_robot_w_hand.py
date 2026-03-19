@@ -909,8 +909,8 @@ class XRobotTeleopToRobot:
                 )
 
                 # Manage recording command visibility
-                # Keep "start", "save", "cancel" commands visible for 30 frames (~1 second at 30Hz)
-                if self.state_machine.recording_command in ["start", "save", "cancel"]:
+                # Keep "start", "save", "cancel", "save_and_reset", "discard_and_reset" commands visible for 30 frames (~1 second at 30Hz)
+                if self.state_machine.recording_command in ["start", "save", "cancel", "save_and_reset", "discard_and_reset"]:
                     self.state_machine.recording_command_frame_count += 1
                     if self.state_machine.recording_command_frame_count >= 30:
                         self.state_machine.recording_command = "none"

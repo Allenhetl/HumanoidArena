@@ -1,6 +1,6 @@
-# # Copyright (c) 2025, Unitree Robotics Co., Ltd. All Rights Reserved.
-# # License: Apache License, Version 2.0
-# """Configuration for Unitree robots."""
+# Copyright (c) 2025, Unitree Robotics Co., Ltd. All Rights Reserved.
+# License: Apache License, Version 2.0
+"""Configuration for Unitree robots."""
 
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ActuatorNetMLPCfg, DCMotorCfg, ImplicitActuatorCfg
@@ -744,8 +744,8 @@ G129_CFG_WITH_DEX1_WHOLEBODY = ArticulationCfg(
             stiffness={
                 ".*_shoulder_pitch_joint": 40.0,
                 ".*_shoulder_roll_joint": 40.0,
-                ".*_shoulder_yaw_joint": 30.0,
-                ".*_elbow_joint": 3.0,
+                ".*_shoulder_yaw_joint": 40.0,
+                ".*_elbow_joint": 40.0,
             },
             damping={
                 ".*_shoulder_pitch_joint": 5.0,
@@ -813,7 +813,7 @@ G129_CFG_WITH_DEX3_WHOLEBODY = ArticulationCfg(
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             # enabled_self_collisions=False, solver_position_iteration_count=4, solver_velocity_iteration_count=1
             # Increased iterations for stability with dt=0.005 (MuJoCo training timestep)
-            enabled_self_collisions=False, solver_position_iteration_count=4, solver_velocity_iteration_count=2
+            enabled_self_collisions=False, solver_position_iteration_count=8, solver_velocity_iteration_count=4
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
@@ -871,13 +871,13 @@ G129_CFG_WITH_DEX3_WHOLEBODY = ArticulationCfg(
             },
             velocity_limit_sim=None,
             stiffness={
-                ".*_hip_pitch_joint": 170.0,
-                ".*_hip_roll_joint": 120.0,
-                ".*_hip_yaw_joint": 120.0,
-                ".*_knee_joint": 200.0,
+                ".*_hip_pitch_joint": 100.0,
+                ".*_hip_roll_joint": 100.0,
+                ".*_hip_yaw_joint": 100.0,
+                ".*_knee_joint": 150.0,
             },
             damping={
-                ".*_hip_pitch_joint": 4.0,
+                ".*_hip_pitch_joint": 2.0,
                 ".*_hip_roll_joint": 2.0,
                 ".*_hip_yaw_joint": 2.0,
                 ".*_knee_joint": 4.0,
@@ -892,8 +892,8 @@ G129_CFG_WITH_DEX3_WHOLEBODY = ArticulationCfg(
             },
             velocity_limit_sim=None,
             stiffness={
-                ".*_ankle_pitch_joint": 60.0,
-                ".*_ankle_roll_joint": 60.0,
+                ".*_ankle_pitch_joint": 40.0,
+                ".*_ankle_roll_joint": 40.0,
             },
             damping={
                 ".*_ankle_pitch_joint": 2.0,
@@ -938,8 +938,8 @@ G129_CFG_WITH_DEX3_WHOLEBODY = ArticulationCfg(
                 ".*_wrist_yaw_joint",
             ],
             effort_limit_sim={
-                ".*_shoulder_pitch_joint": 80.0,
-                ".*_shoulder_roll_joint": 80.0,
+                ".*_shoulder_pitch_joint": 60.0,
+                ".*_shoulder_roll_joint": 60.0,
                 ".*_shoulder_yaw_joint": 60.0,
                 ".*_elbow_joint": 60.0,
                 ".*_wrist_roll_joint": 60.0,
@@ -948,23 +948,32 @@ G129_CFG_WITH_DEX3_WHOLEBODY = ArticulationCfg(
             },
             velocity_limit_sim=None,
             stiffness={
-                ".*_shoulder_pitch_joint": 30.0,
-                ".*_shoulder_roll_joint": 30.0,
-                ".*_shoulder_yaw_joint": 30.0,
-                ".*_elbow_joint": 30.0,
-                ".*_wrist_roll_joint": 30.0,
-                ".*_wrist_pitch_joint": 30.0,
-                ".*_wrist_yaw_joint": 30.0,
+                ".*_shoulder_pitch_joint": 40.0,
+                ".*_shoulder_roll_joint": 40.0,
+                ".*_shoulder_yaw_joint": 40.0,
+                ".*_elbow_joint": 40.0,
+                ".*_wrist_roll_joint": 40.0,
+                ".*_wrist_pitch_joint": 40.0,
+                ".*_wrist_yaw_joint": 40.0,
             },
             damping={
                 ".*_shoulder_pitch_joint": 1.0,
                 ".*_shoulder_roll_joint": 1.0,
                 ".*_shoulder_yaw_joint": 1.0,
-                ".*_elbow_joint": 2.0,
+                ".*_elbow_joint": 1.0,
                 ".*_wrist_roll_joint": 1.0,
                 ".*_wrist_pitch_joint": 1.0,
                 ".*_wrist_yaw_joint": 1.0,
             },
+            # damping={
+            #     ".*_shoulder_pitch_joint": 5.0,  # 从1.0改为5.0
+            #     ".*_shoulder_roll_joint": 5.0,  # 从1.0改为5.0
+            #     ".*_shoulder_yaw_joint": 5.0,  # 从1.0改为5.0
+            #     ".*_elbow_joint": 5.0,  # 从1.0改为5.0
+            #     ".*_wrist_roll_joint": 0.2,  # 从1.0改为0.2
+            #     ".*_wrist_pitch_joint": 0.2,  # 从1.0改为0.2
+            #     ".*_wrist_yaw_joint": 0.2,  # 从1.0改为0.2
+            # },
             armature=0.0,
         ),
         "hands": ImplicitActuatorCfg(
