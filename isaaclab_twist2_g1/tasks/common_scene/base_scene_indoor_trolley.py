@@ -1,0 +1,73 @@
+import os
+
+import isaaclab.sim as sim_utils
+from isaaclab.assets import AssetBaseCfg
+from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
+from isaaclab.utils import configclass
+from tasks.common_config import CameraBaseCfg
+
+project_root = os.environ.get("PROJECT_ROOT")
+
+PALLET_TRUCK_POS = [0.2, -0.8, 0.0]
+TROLLEY_BASE_POS = [-0.4, 0.6, 0.0]
+
+
+@configclass
+class IndoorTrolleySceneCfg(InteractiveSceneCfg):
+    room_walls = AssetBaseCfg(
+        prim_path="/World/envs/env_.*/Room",
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=[0.0, 0.0, 0.0],
+            rot=[1.0, 0.0, 0.0, 0.0],
+        ),
+        spawn=UsdFileCfg(
+            usd_path=f"{project_root}/assets/objects/small_warehouse/small_warehouse_digital_twin.usd",
+        ),
+    )
+
+    pallet_truck = AssetBaseCfg(
+        prim_path="/World/envs/env_.*/PalletTruck",
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=PALLET_TRUCK_POS,
+            rot=[1.0, 0.0, 0.0, 0.0],
+        ),
+        spawn=UsdFileCfg(
+            usd_path=f"{project_root}/assets/objects/Props/general/SM_LowProfilePalletTruck_A01_01/SM_LowProfilePalletTruck_A01_01_physics.usd",
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                collision_enabled=True,
+                contact_offset=0.01,
+                rest_offset=0.0,
+            ),
+        ),
+    )
+
+    trolley_wheel_base = AssetBaseCfg(
+        prim_path="/World/envs/env_.*/TrolleyWheelBase",
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=TROLLEY_BASE_POS,
+            rot=[1.0, 0.0, 0.0, 0.0],
+        ),
+        spawn=UsdFileCfg(
+            usd_path=f"{project_root}/assets/objects/Props/general/Trolley_wheel_base/Trolley_wheel_base_physics.usd",
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                collision_enabled=True,
+                contact_offset=0.01,
+                rest_offset=0.0,
+            ),
+        ),
+    )
+
+    light = AssetBaseCfg(
+        prim_path="/World/light",
+        spawn=sim_utils.DomeLightCfg(
+            color=(0.75, 0.75, 0.75),
+            intensity=3000.0,
+        ),
+    )
+
+    world_camera = CameraBaseCfg.get_camera_config(
+        prim_path="/World/PerspectiveCamera",
+        pos_offset=(-1.9, -5.0, 1.8),
+        rot_offset=(-0.40614, 0.78544, 0.4277, -0.16986),
+    )
