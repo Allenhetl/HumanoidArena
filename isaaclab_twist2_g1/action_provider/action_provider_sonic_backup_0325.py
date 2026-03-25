@@ -38,7 +38,6 @@ import json
 import os
 import sys
 import time
-from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -689,8 +688,6 @@ _STEP1_FRAMES = 10
 _STEP5_FRAMES = 10
 _STEP5_STRIDE = 5
 _STEP5_HISTORY_LEN = (_STEP5_FRAMES - 1) * _STEP5_STRIDE + 1
-_STREAM_HISTORY_FRAMES = 5
-_STREAM_MAX_GAP_FRAMES = 200
 
 OFFICIAL_WRIST_INDICES = [23, 24, 25, 26, 27, 28]
 OFFICIAL_LOWERBODY_INDICES = [0, 3, 6, 9, 13, 17, 1, 4, 7, 10, 14, 18]
@@ -732,237 +729,6 @@ def gather_temporal_window(hist: np.ndarray, num_frames: int, stride: int) -> np
     return window.astype(np.float32)
 
 
-@dataclass
-class StreamedMotionPacket:
-    frame_indices: np.ndarray
-    smpl_joints: np.ndarray
-    smpl_pose: np.ndarray
-    body_quat_w: np.ndarray
-    joint_pos: np.ndarray
-    joint_vel: np.ndarray
-    root_z: np.ndarray
-
-
-@dataclass
-class StreamedMotionState:
-    frame_indices: np.ndarray
-    smpl_joints: np.ndarray
-    smpl_pose: np.ndarray
-    body_quat_w: np.ndarray
-    joint_pos: np.ndarray
-    joint_vel: np.ndarray
-    root_z: np.ndarray
-    playback_idx: int = 0
-    frame_step: int = 1
-
-
-def _normalize_frame_indices(frame_indices: np.ndarray) -> np.ndarray:
-    frame_indices = np.asarray(frame_indices, dtype=np.int64).reshape(-1)
-    if frame_indices.size == 0:
-        raise ValueError("frame_indices must not be empty")
-    if frame_indices.size > 1:
-        diffs = np.diff(frame_indices)
-        if np.any(diffs <= 0):
-            raise ValueError(f"frame_indices must be strictly increasing: {frame_indices}")
-    return frame_indices
-
-
-def _infer_frame_step(frame_indices: np.ndarray) -> int:
-    frame_indices = _normalize_frame_indices(frame_indices)
-    if frame_indices.size == 1:
-        return 1
-    diffs = np.diff(frame_indices)
-    if np.any(diffs != diffs[0]):
-        raise ValueError(f"frame_indices must have constant stride: {frame_indices}")
-    return int(diffs[0])
-
-
-def _ensure_packet_field(
-    name: str,
-    array: np.ndarray,
-    num_frames: int,
-    tail_shape: tuple[int, ...],
-    dtype,
-) -> np.ndarray:
-    array = np.asarray(array, dtype=dtype)
-    expected_shape = (num_frames, *tail_shape)
-    if array.shape != expected_shape:
-        raise ValueError(f"{name} shape mismatch: got {array.shape}, expected {expected_shape}")
-    return array.astype(dtype, copy=False)
-
-
-def _copy_stream_field(
-    old_array: np.ndarray,
-    incoming_array: np.ndarray,
-    merge_dst_frame: int,
-) -> np.ndarray:
-    new_shape = (merge_dst_frame + incoming_array.shape[0], *incoming_array.shape[1:])
-    merged = np.zeros(new_shape, dtype=incoming_array.dtype)
-    if merge_dst_frame > 0:
-        merged[:merge_dst_frame] = old_array
-    merged[merge_dst_frame:] = incoming_array
-    return merged
-
-
-def merge_streamed_motion_packet(
-    state: Optional[StreamedMotionState],
-    packet: StreamedMotionPacket,
-    history_frames: int = _STREAM_HISTORY_FRAMES,
-    max_gap_frames: int = _STREAM_MAX_GAP_FRAMES,
-    catch_up_enabled: bool = True,
-):
-    frame_indices = _normalize_frame_indices(packet.frame_indices)
-    num_frames = int(frame_indices.shape[0])
-    frame_step = _infer_frame_step(frame_indices)
-    packet = StreamedMotionPacket(
-        frame_indices=frame_indices,
-        smpl_joints=_ensure_packet_field("smpl_joints", packet.smpl_joints, num_frames, (_N_SMPL_JOINTS, 3), np.float32),
-        smpl_pose=_ensure_packet_field("smpl_pose", packet.smpl_pose, num_frames, (_N_SMPL_POSES, 3), np.float32),
-        body_quat_w=_ensure_packet_field("body_quat_w", packet.body_quat_w, num_frames, (4,), np.float32),
-        joint_pos=_ensure_packet_field("joint_pos", packet.joint_pos, num_frames, (29,), np.float32),
-        joint_vel=_ensure_packet_field("joint_vel", packet.joint_vel, num_frames, (29,), np.float32),
-        root_z=_ensure_packet_field("root_z", packet.root_z, num_frames, tuple(), np.float32),
-    )
-    info = {
-        "did_catchup_reset": False,
-        "frame_step": frame_step,
-        "window_start": int(frame_indices[0]),
-        "frame_offset_adjustment": 0,
-    }
-
-    if state is None or state.frame_indices.size == 0 or state.frame_step != frame_step:
-        if state is not None and state.frame_indices.size > 0 and state.frame_step != frame_step:
-            print(
-                "[SONIC][STREAM] frame_step changed, resetting stream "
-                f"{state.frame_step} -> {frame_step}"
-            )
-        info["did_catchup_reset"] = True
-        return StreamedMotionState(
-            frame_indices=packet.frame_indices.copy(),
-            smpl_joints=packet.smpl_joints.copy(),
-            smpl_pose=packet.smpl_pose.copy(),
-            body_quat_w=packet.body_quat_w.copy(),
-            joint_pos=packet.joint_pos.copy(),
-            joint_vel=packet.joint_vel.copy(),
-            root_z=packet.root_z.copy(),
-            playback_idx=0,
-            frame_step=frame_step,
-        ), info
-
-    incoming_frame_start = int(packet.frame_indices[0])
-    incoming_frame_end = int(packet.frame_indices[-1])
-    stream_window_start = int(state.frame_indices[0])
-    stream_window_end = int(state.frame_indices[-1])
-
-    max_gap = (max_gap_frames + history_frames) if catch_up_enabled else int(1e9)
-    global_playback_frame = stream_window_start + frame_step * max(0, state.playback_idx - history_frames)
-
-    force_reset = (
-        incoming_frame_start <= stream_window_start
-        or incoming_frame_end <= stream_window_end
-    )
-    if force_reset:
-        info["did_catchup_reset"] = True
-        return StreamedMotionState(
-            frame_indices=packet.frame_indices.copy(),
-            smpl_joints=packet.smpl_joints.copy(),
-            smpl_pose=packet.smpl_pose.copy(),
-            body_quat_w=packet.body_quat_w.copy(),
-            joint_pos=packet.joint_pos.copy(),
-            joint_vel=packet.joint_vel.copy(),
-            root_z=packet.root_z.copy(),
-            playback_idx=0,
-            frame_step=frame_step,
-        ), info
-
-    desired_window_start = global_playback_frame
-    tentative_window_start = min(desired_window_start, incoming_frame_start)
-    delta_to_incoming = incoming_frame_start - tentative_window_start
-    merge_dst_frame = (delta_to_incoming // frame_step) if frame_step > 0 else 0
-    large_gap_from_old = incoming_frame_start > stream_window_end + frame_step
-
-    if merge_dst_frame > max_gap or large_gap_from_old:
-        info["did_catchup_reset"] = True
-        return StreamedMotionState(
-            frame_indices=packet.frame_indices.copy(),
-            smpl_joints=packet.smpl_joints.copy(),
-            smpl_pose=packet.smpl_pose.copy(),
-            body_quat_w=packet.body_quat_w.copy(),
-            joint_pos=packet.joint_pos.copy(),
-            joint_vel=packet.joint_vel.copy(),
-            root_z=packet.root_z.copy(),
-            playback_idx=0,
-            frame_step=frame_step,
-        ), info
-
-    old_copy_start_idx = max(0, (tentative_window_start - stream_window_start) // frame_step)
-    old_copy_end_idx = old_copy_start_idx + merge_dst_frame
-    old_frame_indices = state.frame_indices[old_copy_start_idx:old_copy_end_idx]
-    old_smpl_joints = state.smpl_joints[old_copy_start_idx:old_copy_end_idx]
-    old_smpl_pose = state.smpl_pose[old_copy_start_idx:old_copy_end_idx]
-    old_body_quat_w = state.body_quat_w[old_copy_start_idx:old_copy_end_idx]
-    old_joint_pos = state.joint_pos[old_copy_start_idx:old_copy_end_idx]
-    old_joint_vel = state.joint_vel[old_copy_start_idx:old_copy_end_idx]
-    old_root_z = state.root_z[old_copy_start_idx:old_copy_end_idx]
-
-    merged_frame_indices = _copy_stream_field(old_frame_indices, packet.frame_indices, merge_dst_frame)
-    merged_smpl_joints = _copy_stream_field(old_smpl_joints, packet.smpl_joints, merge_dst_frame)
-    merged_smpl_pose = _copy_stream_field(old_smpl_pose, packet.smpl_pose, merge_dst_frame)
-    merged_body_quat_w = _copy_stream_field(old_body_quat_w, packet.body_quat_w, merge_dst_frame)
-    merged_joint_pos = _copy_stream_field(old_joint_pos, packet.joint_pos, merge_dst_frame)
-    merged_joint_vel = _copy_stream_field(old_joint_vel, packet.joint_vel, merge_dst_frame)
-    merged_root_z = _copy_stream_field(old_root_z, packet.root_z, merge_dst_frame)
-
-    window_shift_ticks = tentative_window_start - stream_window_start
-    window_shift = (window_shift_ticks // frame_step) if frame_step > 0 else 0
-    playback_idx = int(np.clip(state.playback_idx - window_shift, 0, merged_frame_indices.shape[0] - 1))
-
-    info["window_start"] = int(tentative_window_start)
-    info["frame_offset_adjustment"] = int(window_shift)
-    return StreamedMotionState(
-        frame_indices=merged_frame_indices,
-        smpl_joints=merged_smpl_joints,
-        smpl_pose=merged_smpl_pose,
-        body_quat_w=merged_body_quat_w,
-        joint_pos=merged_joint_pos,
-        joint_vel=merged_joint_vel,
-        root_z=merged_root_z,
-        playback_idx=playback_idx,
-        frame_step=frame_step,
-    ), info
-
-
-def advance_stream_playback(
-    state: Optional[StreamedMotionState],
-    lookahead_frames: int = _STEP1_FRAMES,
-) -> Optional[StreamedMotionState]:
-    if state is None or state.frame_indices.size == 0:
-        return state
-    max_playback_idx = max(0, int(state.frame_indices.shape[0]) - lookahead_frames)
-    if state.playback_idx < max_playback_idx:
-        state.playback_idx += 1
-    return state
-
-
-def gather_stream_playback_window(
-    state: Optional[StreamedMotionState],
-    num_frames: int = _STEP1_FRAMES,
-) -> dict:
-    if state is None or state.frame_indices.size == 0:
-        raise ValueError("stream state is empty")
-    gather_idx = np.arange(state.playback_idx, state.playback_idx + num_frames, dtype=np.int64)
-    gather_idx = np.clip(gather_idx, 0, state.frame_indices.shape[0] - 1)
-    return {
-        "frame_indices": state.frame_indices[gather_idx].copy(),
-        "smpl_joints": state.smpl_joints[gather_idx].copy(),
-        "smpl_pose": state.smpl_pose[gather_idx].copy(),
-        "body_quat_w": state.body_quat_w[gather_idx].copy(),
-        "joint_pos": state.joint_pos[gather_idx].copy(),
-        "joint_vel": state.joint_vel[gather_idx].copy(),
-        "root_z": state.root_z[gather_idx].copy(),
-    }
-
-
 class SonicActionProvider(ActionProvider):
     """POSE 模式全身遥操作 ActionProvider。
 
@@ -983,7 +749,7 @@ class SonicActionProvider(ActionProvider):
         self._sonic_log_every = int(os.environ.get("SONIC_LOG_EVERY", "50") or 50)
         # 也允许通过 CLI 参数覆盖（若 sim_main.py 透传了这些字段）
         # self._sonic_debug = bool(getattr(args_cli, "sonic_debug", self._sonic_debug))
-        self._sonic_debug = False
+        self._sonic_debug = True
         self._sonic_log_every = int(getattr(args_cli, "sonic_log_every", self._sonic_log_every))
 
         self.enable_dex3    = getattr(args_cli, "enable_dex3_dds",   False)
@@ -1196,13 +962,6 @@ class SonicActionProvider(ActionProvider):
         self._smpl_data_valid = False
         self._frame_count = 0
         self._smpl_history_fill = 0
-        self._stream_motion_state: Optional[StreamedMotionState] = None
-        self._stream_last_merge_info = {
-            "did_catchup_reset": False,
-            "frame_step": 1,
-            "window_start": 0,
-            "frame_offset_adjustment": 0,
-        }
         self._anchor_heading_initialized = False
         self._anchor_use_heading_align = False
         self._anchor_init_base_quat_wxyz = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
@@ -1211,7 +970,7 @@ class SonicActionProvider(ActionProvider):
 
         # Joint tracking monitoring (for PD coefficient tuning)
         self._tracking_target_buffer = np.zeros(29, dtype=np.float32)
-        self._tracking_log_interval = 1000000  # Print every N frames (10 = more frequent for tuning)
+        self._tracking_log_interval = 1  # Print every N frames (10 = more frequent for tuning)
 
     def on_env_reset(self):
         try:
@@ -1228,13 +987,6 @@ class SonicActionProvider(ActionProvider):
         self._frame_count = 0
         self._smpl_data_valid = False
         self._smpl_history_fill = 0
-        self._stream_motion_state = None
-        self._stream_last_merge_info = {
-            "did_catchup_reset": False,
-            "frame_step": 1,
-            "window_start": 0,
-            "frame_offset_adjustment": 0,
-        }
         self._latent = None
         self._anchor_heading_initialized = False
         self._anchor_use_heading_align = False
@@ -1255,91 +1007,6 @@ class SonicActionProvider(ActionProvider):
         self._last_action_hist.fill(0.0)
         # print(f"[SONIC] on_env_reset: frame_count reset, warmup={self._sonic_warmup_steps}")  # warmup 已注释
         print(f"[SONIC] on_env_reset: frame_count and history reset")
-
-    def _reset_heading_alignment(self):
-        self._anchor_heading_initialized = False
-        self._anchor_use_heading_align = False
-        self._anchor_init_base_quat_wxyz[:] = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
-        self._anchor_init_ref_quat_wxyz[:] = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
-        self._anchor_heading_align_quat_wxyz[:] = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
-
-    def _stream_history_ready(self) -> bool:
-        return (
-            self._smpl_data_valid
-            and self._stream_motion_state is not None
-            and int(self._stream_motion_state.frame_indices.shape[0]) >= _STEP1_FRAMES
-        )
-
-    def _build_streamed_motion_packet(
-        self,
-        data: dict,
-        root_z_sequence: Optional[np.ndarray],
-    ) -> Optional[StreamedMotionPacket]:
-        required = ["frame_index", "smpl_joints", "smpl_pose", "body_quat_w", "joint_pos", "joint_vel"]
-        if not all(key in data for key in required):
-            return None
-        frame_indices = np.asarray(data["frame_index"], dtype=np.int64).reshape(-1)
-        num_frames = int(frame_indices.shape[0])
-        if root_z_sequence is None:
-            root_z_sequence = np.zeros((num_frames,), dtype=np.float32)
-        else:
-            root_z_sequence = np.asarray(root_z_sequence, dtype=np.float32).reshape(-1)
-            if root_z_sequence.shape[0] != num_frames:
-                raise ValueError(
-                    f"root_z_sequence shape mismatch: {root_z_sequence.shape} vs num_frames={num_frames}"
-                )
-        return StreamedMotionPacket(
-            frame_indices=frame_indices,
-            smpl_joints=np.asarray(data["smpl_joints"], dtype=np.float32),
-            smpl_pose=np.asarray(data["smpl_pose"], dtype=np.float32),
-            body_quat_w=np.asarray(data["body_quat_w"], dtype=np.float32),
-            joint_pos=np.asarray(data["joint_pos"], dtype=np.float32),
-            joint_vel=np.asarray(data["joint_vel"], dtype=np.float32),
-            root_z=root_z_sequence,
-        )
-
-    def _get_stream_playback_window(self) -> dict:
-        if self._stream_motion_state is None:
-            raise ValueError("stream motion state is empty")
-        window = gather_stream_playback_window(self._stream_motion_state, _STEP1_FRAMES)
-        self._smpl_joints_buf[:] = window["smpl_joints"]
-        return window
-
-    def _compute_stream_anchor_window(self, ref_quat_window_wxyz: np.ndarray) -> np.ndarray:
-        robot = self.env.scene["robot"].data
-        base_quat_wxyz = quat_normalize_wxyz(
-            robot.root_state_w[0, 3:7].cpu().numpy().astype(np.float32)
-        )
-        ref_quat_window_wxyz = quat_normalize_wxyz(ref_quat_window_wxyz.astype(np.float32))
-        ref_init_quat_wxyz = ref_quat_window_wxyz[0]
-
-        if not self._anchor_heading_initialized:
-            self._anchor_init_base_quat_wxyz[:] = base_quat_wxyz
-            self._anchor_init_ref_quat_wxyz[:] = ref_init_quat_wxyz
-            self._anchor_heading_align_quat_wxyz[:] = quat_mul_wxyz(
-                quat_heading_wxyz(self._anchor_init_base_quat_wxyz),
-                quat_conjugate_wxyz(quat_heading_wxyz(self._anchor_init_ref_quat_wxyz)),
-            )
-            self._anchor_heading_initialized = True
-            self._anchor_use_heading_align = True
-
-        aligned_ref_quat_wxyz = ref_quat_window_wxyz.copy()
-        if self._anchor_use_heading_align:
-            aligned_ref_quat_wxyz = quat_mul_wxyz(
-                self._anchor_heading_align_quat_wxyz,
-                ref_quat_window_wxyz,
-            )
-
-        rel_quat_wxyz = quat_mul_wxyz(
-            quat_conjugate_wxyz(base_quat_wxyz),
-            aligned_ref_quat_wxyz,
-        )
-        anchor_window = quat_to_rotation_6d(rel_quat_wxyz).astype(np.float32)
-        self._body_rot6d_buf[:] = anchor_window
-        return anchor_window
-
-    def _advance_stream_playback_cursor(self):
-        self._stream_motion_state = advance_stream_playback(self._stream_motion_state, _STEP1_FRAMES)
 
     def _setup_hand_dds(self, args_cli):
         self._dex3_dds = None
@@ -1522,40 +1189,116 @@ class SonicActionProvider(ActionProvider):
         tag = source.upper()
         print(f"[{tag}] Received data keys: {list(data.keys())}")
         got_pose_frame = False
-        latest_frame = None
-        num_pose_frames = 0
         root_z_value = None
         root_z_source = None
-        root_z_sequence = None
 
+        # smpl_joints: (N, 24, 3) — 取最新一帧
         if "smpl_joints" in data:
-            sj = data["smpl_joints"].astype(np.float32)
-            latest_frame = sj[-1]
-            num_pose_frames = int(sj.shape[0])
-            print(f"[{tag}] smpl_joints shape: {sj.shape}, latest frame sum: {np.abs(latest_frame).sum():.4f}")
-            if np.abs(latest_frame).sum() > 0.01:
+            sj = data["smpl_joints"].astype(np.float32)  # (N, 24, 3)
+            frame = sj[-1]  # (24, 3)
+            print(f"[{tag}] smpl_joints shape: {sj.shape}, latest frame sum: {np.abs(frame).sum():.4f}")
+            print(f"[{tag}] smpl_joints latest frame:\n{frame}")
+            # 检查是否为有效数据（非全0）
+            if np.abs(frame).sum() > 0.01:
                 self._smpl_data_valid = True
                 print(f"[{tag}] SMPL data marked as VALID")
+            self._smpl_joints_buf = np.roll(self._smpl_joints_buf, -1, axis=0)
+            self._smpl_joints_buf[-1] = frame
             got_pose_frame = True
 
+        # smpl_pose: (N, 21, 3)
         if "smpl_pose" in data:
-            sp = data["smpl_pose"].astype(np.float32)
-            print(f"[{tag}] smpl_pose shape: {sp.shape}")
+            sp = data["smpl_pose"].astype(np.float32)    # (N, 21, 3)
+            print(f"[{tag}] smpl_pose shape: {sp.shape}, latest frame:\n{sp[-1]}")
             self._smpl_pose_buf = np.roll(self._smpl_pose_buf, -1, axis=0)
             self._smpl_pose_buf[-1] = sp[-1]
 
+        # body_quat_w: (N, 4) → 转换为6D旋转表示
+        # ✨ CRITICAL FIX: 原版 C++ 代码计算相对旋转（ref相对于robot base）
+        # motion_anchor_orientation 是机器人局部坐标系下的相对旋转
+        # 公式: base_to_ref = base^(-1) * ref
         if "body_quat_w" in data:
-            bq = data["body_quat_w"].astype(np.float32)
+            bq = data["body_quat_w"].astype(np.float32)  # (N, 4) wxyz
             print(f"[{tag}] body_quat_w shape: {bq.shape}, latest: {bq[-1]}")
             got_pose_frame = True
 
+            # 获取机器人当前朝向（从Isaac Lab）
+            robot = self.env.scene["robot"].data
+            base_quat_wxyz = robot.root_state_w[0, 3:7].cpu().numpy().astype(np.float32)  # [w,x,y,z]
+
+            # 获取参考数据（SMPL）的朝向
+            ref_quat_wxyz = quat_normalize_wxyz(bq[-1])  # [w,x,y,z]
+
+            if not self._anchor_heading_initialized:
+                self._anchor_init_base_quat_wxyz[:] = quat_normalize_wxyz(base_quat_wxyz)
+                self._anchor_init_ref_quat_wxyz[:] = ref_quat_wxyz
+                self._anchor_heading_align_quat_wxyz[:] = quat_mul_wxyz(
+                    quat_heading_wxyz(self._anchor_init_base_quat_wxyz),
+                    quat_conjugate_wxyz(quat_heading_wxyz(self._anchor_init_ref_quat_wxyz)),
+                )
+                self._anchor_heading_initialized = True
+                self._anchor_use_heading_align = True
+                raw_init_angle_deg = quat_angle_deg_wxyz(
+                    quat_mul_wxyz(
+                        quat_conjugate_wxyz(self._anchor_init_base_quat_wxyz),
+                        self._anchor_init_ref_quat_wxyz,
+                    )
+                )
+                aligned_init_angle_deg = quat_angle_deg_wxyz(
+                    quat_mul_wxyz(
+                        quat_conjugate_wxyz(self._anchor_init_base_quat_wxyz),
+                        quat_mul_wxyz(
+                            self._anchor_heading_align_quat_wxyz,
+                            self._anchor_init_ref_quat_wxyz,
+                        ),
+                    )
+                )
+                print(
+                    f"[{tag}][ANCHOR_INIT] "
+                    f"raw_init_angle_deg={raw_init_angle_deg:.2f} "
+                    f"aligned_init_angle_deg={aligned_init_angle_deg:.2f} "
+                    f"use_heading_align={self._anchor_use_heading_align}"
+                )
+
+            aligned_ref_quat_wxyz = ref_quat_wxyz.copy()
+            if self._anchor_use_heading_align:
+                aligned_ref_quat_wxyz = quat_mul_wxyz(
+                    self._anchor_heading_align_quat_wxyz,
+                    ref_quat_wxyz,
+                )
+
+            # 计算相对旋转：ref 相对于 base（与C++一致）
+            # base_to_ref = base^(-1) * ref
+            rel_quat_wxyz = quat_mul_wxyz(
+                quat_conjugate_wxyz(base_quat_wxyz),  # base^(-1)
+                aligned_ref_quat_wxyz                  # heading-aligned ref
+            )
+
+            # 转换为rot6d
+            rot6d_latest = quat_to_rotation_6d(rel_quat_wxyz.reshape(1, 4))[0]
+
+            if self._frame_count <= 3 or self._frame_count % 25 == 0:
+                print(
+                    f"[{tag}][ANCHOR] "
+                    f"base_quat={base_quat_wxyz} "
+                    f"ref_quat={ref_quat_wxyz} "
+                    f"aligned_ref_quat={aligned_ref_quat_wxyz} "
+                    f"rel_quat={rel_quat_wxyz} "
+                    f"rot6d={rot6d_latest} "
+                    f"use_heading_align={self._anchor_use_heading_align} "
+                    f"(relative to robot base, C++ convention)"
+                )
+
+            print(f"[{tag}] converted to rot6d latest: {rot6d_latest}")
+            self._body_rot6d_buf = np.roll(self._body_rot6d_buf, -1, axis=0)
+            self._body_rot6d_buf[-1] = rot6d_latest  # (6,)
+            self._motion_anchor_rot6d_hist = np.roll(self._motion_anchor_rot6d_hist, -1, axis=0)
+            self._motion_anchor_rot6d_hist[-1] = rot6d_latest
+
         if "adjusted_transl" in data:
             adjusted_transl = data["adjusted_transl"].astype(np.float32)
-            if adjusted_transl.ndim == 1:
-                adjusted_transl = adjusted_transl[None, :]
-            latest_transl = adjusted_transl[-1]
+            latest_transl = adjusted_transl[-1] if adjusted_transl.ndim > 1 else adjusted_transl
             if latest_transl.shape[0] >= 3:
-                root_z_sequence = adjusted_transl[:, 2].astype(np.float32)
                 root_z_value = float(latest_transl[2])
                 root_z_source = "adjusted_transl"
 
@@ -1564,8 +1307,6 @@ class SonicActionProvider(ActionProvider):
                 robot = self.env.scene["robot"].data
                 root_z_value = float(robot.root_state_w[0, 2].cpu().numpy())
                 root_z_source = "sim_fallback"
-                if num_pose_frames > 0:
-                    root_z_sequence = np.full((num_pose_frames,), root_z_value, dtype=np.float32)
             except Exception:
                 root_z_value = None
                 root_z_source = None
@@ -1581,57 +1322,22 @@ class SonicActionProvider(ActionProvider):
                 )
 
         if got_pose_frame:
-            try:
-                packet = self._build_streamed_motion_packet(data, root_z_sequence)
-            except Exception as e:
-                print(f"[{tag}][STREAM] failed to build packet: {e}")
-                packet = None
-            if packet is not None:
-                try:
-                    self._stream_motion_state, self._stream_last_merge_info = merge_streamed_motion_packet(
-                        self._stream_motion_state,
-                        packet,
-                        history_frames=_STREAM_HISTORY_FRAMES,
-                        max_gap_frames=_STREAM_MAX_GAP_FRAMES,
-                    )
-                    if self._stream_last_merge_info["did_catchup_reset"]:
-                        self._reset_heading_alignment()
-                    self._robot_joint_pos = packet.joint_pos[-1]
-                    self._robot_joint_vel = packet.joint_vel[-1]
-                    self._motion_joint_pos_hist = np.roll(self._motion_joint_pos_hist, -1, axis=0)
-                    self._motion_joint_pos_hist[-1] = self._robot_joint_pos
-                    self._motion_joint_vel_hist = np.roll(self._motion_joint_vel_hist, -1, axis=0)
-                    self._motion_joint_vel_hist[-1] = self._robot_joint_vel
-                    if packet.root_z.shape[0] > 0:
-                        self._motion_root_z_hist = np.roll(self._motion_root_z_hist, -1, axis=0)
-                        self._motion_root_z_hist[-1] = float(packet.root_z[-1])
-                    self._smpl_history_fill = min(_STEP1_FRAMES, int(self._stream_motion_state.frame_indices.shape[0]))
-                except Exception as e:
-                    print(f"[{tag}][STREAM] merge failed: {e}")
+            self._smpl_history_fill = min(_STEP1_FRAMES, self._smpl_history_fill + 1)
             if self._frame_count <= 3 or self._frame_count % 25 == 0:
-                stream_len = 0 if self._stream_motion_state is None else int(self._stream_motion_state.frame_indices.shape[0])
-                playback_idx = -1 if self._stream_motion_state is None else int(self._stream_motion_state.playback_idx)
-                frame_span = "empty"
-                if self._stream_motion_state is not None and stream_len > 0:
-                    frame_span = (
-                        f"{int(self._stream_motion_state.frame_indices[0])}"
-                        f"->{int(self._stream_motion_state.frame_indices[-1])}"
-                    )
                 print(
-                    f"[{tag}][STREAM] "
+                    f"[{tag}][HISTORY] "
                     f"smpl_history_fill={self._smpl_history_fill}/{_STEP1_FRAMES} "
-                    f"smpl_valid={self._smpl_data_valid} "
-                    f"stream_len={stream_len} "
-                    f"playback_idx={playback_idx} "
-                    f"frame_span={frame_span} "
-                    f"catchup={self._stream_last_merge_info.get('did_catchup_reset', False)}"
+                    f"smpl_valid={self._smpl_data_valid}"
                 )
 
+        # 机器人关节状态（来自 ZMQ，用于 obs 构建）
         if "joint_pos" in data:
             jp = data["joint_pos"].astype(np.float32)
             self._robot_joint_pos = jp[-1]
+            self._motion_joint_pos_hist = np.roll(self._motion_joint_pos_hist, -1, axis=0)
+            self._motion_joint_pos_hist[-1] = self._robot_joint_pos
             if self._frame_count <= 3 or self._frame_count % 25 == 0:
-                wrist_ref = self._robot_joint_pos[OFFICIAL_WRIST_INDICES]
+                wrist_ref = self._motion_joint_pos_hist[-1, OFFICIAL_WRIST_INDICES]
                 print(
                     f"[{tag}][REF_JOINT_POS] "
                     f"range={array_range_str(self._robot_joint_pos)} "
@@ -1641,6 +1347,8 @@ class SonicActionProvider(ActionProvider):
         if "joint_vel" in data:
             jv = data["joint_vel"].astype(np.float32)
             self._robot_joint_vel = jv[-1]
+            self._motion_joint_vel_hist = np.roll(self._motion_joint_vel_hist, -1, axis=0)
+            self._motion_joint_vel_hist[-1] = self._robot_joint_vel
             if self._frame_count <= 3 or self._frame_count % 25 == 0:
                 print(
                     f"[{tag}][REF_JOINT_VEL] "
@@ -1744,38 +1452,52 @@ class SonicActionProvider(ActionProvider):
             # 参考 g1_deploy_onnx_ref.cpp: GatherEncoderMode(..., fill_zeros_num=3)
             encoder_mode = np.array([2., 0., 0., 0.], dtype=np.float32)
 
-            # ============================================================================
-            # SMPL Mode (mode_id=2) Encoder Input Construction
-            # ============================================================================
-            # According to observation_config.yaml, SMPL mode only requires 4 observation blocks:
-            #   1. encoder_mode_4
-            #   2. smpl_joints_10frame_step1
-            #   3. smpl_anchor_orientation_10frame_step1
-            #   4. motion_joint_positions_wrists_10frame_step1
-            #
-            # All other observations must be ZERO to match C++ implementation.
-            # Reference: gear_sonic_deploy/policy/release/observation_config.yaml:74-80
-            # Reference: g1_deploy_onnx_ref.cpp:1920-1942 (mode filtering logic)
-            # ============================================================================
+            motion_joint_pos_step5_ref = gather_temporal_window(
+                self._motion_joint_pos_hist, _STEP5_FRAMES, _STEP5_STRIDE
+            )
+            motion_joint_vel_step5_ref = gather_temporal_window(
+                self._motion_joint_vel_hist, _STEP5_FRAMES, _STEP5_STRIDE
+            )
+            lowerbody_indices = OFFICIAL_LOWERBODY_INDICES
+            motion_joint_pos_lowerbody_ref = motion_joint_pos_step5_ref[:, lowerbody_indices]
+            motion_joint_vel_lowerbody_ref = motion_joint_vel_step5_ref[:, lowerbody_indices]
 
-            # These observations are NOT required in SMPL mode → set to ZERO
-            motion_joint_pos_step5_full = np.zeros(290, dtype=np.float32)
-            motion_joint_vel_step5_full = np.zeros(290, dtype=np.float32)
-            motion_root_z_step5 = np.zeros(10, dtype=np.float32)
-            motion_root_z = np.zeros(1, dtype=np.float32)
-            motion_anchor_orient = np.zeros(6, dtype=np.float32)
-            motion_anchor_orient_step5_full = np.zeros(60, dtype=np.float32)
-            motion_joint_pos_lowerbody_full = np.zeros(120, dtype=np.float32)
-            motion_joint_vel_lowerbody_full = np.zeros(120, dtype=np.float32)
-            vr_3pt_pos = np.zeros(9, dtype=np.float32)
-            vr_3pt_orn = np.zeros(12, dtype=np.float32)
+            # ✨ CRITICAL FIX: Use reference motion data from ZMQ instead of zeros
+            # In SMPL mode, the encoder still needs robot proprioception for better tracking
+            motion_joint_pos_step5_full = motion_joint_pos_step5_ref.reshape(-1).astype(np.float32)
+            motion_joint_vel_step5_full = motion_joint_vel_step5_ref.reshape(-1).astype(np.float32)
 
-            stream_window = self._get_stream_playback_window()
-            smpl_anchor_window = self._compute_stream_anchor_window(stream_window["body_quat_w"])
-            smpl_joints_flat = stream_window["smpl_joints"].reshape(-1).astype(np.float32)
-            smpl_anchor_orient_flat = smpl_anchor_window.reshape(-1).astype(np.float32)
+            # Extract root z position from motion history
+            motion_root_z_step5 = gather_temporal_window(
+                self._motion_root_z_hist[:, None], _STEP5_FRAMES, _STEP5_STRIDE
+            ).reshape(-1).astype(np.float32)
+            motion_root_z = np.array([self._motion_root_z_hist[-1]], dtype=np.float32)
+            print(f"[SONIC Root z step 5:{motion_root_z_step5}]")
+            print(f"[SONIC Root z:{motion_root_z}]")
+
+
+            # Use anchor orientation from SMPL data
+            motion_anchor_orient = self._body_rot6d_buf[-1].copy()  # Latest anchor orientation
+            motion_anchor_orient_step5_full = gather_temporal_window(
+                self._motion_anchor_rot6d_hist, _STEP5_FRAMES, _STEP5_STRIDE
+            ).reshape(-1).astype(np.float32)
+
+            motion_joint_pos_lowerbody_full = motion_joint_pos_lowerbody_ref.reshape(-1).astype(np.float32)
+            motion_joint_vel_lowerbody_full = motion_joint_vel_lowerbody_ref.reshape(-1).astype(np.float32)
+
+            # ✨ CRITICAL: Use actual VR 3-point pose data from SMPL processing
+            # This data comes from _apply_pose_data which processes vr_position and vr_orientation
+            # from the ZMQ/Redis pose message
+            vr_3pt_pos = self._vr_3pt_position.copy()  # (9,) - 3 points × 3D position
+            vr_3pt_orn = self._vr_3pt_orientation.copy()  # (12,) - 3 points × 4D quat wxyz
+            # Note: Despite the comment saying "每个6D", the encoder actually expects quaternions (4D)
+            # Total encoder input: 1762 = ... + 9 (vr_pos) + 12 (vr_orn) + ...
+
+            smpl_joints_flat = self._smpl_joints_buf.reshape(-1)  # (10, 24, 3) → (720,)
+            smpl_anchor_orient_flat = self._body_rot6d_buf.reshape(-1)  # (10, 6) → (60,)
             wrist_indices = OFFICIAL_WRIST_INDICES
-            motion_wrist_pos = stream_window["joint_pos"][:, wrist_indices].reshape(-1).astype(np.float32)
+            motion_wrist_window = gather_temporal_window(self._motion_joint_pos_hist, _STEP1_FRAMES, 1)
+            motion_wrist_pos = motion_wrist_window[:, wrist_indices].reshape(-1)
 
             # 拼接所有观察值
             encoder_input = np.concatenate([
@@ -1802,21 +1524,44 @@ class SonicActionProvider(ActionProvider):
                 print(f"[SONIC] SMPL joints sum: {np.abs(smpl_joints_flat).sum():.4f}")
 
             if do_log or (self._sonic_debug and np.max(np.abs(encoder_input)) > 8.0):
+                sim_wrist_pos = self._robot_joint_pos_hist[:, wrist_indices].reshape(-1)
+                wrist_l2 = float(np.linalg.norm(motion_wrist_pos - sim_wrist_pos))
                 print(
                     "[SONIC][SMPL_MODE] "
                     f"encoder_mode_vec={encoder_mode.tolist()} "
-                    f"active={SMPL_MODE_ACTIVE_BLOCKS}"
+                    f"active={SMPL_MODE_ACTIVE_BLOCKS} "
+                    f"zeroed={SMPL_MODE_ZEROED_BLOCKS}"
                 )
                 print(
-                    "[SONIC][SMPL_MODE_ACTIVE_BLOCKS] "
+                    "[SONIC][ENCODER_BLOCKS] "
+                    f"motion_pos_step5={array_range_str(motion_joint_pos_step5_full)} "
+                    f"motion_vel_step5={array_range_str(motion_joint_vel_step5_full)} "
+                    f"motion_root_z_step5={array_range_str(motion_root_z_step5)} "
+                    f"anchor={array_range_str(motion_anchor_orient)} "
+                    f"anchor_step5={array_range_str(motion_anchor_orient_step5_full)}"
+                )
+                print(
+                    "[SONIC][REF_DIAG] "
+                    f"ignored_ref_motion_pos_step5={array_range_str(motion_joint_pos_step5_ref.reshape(-1))} "
+                    f"ignored_ref_motion_vel_step5={array_range_str(motion_joint_vel_step5_ref.reshape(-1))} "
+                    f"ignored_ref_lowerbody_pos={array_range_str(motion_joint_pos_lowerbody_ref.reshape(-1))} "
+                    f"ignored_ref_lowerbody_vel={array_range_str(motion_joint_vel_lowerbody_ref.reshape(-1))}"
+                )
+                print(
+                    "[SONIC][ENCODER_BLOCKS] "
+                    f"lowerbody_pos={array_range_str(motion_joint_pos_lowerbody_full)} "
+                    f"lowerbody_vel={array_range_str(motion_joint_vel_lowerbody_full)} "
                     f"smpl_joints={array_range_str(smpl_joints_flat)} "
                     f"smpl_anchor={array_range_str(smpl_anchor_orient_flat)} "
                     f"wrist_pos={array_range_str(motion_wrist_pos)}"
                 )
                 print(
-                    "[SONIC][SMPL_MODE_ZEROED_BLOCKS] "
-                    f"All zeroed blocks (918 dims) are correctly set to 0.0 "
-                    f"to match C++ implementation"
+                    "[SONIC][WRIST_DIAG] "
+                    f"ref_wrist={array_range_str(motion_wrist_pos)} "
+                    f"sim_wrist={array_range_str(sim_wrist_pos)} "
+                    f"ref_vs_sim_l2={wrist_l2:.4f} "
+                    f"lowerbody_idx={lowerbody_indices} "
+                    f"wrist_idx={wrist_indices}"
                 )
 
             # Encoder推理
@@ -1927,7 +1672,7 @@ class SonicActionProvider(ActionProvider):
                 if self._sonic_debug and (self._frame_count <= 3 or self._frame_count % self._sonic_log_every == 0):
                     print("zmq pose")
             # warmup_active = self._frame_count <= self._sonic_warmup_steps  # warmup 已注释
-            history_ready = self._stream_history_ready()
+            history_ready = self._smpl_history_fill >= _STEP1_FRAMES and self._smpl_data_valid
 
             # if warmup_active or not history_ready:  # 原 warmup 逻辑：前 N 步或历史未满则 hold
             if not history_ready:
@@ -1955,7 +1700,6 @@ class SonicActionProvider(ActionProvider):
                     )
             else:
                 sonic_targets = self._run_gear_sonic()
-                self._advance_stream_playback_cursor()
 
             if self._sonic_debug and (self._frame_count <= 3 or self._frame_count % self._sonic_log_every == 0):
                 sonic_targets_str = np.array2string(

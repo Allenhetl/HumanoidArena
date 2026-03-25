@@ -21,6 +21,8 @@ from . import push_t_g1_29dof_dex3_wholebody
 from . import move_three_step_platform_g1_29dof_dex3_wholebody
 from . import move_artvip_livingroom_g1_29dof_dex3_wholebody
 from . import move_artvip_livingroom_nosofa_g1_29dof_dex3_wholebody
+from . import move_open_door_g1_29dof_dex3_wholebody
+from . import move_plum_blossom_pile_g1_29dof_dex3_wholebody
 
 # Other tasks may use pink/pinocchio - wrap in _safe_import to tolerate ImportError
 _safe_import("tasks.g1_tasks.pick_place_cylinder_g1_29dof_dex3")
@@ -59,4 +61,6 @@ __all__ = [
         "move_three_step_platform_g1_29dof_dex3_wholebody",
         "move_artvip_livingroom_g1_29dof_dex3_wholebody",
         "move_artvip_livingroom_nosofa_g1_29dof_dex3_wholebody",
+        "move_open_door_g1_29dof_dex3_wholebody",
+        "move_plum_blossom_pile_g1_29dof_dex3_wholebody",
 ]
