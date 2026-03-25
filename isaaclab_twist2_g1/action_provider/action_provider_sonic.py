@@ -530,6 +530,7 @@ def _pico_single_frame_from_body_poses(
     smpl_pose_np = latest_data["smpl_pose"].detach().cpu().numpy()[:, :63].reshape(-1, 21, 3)[0].astype(np.float32)
     smpl_joints_np = latest_data["smpl_joints_local"].detach().cpu().numpy()[0].astype(np.float32)
     body_quat_np = latest_data["global_orient_quat"].detach().cpu().numpy()[0].astype(np.float32)
+    adjusted_transl_np = latest_data["adjusted_transl"].detach().cpu().numpy()[0].astype(np.float32)
 
     # Wrist joints from SMPL pose (roll/pitch/yaw only).
     joint_pos_smpl = _compute_wrist_joint_pos_from_smpl_pose(smpl_pose_np)
@@ -555,6 +556,7 @@ def _pico_single_frame_from_body_poses(
         "smpl_pose": smpl_pose_np[None, :, :],  # (1,21,3)
         "smpl_joints": smpl_joints_np[None, :, :],  # (1,24,3)
         "body_quat_w": body_quat_np[None, :],  # (1,4) wxyz
+        "adjusted_transl": adjusted_transl_np[None, :],  # (1,3)
         "joint_pos": joint_pos_out[None, :],  # (1,29)
         "joint_vel": joint_vel_out,  # (1,29)
         "frame_index": np.array([frame_index], dtype=np.int64),
@@ -1187,6 +1189,8 @@ class SonicActionProvider(ActionProvider):
         tag = source.upper()
         print(f"[{tag}] Received data keys: {list(data.keys())}")
         got_pose_frame = False
+        root_z_value = None
+        root_z_source = None
 
         # smpl_joints: (N, 24, 3) — 取最新一帧
         if "smpl_joints" in data:
@@ -1225,11 +1229,49 @@ class SonicActionProvider(ActionProvider):
             # 获取参考数据（SMPL）的朝向
             ref_quat_wxyz = quat_normalize_wxyz(bq[-1])  # [w,x,y,z]
 
+            if not self._anchor_heading_initialized:
+                self._anchor_init_base_quat_wxyz[:] = quat_normalize_wxyz(base_quat_wxyz)
+                self._anchor_init_ref_quat_wxyz[:] = ref_quat_wxyz
+                self._anchor_heading_align_quat_wxyz[:] = quat_mul_wxyz(
+                    quat_heading_wxyz(self._anchor_init_base_quat_wxyz),
+                    quat_conjugate_wxyz(quat_heading_wxyz(self._anchor_init_ref_quat_wxyz)),
+                )
+                self._anchor_heading_initialized = True
+                self._anchor_use_heading_align = True
+                raw_init_angle_deg = quat_angle_deg_wxyz(
+                    quat_mul_wxyz(
+                        quat_conjugate_wxyz(self._anchor_init_base_quat_wxyz),
+                        self._anchor_init_ref_quat_wxyz,
+                    )
+                )
+                aligned_init_angle_deg = quat_angle_deg_wxyz(
+                    quat_mul_wxyz(
+                        quat_conjugate_wxyz(self._anchor_init_base_quat_wxyz),
+                        quat_mul_wxyz(
+                            self._anchor_heading_align_quat_wxyz,
+                            self._anchor_init_ref_quat_wxyz,
+                        ),
+                    )
+                )
+                print(
+                    f"[{tag}][ANCHOR_INIT] "
+                    f"raw_init_angle_deg={raw_init_angle_deg:.2f} "
+                    f"aligned_init_angle_deg={aligned_init_angle_deg:.2f} "
+                    f"use_heading_align={self._anchor_use_heading_align}"
+                )
+
+            aligned_ref_quat_wxyz = ref_quat_wxyz.copy()
+            if self._anchor_use_heading_align:
+                aligned_ref_quat_wxyz = quat_mul_wxyz(
+                    self._anchor_heading_align_quat_wxyz,
+                    ref_quat_wxyz,
+                )
+
             # 计算相对旋转：ref 相对于 base（与C++一致）
             # base_to_ref = base^(-1) * ref
             rel_quat_wxyz = quat_mul_wxyz(
                 quat_conjugate_wxyz(base_quat_wxyz),  # base^(-1)
-                ref_quat_wxyz                          # ref
+                aligned_ref_quat_wxyz                  # heading-aligned ref
             )
 
             # 转换为rot6d
@@ -1240,8 +1282,10 @@ class SonicActionProvider(ActionProvider):
                     f"[{tag}][ANCHOR] "
                     f"base_quat={base_quat_wxyz} "
                     f"ref_quat={ref_quat_wxyz} "
+                    f"aligned_ref_quat={aligned_ref_quat_wxyz} "
                     f"rel_quat={rel_quat_wxyz} "
                     f"rot6d={rot6d_latest} "
+                    f"use_heading_align={self._anchor_use_heading_align} "
                     f"(relative to robot base, C++ convention)"
                 )
 
@@ -1250,6 +1294,32 @@ class SonicActionProvider(ActionProvider):
             self._body_rot6d_buf[-1] = rot6d_latest  # (6,)
             self._motion_anchor_rot6d_hist = np.roll(self._motion_anchor_rot6d_hist, -1, axis=0)
             self._motion_anchor_rot6d_hist[-1] = rot6d_latest
+
+        if "adjusted_transl" in data:
+            adjusted_transl = data["adjusted_transl"].astype(np.float32)
+            latest_transl = adjusted_transl[-1] if adjusted_transl.ndim > 1 else adjusted_transl
+            if latest_transl.shape[0] >= 3:
+                root_z_value = float(latest_transl[2])
+                root_z_source = "adjusted_transl"
+
+        if root_z_value is None and got_pose_frame:
+            try:
+                robot = self.env.scene["robot"].data
+                root_z_value = float(robot.root_state_w[0, 2].cpu().numpy())
+                root_z_source = "sim_fallback"
+            except Exception:
+                root_z_value = None
+                root_z_source = None
+
+        if root_z_value is not None:
+            self._motion_root_z_hist = np.roll(self._motion_root_z_hist, -1, axis=0)
+            self._motion_root_z_hist[-1] = root_z_value
+            if self._frame_count <= 3 or self._frame_count % 25 == 0:
+                print(
+                    f"[{tag}][ROOT_Z] "
+                    f"source={root_z_source} "
+                    f"value={root_z_value:.4f}"
+                )
 
         if got_pose_frame:
             self._smpl_history_fill = min(_STEP1_FRAMES, self._smpl_history_fill + 1)
@@ -1382,41 +1452,31 @@ class SonicActionProvider(ActionProvider):
             # 参考 g1_deploy_onnx_ref.cpp: GatherEncoderMode(..., fill_zeros_num=3)
             encoder_mode = np.array([2., 0., 0., 0.], dtype=np.float32)
 
-            motion_joint_pos_step5_ref = gather_temporal_window(
-                self._motion_joint_pos_hist, _STEP5_FRAMES, _STEP5_STRIDE
-            )
-            motion_joint_vel_step5_ref = gather_temporal_window(
-                self._motion_joint_vel_hist, _STEP5_FRAMES, _STEP5_STRIDE
-            )
-            lowerbody_indices = OFFICIAL_LOWERBODY_INDICES
-            motion_joint_pos_lowerbody_ref = motion_joint_pos_step5_ref[:, lowerbody_indices]
-            motion_joint_vel_lowerbody_ref = motion_joint_vel_step5_ref[:, lowerbody_indices]
+            # ============================================================================
+            # SMPL Mode (mode_id=2) Encoder Input Construction
+            # ============================================================================
+            # According to observation_config.yaml, SMPL mode only requires 4 observation blocks:
+            #   1. encoder_mode_4
+            #   2. smpl_joints_10frame_step1
+            #   3. smpl_anchor_orientation_10frame_step1
+            #   4. motion_joint_positions_wrists_10frame_step1
+            #
+            # All other observations must be ZERO to match C++ implementation.
+            # Reference: gear_sonic_deploy/policy/release/observation_config.yaml:74-80
+            # Reference: g1_deploy_onnx_ref.cpp:1920-1942 (mode filtering logic)
+            # ============================================================================
 
-            # ✨ CRITICAL FIX: Use reference motion data from ZMQ instead of zeros
-            # In SMPL mode, the encoder still needs robot proprioception for better tracking
-            motion_joint_pos_step5_full = motion_joint_pos_step5_ref.reshape(-1).astype(np.float32)
-            motion_joint_vel_step5_full = motion_joint_vel_step5_ref.reshape(-1).astype(np.float32)
-
-            # Extract root z position from motion history
-            motion_root_z_step5 = np.zeros((_STEP5_FRAMES,), dtype=np.float32)  # TODO: extract from motion if available
-            motion_root_z = np.zeros((1,), dtype=np.float32)
-
-            # Use anchor orientation from SMPL data
-            motion_anchor_orient = self._body_rot6d_buf[-1].copy()  # Latest anchor orientation
-            motion_anchor_orient_step5_full = gather_temporal_window(
-                self._motion_anchor_rot6d_hist, _STEP5_FRAMES, _STEP5_STRIDE
-            ).reshape(-1).astype(np.float32)
-
-            motion_joint_pos_lowerbody_full = motion_joint_pos_lowerbody_ref.reshape(-1).astype(np.float32)
-            motion_joint_vel_lowerbody_full = motion_joint_vel_lowerbody_ref.reshape(-1).astype(np.float32)
-
-            # ✨ CRITICAL: Use actual VR 3-point pose data from SMPL processing
-            # This data comes from _apply_pose_data which processes vr_position and vr_orientation
-            # from the ZMQ/Redis pose message
-            vr_3pt_pos = self._vr_3pt_position.copy()  # (9,) - 3 points × 3D position
-            vr_3pt_orn = self._vr_3pt_orientation.copy()  # (12,) - 3 points × 4D quat wxyz
-            # Note: Despite the comment saying "每个6D", the encoder actually expects quaternions (4D)
-            # Total encoder input: 1762 = ... + 9 (vr_pos) + 12 (vr_orn) + ...
+            # These observations are NOT required in SMPL mode → set to ZERO
+            motion_joint_pos_step5_full = np.zeros(290, dtype=np.float32)
+            motion_joint_vel_step5_full = np.zeros(290, dtype=np.float32)
+            motion_root_z_step5 = np.zeros(10, dtype=np.float32)
+            motion_root_z = np.zeros(1, dtype=np.float32)
+            motion_anchor_orient = np.zeros(6, dtype=np.float32)
+            motion_anchor_orient_step5_full = np.zeros(60, dtype=np.float32)
+            motion_joint_pos_lowerbody_full = np.zeros(120, dtype=np.float32)
+            motion_joint_vel_lowerbody_full = np.zeros(120, dtype=np.float32)
+            vr_3pt_pos = np.zeros(9, dtype=np.float32)
+            vr_3pt_orn = np.zeros(12, dtype=np.float32)
 
             smpl_joints_flat = self._smpl_joints_buf.reshape(-1)  # (10, 24, 3) → (720,)
             smpl_anchor_orient_flat = self._body_rot6d_buf.reshape(-1)  # (10, 6) → (60,)
@@ -1449,44 +1509,21 @@ class SonicActionProvider(ActionProvider):
                 print(f"[SONIC] SMPL joints sum: {np.abs(smpl_joints_flat).sum():.4f}")
 
             if do_log or (self._sonic_debug and np.max(np.abs(encoder_input)) > 8.0):
-                sim_wrist_pos = self._robot_joint_pos_hist[:, wrist_indices].reshape(-1)
-                wrist_l2 = float(np.linalg.norm(motion_wrist_pos - sim_wrist_pos))
                 print(
                     "[SONIC][SMPL_MODE] "
                     f"encoder_mode_vec={encoder_mode.tolist()} "
-                    f"active={SMPL_MODE_ACTIVE_BLOCKS} "
-                    f"zeroed={SMPL_MODE_ZEROED_BLOCKS}"
+                    f"active={SMPL_MODE_ACTIVE_BLOCKS}"
                 )
                 print(
-                    "[SONIC][ENCODER_BLOCKS] "
-                    f"motion_pos_step5={array_range_str(motion_joint_pos_step5_full)} "
-                    f"motion_vel_step5={array_range_str(motion_joint_vel_step5_full)} "
-                    f"motion_root_z_step5={array_range_str(motion_root_z_step5)} "
-                    f"anchor={array_range_str(motion_anchor_orient)} "
-                    f"anchor_step5={array_range_str(motion_anchor_orient_step5_full)}"
-                )
-                print(
-                    "[SONIC][REF_DIAG] "
-                    f"ignored_ref_motion_pos_step5={array_range_str(motion_joint_pos_step5_ref.reshape(-1))} "
-                    f"ignored_ref_motion_vel_step5={array_range_str(motion_joint_vel_step5_ref.reshape(-1))} "
-                    f"ignored_ref_lowerbody_pos={array_range_str(motion_joint_pos_lowerbody_ref.reshape(-1))} "
-                    f"ignored_ref_lowerbody_vel={array_range_str(motion_joint_vel_lowerbody_ref.reshape(-1))}"
-                )
-                print(
-                    "[SONIC][ENCODER_BLOCKS] "
-                    f"lowerbody_pos={array_range_str(motion_joint_pos_lowerbody_full)} "
-                    f"lowerbody_vel={array_range_str(motion_joint_vel_lowerbody_full)} "
+                    "[SONIC][SMPL_MODE_ACTIVE_BLOCKS] "
                     f"smpl_joints={array_range_str(smpl_joints_flat)} "
                     f"smpl_anchor={array_range_str(smpl_anchor_orient_flat)} "
                     f"wrist_pos={array_range_str(motion_wrist_pos)}"
                 )
                 print(
-                    "[SONIC][WRIST_DIAG] "
-                    f"ref_wrist={array_range_str(motion_wrist_pos)} "
-                    f"sim_wrist={array_range_str(sim_wrist_pos)} "
-                    f"ref_vs_sim_l2={wrist_l2:.4f} "
-                    f"lowerbody_idx={lowerbody_indices} "
-                    f"wrist_idx={wrist_indices}"
+                    "[SONIC][SMPL_MODE_ZEROED_BLOCKS] "
+                    f"All zeroed blocks (918 dims) are correctly set to 0.0 "
+                    f"to match C++ implementation"
                 )
 
             # Encoder推理
