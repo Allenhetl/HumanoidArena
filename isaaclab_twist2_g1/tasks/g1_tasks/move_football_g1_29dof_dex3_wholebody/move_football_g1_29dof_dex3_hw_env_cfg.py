@@ -1,6 +1,9 @@
 # Copyright (c) 2025, Unitree Robotics Co., Ltd. All Rights Reserved.
 # License: Apache License, Version 2.0
 
+import os
+from datetime import datetime
+
 import torch
 
 import isaaclab.envs.mdp as base_mdp
@@ -36,6 +39,21 @@ GOAL_REFERENCE_LINE_ABSOLUTE_CENTERS = (
 GOAL_REFERENCE_LINE_LENGTH = 5.0
 GOAL_REFERENCE_LINE_WIDTH_RATIO = 0.5
 GOAL_REFERENCE_LINE_COLOR = (1.0, 1.0, 1.0)
+FOOT_COLLISION_TARGET_APPROXIMATION = "convexDecomposition"
+FOOT_COLLISION_LOG_FILENAME = "foot_collision_validation.log"
+FOOT_COLLISION_CONVEX_HULL_APPROXIMATION = "convexHull"
+ANKLE_COLLISION_LINKS = [
+    "left_ankle_pitch_link",
+    "left_ankle_roll_link",
+    "right_ankle_pitch_link",
+    "right_ankle_roll_link",
+]
+FOOT_COLLISION_EXPECTED_APPROXIMATIONS = {
+    "left_ankle_pitch_link": FOOT_COLLISION_CONVEX_HULL_APPROXIMATION,
+    "left_ankle_roll_link": FOOT_COLLISION_TARGET_APPROXIMATION,
+    "right_ankle_pitch_link": FOOT_COLLISION_CONVEX_HULL_APPROXIMATION,
+    "right_ankle_roll_link": FOOT_COLLISION_TARGET_APPROXIMATION,
+}
 
 
 ##
@@ -51,9 +69,14 @@ class FootballTableSceneCfg(TableFootballSceneCfgWH):
         init_pos=(ROBOT_INIT_X, ROBOT_INIT_Y, ROBOT_INIT_Z),
         init_rot=(0.7071, 0.0, 0.0, 0.7071),  # 向左旋轉 90° (繞 Z 軸)
     )
+    # robot: ArticulationCfg = G1RobotPresets.g1_29dof_dex3_wholebody(
+    #     init_pos=(ROBOT_INIT_X, ROBOT_INIT_Y, ROBOT_INIT_Z),
+    #     init_rot=(1, 0.0, 0.0, 0.0),
+    # )
 
     contact_forces = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Robot/.*",
+        # history_length=20,
         history_length=10,
         track_air_time=True,
         debug_vis=False,
@@ -145,6 +168,7 @@ class MoveFootballG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 1024 * 1024 * 4
         self.sim.physx.gpu_total_aggregate_pairs_capacity = 16 * 1024
         self.sim.physx.friction_correlation_distance = 0.00625
+        # self.sim.physx.friction_correlation_distance = 0.025
 
         self.sim.physics_material.static_friction = 1.0
         self.sim.physics_material.dynamic_friction = 1.0
@@ -175,3 +199,124 @@ class MoveFootballG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
                 )
             ),
         )
+
+        # Setup foot collision rebuild callback
+        self._foot_collision_setup_done = False
+
+    def _emit_foot_collision_log(self, message: str) -> str:
+        """Print foot collision validation output and append it to a log file."""
+        project_root = os.environ.get("PROJECT_ROOT", os.getcwd())
+        log_dir = os.path.join(project_root, "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, FOOT_COLLISION_LOG_FILENAME)
+
+        timestamped_message = f"{datetime.now().isoformat(timespec='seconds')} {message}"
+        print(timestamped_message)
+        with open(log_path, "a", encoding="utf-8") as log_file:
+            log_file.write(timestamped_message + "\n")
+        return log_path
+
+    def _get_foot_collision_api(self, stage, foot_prim_path: str):
+        """Resolve the collision prim that actually carries the approximation setting."""
+        from pxr import Usd, UsdPhysics
+
+        collision_prim_path = f"{foot_prim_path}/collisions"
+        collision_api = UsdPhysics.MeshCollisionAPI.Get(stage, collision_prim_path)
+        if collision_api:
+            return collision_prim_path, collision_api
+
+        foot_prim = stage.GetPrimAtPath(foot_prim_path)
+        if not foot_prim.IsValid():
+            return collision_prim_path, None
+
+        for sub_prim in Usd.PrimRange(foot_prim):
+            sub_prim_path = str(sub_prim.GetPath())
+            sub_collision_api = UsdPhysics.MeshCollisionAPI.Get(stage, sub_prim_path)
+            if sub_collision_api:
+                return sub_prim_path, sub_collision_api
+
+        return collision_prim_path, None
+
+    def setup_foot_collisions(self):
+        """Rebuild ankle-roll collisions using convex decomposition from mesh."""
+        import omni.usd
+        from pxr import UsdPhysics
+
+        stage = omni.usd.get_context().get_stage()
+        log_path = ""
+
+        for env_idx in range(self.scene.num_envs):
+            robot_prim_path = f"/World/envs/env_{env_idx}/Robot"
+
+            for foot_link in ANKLE_COLLISION_LINKS:
+                foot_prim_path = f"{robot_prim_path}/{foot_link}"
+                expected_approximation = FOOT_COLLISION_EXPECTED_APPROXIMATIONS[foot_link]
+                if expected_approximation != FOOT_COLLISION_TARGET_APPROXIMATION:
+                    continue
+
+                prim = stage.GetPrimAtPath(foot_prim_path)
+                collision_prim_path, _ = self._get_foot_collision_api(stage, foot_prim_path)
+                collision_prim = stage.GetPrimAtPath(collision_prim_path)
+
+                if prim.IsValid() and collision_prim.IsValid():
+                    collision_api = UsdPhysics.MeshCollisionAPI.Apply(collision_prim)
+                    collision_api.GetApproximationAttr().Set(expected_approximation)
+                    current_approximation = collision_api.GetApproximationAttr().Get()
+                    log_path = self._emit_foot_collision_log(
+                        "[foot_collision] apply "
+                        f"env={env_idx} link={foot_link} prim={foot_prim_path} "
+                        f"actual_prim={collision_prim_path} approximation={current_approximation}"
+                    )
+                else:
+                    log_path = self._emit_foot_collision_log(
+                        "[foot_collision] apply "
+                        f"env={env_idx} link={foot_link} prim={foot_prim_path} "
+                        f"actual_prim={collision_prim_path} missing_collision_api"
+                    )
+
+        self._foot_collision_setup_done = True
+        return log_path
+
+    def log_foot_collision_status(self):
+        """Read back the current foot collision approximation and log the result."""
+        import omni.usd
+        from pxr import UsdPhysics
+
+        stage = omni.usd.get_context().get_stage()
+        log_path = ""
+
+        for env_idx in range(self.scene.num_envs):
+            robot_prim_path = f"/World/envs/env_{env_idx}/Robot"
+
+            for foot_link in ANKLE_COLLISION_LINKS:
+                foot_prim_path = f"{robot_prim_path}/{foot_link}"
+                expected_approximation = FOOT_COLLISION_EXPECTED_APPROXIMATIONS[foot_link]
+                prim = stage.GetPrimAtPath(foot_prim_path)
+
+                if not prim.IsValid():
+                    log_path = self._emit_foot_collision_log(
+                        "[foot_collision] verify "
+                        f"env={env_idx} link={foot_link} prim={foot_prim_path} missing_prim"
+                    )
+                    continue
+
+                collision_prim_path, collision_api = self._get_foot_collision_api(stage, foot_prim_path)
+                approximation = None
+                if collision_api:
+                    approximation = collision_api.GetApproximationAttr().Get()
+
+                if approximation == expected_approximation:
+                    status = "OK"
+                elif approximation == FOOT_COLLISION_CONVEX_HULL_APPROXIMATION:
+                    status = "CONVEX_HULL"
+                else:
+                    status = "MISMATCH"
+                log_path = self._emit_foot_collision_log(
+                    "[foot_collision] verify "
+                    f"env={env_idx} link={foot_link} prim={foot_prim_path} "
+                    f"actual_prim={collision_prim_path} approximation={approximation} "
+                    f"expected={expected_approximation} "
+                    f"status={status}"
+                )
+
+        return log_path

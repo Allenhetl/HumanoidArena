@@ -731,7 +731,6 @@ class ReplayActionProvider(ActionProvider):
                     print(f"[{self.name}] Frame {self.current_frame}: Inference mode")
                     print(f"  raw_action range: [{raw_action.min():.4f}, {raw_action.max():.4f}]")
                     print(f"  target_29 range: [{target_29.min():.4f}, {target_29.max():.4f}]")
-
             else:
                 # Direct mode: use recorded ACTUAL positions (qpos_before_decimation)
                 # These are the actual joint positions after physics simulation, not target positions

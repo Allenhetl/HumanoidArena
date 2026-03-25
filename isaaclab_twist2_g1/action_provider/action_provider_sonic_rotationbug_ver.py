@@ -1210,42 +1210,77 @@ class SonicActionProvider(ActionProvider):
             self._smpl_pose_buf[-1] = sp[-1]
 
         # body_quat_w: (N, 4) → 转换为6D旋转表示
-        # ✨ CRITICAL FIX: 原版 C++ 代码计算相对旋转（ref相对于robot base）
-        # motion_anchor_orientation 是机器人局部坐标系下的相对旋转
-        # 公式: base_to_ref = base^(-1) * ref
         if "body_quat_w" in data:
-            bq = data["body_quat_w"].astype(np.float32)  # (N, 4) wxyz
+            bq = data["body_quat_w"].astype(np.float32)  # (N, 4)
             print(f"[{tag}] body_quat_w shape: {bq.shape}, latest: {bq[-1]}")
             got_pose_frame = True
 
-            # 获取机器人当前朝向（从Isaac Lab）
-            robot = self.env.scene["robot"].data
-            base_quat_wxyz = robot.root_state_w[0, 3:7].cpu().numpy().astype(np.float32)  # [w,x,y,z]
+            try:
+                robot = self.env.scene["robot"].data
+                base_quat_xyzw = robot.root_state_w[0, 3:7].detach().cpu().numpy().astype(np.float32)
+                base_quat_wxyz = quat_xyzw_to_wxyz(base_quat_xyzw)
+                ref_quat_wxyz = quat_normalize_wxyz(bq[-1])
+                if not self._anchor_heading_initialized:
+                    self._anchor_init_base_quat_wxyz = base_quat_wxyz.copy()
+                    self._anchor_init_ref_quat_wxyz = ref_quat_wxyz.copy()
+                    heading_align_candidate = quat_mul_wxyz(
+                        quat_heading_wxyz(self._anchor_init_base_quat_wxyz),
+                        quat_heading_inv_wxyz(self._anchor_init_ref_quat_wxyz),
+                    )
+                    raw_rel_init_quat = quat_mul_wxyz(
+                        quat_conjugate_wxyz(self._anchor_init_base_quat_wxyz),
+                        self._anchor_init_ref_quat_wxyz,
+                    )
+                    aligned_rel_init_quat = quat_mul_wxyz(
+                        quat_conjugate_wxyz(self._anchor_init_base_quat_wxyz),
+                        quat_mul_wxyz(heading_align_candidate, self._anchor_init_ref_quat_wxyz),
+                    )
+                    raw_init_angle_deg = quat_angle_deg_wxyz(raw_rel_init_quat)
+                    aligned_init_angle_deg = quat_angle_deg_wxyz(aligned_rel_init_quat)
+                    self._anchor_heading_align_quat_wxyz = heading_align_candidate
+                    self._anchor_use_heading_align = aligned_init_angle_deg + 1e-3 < raw_init_angle_deg
+                    self._anchor_heading_initialized = True
+                    print(
+                        f"[{tag}][ANCHOR_INIT] "
+                        f"init_base={self._anchor_init_base_quat_wxyz} "
+                        f"init_ref={self._anchor_init_ref_quat_wxyz} "
+                        f"heading_align={self._anchor_heading_align_quat_wxyz} "
+                        f"raw_init_angle_deg={raw_init_angle_deg:.2f} "
+                        f"aligned_init_angle_deg={aligned_init_angle_deg:.2f} "
+                        f"use_heading_align={self._anchor_use_heading_align}"
+                    )
 
-            # 获取参考数据（SMPL）的朝向
-            ref_quat_wxyz = quat_normalize_wxyz(bq[-1])  # [w,x,y,z]
-
-            # 计算相对旋转：ref 相对于 base（与C++一致）
-            # base_to_ref = base^(-1) * ref
-            rel_quat_wxyz = quat_mul_wxyz(
-                quat_conjugate_wxyz(base_quat_wxyz),  # base^(-1)
-                ref_quat_wxyz                          # ref
-            )
-
-            # 转换为rot6d
-            rot6d_latest = quat_to_rotation_6d(rel_quat_wxyz.reshape(1, 4))[0]
-
-            if self._frame_count <= 3 or self._frame_count % 25 == 0:
-                print(
-                    f"[{tag}][ANCHOR] "
-                    f"base_quat={base_quat_wxyz} "
-                    f"ref_quat={ref_quat_wxyz} "
-                    f"rel_quat={rel_quat_wxyz} "
-                    f"rot6d={rot6d_latest} "
-                    f"(relative to robot base, C++ convention)"
+                raw_rel_quat_wxyz = quat_mul_wxyz(quat_conjugate_wxyz(base_quat_wxyz), ref_quat_wxyz)
+                aligned_ref_quat_wxyz = quat_mul_wxyz(self._anchor_heading_align_quat_wxyz, ref_quat_wxyz)
+                aligned_rel_quat_wxyz = quat_mul_wxyz(
+                    quat_conjugate_wxyz(base_quat_wxyz), aligned_ref_quat_wxyz
                 )
+                rel_quat_wxyz = (
+                    aligned_rel_quat_wxyz if self._anchor_use_heading_align else raw_rel_quat_wxyz
+                )
+                rot6d_latest = quat_to_rotation_6d(rel_quat_wxyz.reshape(1, 4))[0]
 
-            print(f"[{tag}] converted to rot6d latest: {rot6d_latest}")
+                if self._frame_count <= 3 or self._frame_count % 25 == 0:
+                    rel_angle_deg = quat_angle_deg_wxyz(rel_quat_wxyz)
+                    raw_rel_angle_deg = quat_angle_deg_wxyz(raw_rel_quat_wxyz)
+                    aligned_rel_angle_deg = quat_angle_deg_wxyz(aligned_rel_quat_wxyz)
+                    print(
+                        f"[{tag}][ANCHOR] "
+                        f"base_quat_xyzw={base_quat_xyzw} "
+                        f"ref_quat_wxyz={ref_quat_wxyz} "
+                        f"aligned_ref_quat_wxyz={aligned_ref_quat_wxyz} "
+                        f"raw_rel_angle_deg={raw_rel_angle_deg:.2f} "
+                        f"aligned_rel_angle_deg={aligned_rel_angle_deg:.2f} "
+                        f"rel_angle_deg={rel_angle_deg:.2f} "
+                        f"selected={'aligned' if self._anchor_use_heading_align else 'raw'} "
+                        f"rel_rot6d={rot6d_latest}"
+                    )
+            except Exception as e:
+                print(f"[{tag}][ANCHOR] relative anchor fallback to ref quat only: {e}")
+                rel_quat_wxyz = quat_normalize_wxyz(bq[-1])
+                rot6d_latest = quat_to_rotation_6d(rel_quat_wxyz.reshape(1, 4))[0]
+
+            print(f"[{tag}] converted to relative rot6d latest: {rot6d_latest}")
             self._body_rot6d_buf = np.roll(self._body_rot6d_buf, -1, axis=0)
             self._body_rot6d_buf[-1] = rot6d_latest  # (6,)
             self._motion_anchor_rot6d_hist = np.roll(self._motion_anchor_rot6d_hist, -1, axis=0)

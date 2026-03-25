@@ -234,6 +234,9 @@ class RecordingManager:
         env_obj_football_pos = []
         env_obj_football_lin_vel = []
         env_obj_football_ang_vel = []
+        env_obj_table_drink_pos = []
+        env_obj_table_drink_lin_vel = []
+        env_obj_table_drink_ang_vel = []
 
         # Collect vision data (store first and last frame only to save space)
         # vision_indices = [0, num_frames - 1] if num_frames > 1 else [0]
@@ -262,6 +265,14 @@ class RecordingManager:
                 env_obj_football_pos.append(np.zeros(3, dtype=np.float32))
                 env_obj_football_lin_vel.append(np.zeros(3, dtype=np.float32))
                 env_obj_football_ang_vel.append(np.zeros(3, dtype=np.float32))
+            if frame_data['env_obj'].get('table_drink') is not None:
+                env_obj_table_drink_pos.append(frame_data['env_obj']['table_drink']['position'])
+                env_obj_table_drink_lin_vel.append(frame_data['env_obj']['table_drink']['linear_velocity'])
+                env_obj_table_drink_ang_vel.append(frame_data['env_obj']['table_drink']['angular_velocity'])
+            else:
+                env_obj_table_drink_pos.append(np.zeros(3, dtype=np.float32))
+                env_obj_table_drink_lin_vel.append(np.zeros(3, dtype=np.float32))
+                env_obj_table_drink_ang_vel.append(np.zeros(3, dtype=np.float32))
 
             # Robot data
             organized['robot_qpos_before_decimation'][i] = frame_data['robot']['qpos_before_decimation']
@@ -297,6 +308,9 @@ class RecordingManager:
         organized['env_obj_football_position'] = np.array(env_obj_football_pos, dtype=np.float32)
         organized['env_obj_football_linear_velocity'] = np.array(env_obj_football_lin_vel, dtype=np.float32)
         organized['env_obj_football_angular_velocity'] = np.array(env_obj_football_ang_vel, dtype=np.float32)
+        organized['env_obj_table_drink_position'] = np.array(env_obj_table_drink_pos, dtype=np.float32)
+        organized['env_obj_table_drink_linear_velocity'] = np.array(env_obj_table_drink_lin_vel, dtype=np.float32)
+        organized['env_obj_table_drink_angular_velocity'] = np.array(env_obj_table_drink_ang_vel, dtype=np.float32)
 
         # Add vision data
         if vision_rgb_list:
@@ -1991,6 +2005,21 @@ class DDSRLActionProvider(ActionProvider):
         except Exception as e:
             print(f"[{self.name}] Failed to get football state: {e}")
             env_obj_data["football"] = None
+
+        try:
+            if "table_drink" in self.env.scene.keys():
+                table_drink = self.env.scene["table_drink"]
+                root_state = table_drink.data.root_state_w
+                env_obj_data["table_drink"] = {
+                    "position": root_state[0, 0:3].cpu().numpy(),
+                    "linear_velocity": root_state[0, 7:10].cpu().numpy(),
+                    "angular_velocity": root_state[0, 10:13].cpu().numpy(),
+                }
+            else:
+                env_obj_data["table_drink"] = None
+        except Exception as e:
+            print(f"[{self.name}] Failed to get table_drink state: {e}")
+            env_obj_data["table_drink"] = None
 
         recording_data["env_obj"] = env_obj_data
 

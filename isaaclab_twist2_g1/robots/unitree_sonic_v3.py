@@ -851,14 +851,16 @@ G129_CFG_WITH_DEX3_WHOLEBODY = ArticulationCfg(
     soft_joint_pos_limit_factor=0.90,
     actuators={
         # =====================
-        # Match SONIC C++ deployment PD gains (policy_parameters.hpp):
-        #   Computed from armature constants, NOT MuJoCo YAML
-        #   stiffness = armature × (10Hz × 2π)²
-        #   damping = 2 × 2.0 × armature × (10Hz × 2π)
-        #   action_scale is computed based on these stiffness values
+        # Match TWIST/MuJoCo PD (same as Dex1 for consistency):
+        #   torque = (q_des - q)*Kp - qd*Kd
         # =====================
 
-        # Legs: hip Kp=99.0 Kd=3.16, knee Kp=99.0 Kd=3.16
+        # =====================
+        # Match SONIC MuJoCo PD gains (g1_29dof_sonic_model12.yaml):
+        #   MOTOR_KP, MOTOR_KD, motor_effort_limit_list
+        # =====================
+
+        # Legs: hip Kp=150 Kd=2, knee Kp=200 Kd=4, effort_limit: hip=88 knee=139
         "legs": ImplicitActuatorCfg(
             joint_names_expr=[
                 ".*_hip_pitch_joint",
@@ -867,45 +869,45 @@ G129_CFG_WITH_DEX3_WHOLEBODY = ArticulationCfg(
                 ".*_knee_joint",
             ],
             effort_limit_sim={
-                ".*_hip_pitch_joint": 139.0,   # EFFORT_LIMIT_7520_22
-                ".*_hip_roll_joint": 139.0,
-                ".*_hip_yaw_joint": 88.0,      # EFFORT_LIMIT_7520_14
-                ".*_knee_joint": 139.0,
+                ".*_hip_pitch_joint": 100.0,    # SONIC motor_effort_limit_list
+                ".*_hip_roll_joint": 100.0,
+                ".*_hip_yaw_joint": 100.0,
+                ".*_knee_joint": 150.0,
             },
             velocity_limit_sim=None,
             stiffness={
-                ".*_hip_pitch_joint": 99.0,    # STIFFNESS_7520_22
-                ".*_hip_roll_joint": 99.0,
-                ".*_hip_yaw_joint": 40.2,      # STIFFNESS_7520_14
-                ".*_knee_joint": 99.0,
+                ".*_hip_pitch_joint": 150.0,   # SONIC MOTOR_KP
+                ".*_hip_roll_joint": 120.0,
+                ".*_hip_yaw_joint": 120.0,
+                ".*_knee_joint": 200.0,
             },
             damping={
-                ".*_hip_pitch_joint": 3.16,    # DAMPING_7520_22
-                ".*_hip_roll_joint": 3.16,
-                ".*_hip_yaw_joint": 1.28,      # DAMPING_7520_14
-                ".*_knee_joint": 3.16,
+                ".*_hip_pitch_joint": 5.0,     # SONIC MOTOR_KD
+                ".*_hip_roll_joint": 5.0,
+                ".*_hip_yaw_joint": 5.0,
+                ".*_knee_joint": 5.0,
             },
             armature=0.0,
         ),
-        # Feet: ankle Kp=28.4 Kd=0.91 (2.0 × STIFFNESS_5020)
+        # Feet: ankle Kp=40 Kd=2, effort_limit=50
         "feet": ImplicitActuatorCfg(
             joint_names_expr=[".*_ankle_pitch_joint", ".*_ankle_roll_joint"],
             effort_limit_sim={
-                ".*_ankle_pitch_joint": 25.0,  # EFFORT_LIMIT_5020
-                ".*_ankle_roll_joint": 25.0,
+                ".*_ankle_pitch_joint": 50.0,  # SONIC motor_effort_limit_list
+                ".*_ankle_roll_joint": 50.0,
             },
             velocity_limit_sim=None,
             stiffness={
-                ".*_ankle_pitch_joint": 28.4,  # 2.0 × STIFFNESS_5020
-                ".*_ankle_roll_joint": 28.4,
+                ".*_ankle_pitch_joint": 40.0,  # SONIC MOTOR_KP
+                ".*_ankle_roll_joint": 40.0,
             },
             damping={
-                ".*_ankle_pitch_joint": 0.91,  # 2.0 × DAMPING_5020
-                ".*_ankle_roll_joint": 0.91,
+                ".*_ankle_pitch_joint": 2.0,   # SONIC MOTOR_KD
+                ".*_ankle_roll_joint": 2.0,
             },
             armature=0.0,
         ),
-        # Waist: yaw Kp=40.2 Kd=1.28, roll/pitch Kp=28.4 Kd=0.91
+        # Waist: yaw/roll Kp=250 Kd=5, pitch Kp=250 Kd=5, effort_limit: yaw=88 roll/pitch=50
         "waist": ImplicitActuatorCfg(
             joint_names_expr=[
                 "waist_yaw_joint",
@@ -913,24 +915,25 @@ G129_CFG_WITH_DEX3_WHOLEBODY = ArticulationCfg(
                 "waist_pitch_joint",
             ],
             effort_limit_sim={
-                "waist_yaw_joint": 88.0,       # EFFORT_LIMIT_7520_14
-                "waist_roll_joint": 25.0,      # EFFORT_LIMIT_5020
-                "waist_pitch_joint": 25.0,
+                "waist_yaw_joint": 150.0,       # SONIC motor_effort_limit_list
+                "waist_roll_joint": 150.0,
+                "waist_pitch_joint": 150.0,
             },
             velocity_limit_sim=None,
             stiffness={
-                "waist_yaw_joint": 40.2,       # STIFFNESS_7520_14
-                "waist_roll_joint": 28.4,      # 2.0 × STIFFNESS_5020
-                "waist_pitch_joint": 28.4,
+                "waist_yaw_joint": 150.0,      # SONIC MOTOR_KP
+                "waist_roll_joint": 150.0,
+                "waist_pitch_joint": 150.0,
             },
             damping={
-                "waist_yaw_joint": 1.28,       # DAMPING_7520_14
-                "waist_roll_joint": 0.91,      # 2.0 × DAMPING_5020
-                "waist_pitch_joint": 0.91,
+                "waist_yaw_joint": 5.0,        # SONIC MOTOR_KD
+                "waist_roll_joint": 5.0,
+                "waist_pitch_joint": 5.0,
             },
             armature=0.0,
         ),
-        # Arms: shoulder/elbow/wrist_roll Kp=14.2 Kd=0.45, wrist_pitch/yaw Kp=16.7 Kd=0.54
+        # Arms: shoulder Kp=100 Kd=5, elbow Kp=40 Kd=2, wrist Kp=20 Kd=2
+        # effort_limit: shoulder/elbow=25, wrist=5
         "arms": ImplicitActuatorCfg(
             joint_names_expr=[
                 ".*_shoulder_pitch_joint",
@@ -942,32 +945,32 @@ G129_CFG_WITH_DEX3_WHOLEBODY = ArticulationCfg(
                 ".*_wrist_yaw_joint",
             ],
             effort_limit_sim={
-                ".*_shoulder_pitch_joint": 25.0,   # EFFORT_LIMIT_5020
-                ".*_shoulder_roll_joint": 25.0,
-                ".*_shoulder_yaw_joint": 25.0,
-                ".*_elbow_joint": 25.0,
-                ".*_wrist_roll_joint": 25.0,
-                ".*_wrist_pitch_joint": 5.0,       # EFFORT_LIMIT_4010
-                ".*_wrist_yaw_joint": 5.0,
+                ".*_shoulder_pitch_joint": 80.0,   # SONIC motor_effort_limit_list
+                ".*_shoulder_roll_joint": 80.0,
+                ".*_shoulder_yaw_joint": 60.0,
+                ".*_elbow_joint": 60.0,
+                ".*_wrist_roll_joint": 60.0,       # SONIC: 25 for wrist_roll
+                ".*_wrist_pitch_joint": 60.0,       # SONIC: 5 for wrist_pitch
+                ".*_wrist_yaw_joint": 60.0,         # SONIC: 5 for wrist_yaw
             },
             velocity_limit_sim=None,
             stiffness={
-                ".*_shoulder_pitch_joint": 14.2,   # STIFFNESS_5020
-                ".*_shoulder_roll_joint": 14.2,
-                ".*_shoulder_yaw_joint": 14.2,
-                ".*_elbow_joint": 14.2,
-                ".*_wrist_roll_joint": 14.2,
-                ".*_wrist_pitch_joint": 16.7,      # STIFFNESS_4010
-                ".*_wrist_yaw_joint": 16.7,
+                ".*_shoulder_pitch_joint": 80.0,  # SONIC MOTOR_KP
+                ".*_shoulder_roll_joint": 80.0,
+                ".*_shoulder_yaw_joint": 40.0,     # SONIC: 40 for shoulder_yaw
+                ".*_elbow_joint": 30.0,            # SONIC: 40 for elbow
+                ".*_wrist_roll_joint": 20.0,       # SONIC: 20 for wrist
+                ".*_wrist_pitch_joint": 20.0,
+                ".*_wrist_yaw_joint": 20.0,
             },
             damping={
-                ".*_shoulder_pitch_joint": 0.45,   # DAMPING_5020
-                ".*_shoulder_roll_joint": 0.45,
-                ".*_shoulder_yaw_joint": 0.45,
-                ".*_elbow_joint": 0.45,
-                ".*_wrist_roll_joint": 0.45,
-                ".*_wrist_pitch_joint": 0.54,      # DAMPING_4010
-                ".*_wrist_yaw_joint": 0.54,
+                ".*_shoulder_pitch_joint": 5.0,    # SONIC MOTOR_KD
+                ".*_shoulder_roll_joint": 5.0,
+                ".*_shoulder_yaw_joint": 2.0,      # SONIC: 2 for shoulder_yaw
+                ".*_elbow_joint": 2.0,             # SONIC: 2 for elbow
+                ".*_wrist_roll_joint": 2.0,        # SONIC: 2 for wrist
+                ".*_wrist_pitch_joint": 2.0,
+                ".*_wrist_yaw_joint": 2.0,
             },
             armature=0.0,
         ),

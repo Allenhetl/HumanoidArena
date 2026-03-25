@@ -111,6 +111,7 @@ def main():
     try:
         env = ManagerBasedRLEnv(cfg=env_cfg)
         print("   ✓ Environment created")
+        print("   [foot_collision] skipped live collision rebuild before reset to avoid invalidating PhysX tensor views")
     except Exception as e:
         print(f"   ✗ Failed to create environment: {e}")
         import traceback
@@ -151,6 +152,8 @@ def main():
     try:
         env.reset()
         print("   ✓ Environment reset")
+        foot_log_path = env_cfg.log_foot_collision_status()
+        print(f"   [foot_collision] validation logged to: {foot_log_path}")
         # 套用草坪 PBR 材質（需在 reset 後）
         try:
             apply_grass_pbr_to_ground(prim_path="/World/GroundPlane", uv_scale=(150.0, 150.0))

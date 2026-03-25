@@ -398,6 +398,118 @@ def main():
     print("\n")
     print("***  Please left-click on the Sim window to activate rendering. ***")
     print("\n")
+    scene_deactivate_keywords = tuple(getattr(env.cfg, "scene_deactivate_keywords", ()))
+    scene_deactivate_exclude_keywords = tuple(getattr(env.cfg, "scene_deactivate_exclude_keywords", ()))
+    if len(scene_deactivate_keywords) > 0:
+        try:
+            import omni.usd
+            stage = omni.usd.get_context().get_stage()
+            deactivated_paths = []
+            keywords = tuple(k.lower() for k in scene_deactivate_keywords)
+            exclude_keywords = tuple(k.lower() for k in scene_deactivate_exclude_keywords)
+            for prim in stage.Traverse():
+                if not prim.IsActive():
+                    continue
+                prim_path = prim.GetPath().pathString
+                prim_name = prim.GetName()
+                path_lower = prim_path.lower()
+                name_lower = prim_name.lower()
+                if any((k in path_lower) or (k in name_lower) for k in exclude_keywords):
+                    continue
+                if any((k in path_lower) or (k in name_lower) for k in keywords):
+                    prim.SetActive(False)
+                    deactivated_paths.append(prim_path)
+            print(
+                f"[scene_filter] deactivate keywords={scene_deactivate_keywords}, "
+                f"exclude={scene_deactivate_exclude_keywords}, count={len(deactivated_paths)}"
+            )
+            for prim_path in deactivated_paths[:20]:
+                print(f"[scene_filter] deactivated: {prim_path}")
+        except Exception as e:
+            print(f"[scene_filter] deactivate failed: {e}")
+    scene_reposition_rules = tuple(getattr(env.cfg, "scene_reposition_rules", ()))
+    if len(scene_reposition_rules) > 0:
+        try:
+            import omni.usd
+            from pxr import Gf, UsdGeom
+            stage = omni.usd.get_context().get_stage()
+            moved_items = []
+            all_active_prims = [p for p in stage.Traverse() if p.IsActive()]
+            for rule in scene_reposition_rules:
+                keywords = tuple(str(k).lower() for k in rule.get("keywords", ()))
+                if len(keywords) == 0:
+                    continue
+                offset = tuple(float(v) for v in rule.get("offset", (0.0, 0.0, 0.0)))
+                if abs(offset[0]) + abs(offset[1]) + abs(offset[2]) < 1e-9:
+                    continue
+                candidates = []
+                for prim in all_active_prims:
+                    prim_path = prim.GetPath().pathString
+                    prim_name = prim.GetName()
+                    path_lower = prim_path.lower()
+                    name_lower = prim_name.lower()
+                    if "joint" in path_lower or "/materials" in path_lower:
+                        continue
+                    if not any((k in name_lower) or (k in path_lower) for k in keywords):
+                        continue
+                    depth = prim_path.count("/")
+                    candidates.append((depth, len(prim_path), prim_path))
+                if len(candidates) == 0:
+                    continue
+                candidates.sort(key=lambda x: (x[0], x[1]))
+                target_path = candidates[0][2]
+                target_prim = stage.GetPrimAtPath(target_path)
+                if not target_prim.IsValid():
+                    continue
+                xformable = UsdGeom.Xformable(target_prim)
+                translate_op = None
+                for op in xformable.GetOrderedXformOps():
+                    if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+                        translate_op = op
+                        break
+                if translate_op is None:
+                    translate_op = xformable.AddTranslateOp()
+                current_t = translate_op.Get()
+                if current_t is None:
+                    current_t = Gf.Vec3d(0.0, 0.0, 0.0)
+                new_t = Gf.Vec3d(
+                    float(current_t[0]) + offset[0],
+                    float(current_t[1]) + offset[1],
+                    float(current_t[2]) + offset[2],
+                )
+                translate_op.Set(new_t)
+                moved_items.append((target_path, rule.get("name", "rule"), offset))
+            print(f"[scene_filter] reposition rules={len(scene_reposition_rules)}, moved={len(moved_items)}")
+            for prim_path, rule_name, offset in moved_items[:20]:
+                print(f"[scene_filter] moved({rule_name}): {prim_path}, offset={offset}")
+        except Exception as e:
+            print(f"[scene_filter] reposition failed: {e}")
+    if "livingroom" in args_cli.task.lower() and os.environ.get("LIVINGROOM_RUNTIME_PATCH", "0") == "1":
+        try:
+            import omni.usd
+            from pxr import UsdGeom
+            stage = omni.usd.get_context().get_stage()
+            xform_cache = UsdGeom.XformCache()
+            target_paths = (
+                "/World/envs/env_0/Room/model_teatable",
+                "/World/envs/env_0/Room/model_teatable/E_body_179",
+                "/World/envs/env_0/Room/model_table_1",
+                "/World/envs/env_0/Room/model_table_1/E_body_1",
+            )
+            print("[scene_probe] begin teatable/table_1 world pose dump")
+            for prim_path in target_paths:
+                prim = stage.GetPrimAtPath(prim_path)
+                if not prim.IsValid() or (not prim.IsActive()):
+                    continue
+                world_m = xform_cache.GetLocalToWorldTransform(prim)
+                world_t = world_m.ExtractTranslation()
+                print(
+                    f"[scene_probe] {prim_path} "
+                    f"world_pos=({float(world_t[0]):.4f}, {float(world_t[1]):.4f}, {float(world_t[2]):.4f})"
+                )
+            print("[scene_probe] end teatable/table_1 world pose dump")
+        except Exception as e:
+            print(f"[scene_probe] failed: {e}")
     # reset environment
     if args_cli.modify_light:
         update_light(
@@ -457,6 +569,129 @@ def main():
         except Exception as e:
             print(f"[pitch_lines] 標線未建立或跳過: {e}")
 
+    
+    if "livingroom" in args_cli.task.lower():
+        try:
+            import omni.usd
+            from pxr import Usd, UsdGeom, UsdPhysics
+
+            stage = omni.usd.get_context().get_stage()
+
+            obstacle_paths = [f"/World/envs/env_0/FloorObstacleDrink{i}" for i in range(1, 11)]
+            target_paths = ["/World/envs/env_0/TableDrink", "/World/envs/env_0/Room/model_officechair_3"] + obstacle_paths
+
+            def _enable_dynamic_collision(target_path: str):
+                target_prim = stage.GetPrimAtPath(target_path)
+                if not target_prim.IsValid():
+                    return (0, 0, False)
+                rigid_count = 0
+                collider_count = 0
+                has_existing_rigid = False
+                for sub_prim in Usd.PrimRange(target_prim):
+                    sub_rigid = UsdPhysics.RigidBodyAPI.Get(stage, sub_prim.GetPath())
+                    if sub_rigid:
+                        has_existing_rigid = True
+                        sub_rigid.GetRigidBodyEnabledAttr().Set(True)
+                        sub_rigid.GetKinematicEnabledAttr().Set(False)
+                        rigid_count += 1
+                    if sub_prim.IsA(UsdGeom.Mesh):
+                        collision_api = UsdPhysics.CollisionAPI.Apply(sub_prim)
+                        collision_api.GetCollisionEnabledAttr().Set(True)
+                        mesh_collision_api = UsdPhysics.MeshCollisionAPI.Apply(sub_prim)
+                        mesh_collision_api.GetApproximationAttr().Set("convexHull")
+                        collider_count += 1
+                if not has_existing_rigid:
+                    root_rigid = UsdPhysics.RigidBodyAPI.Apply(target_prim)
+                    root_rigid.GetRigidBodyEnabledAttr().Set(True)
+                    root_rigid.GetKinematicEnabledAttr().Set(False)
+                    rigid_count += 1
+                return (rigid_count, collider_count, True)
+
+            for target_path in target_paths:
+                rigid_count, collider_count, ok = _enable_dynamic_collision(target_path)
+                print(
+                    f"[livingroom_collision] target={target_path} ok={ok} "
+                    f"rigid_bodies={rigid_count} colliders={collider_count}"
+                )
+            desired_total_mass = {
+                "/World/envs/env_0/TableDrink": 0.35,
+                "/World/envs/env_0/Room/model_officechair_3": 8.0,
+                "/World/envs/env_0/FloorObstacleDrink1": 1.2,
+                "/World/envs/env_0/FloorObstacleDrink2": 0.8,
+                "/World/envs/env_0/FloorObstacleDrink3": 1.8,
+                "/World/envs/env_0/FloorObstacleDrink4": 1.5,
+                "/World/envs/env_0/FloorObstacleDrink5": 2.8,
+                "/World/envs/env_0/FloorObstacleDrink6": 1.4,
+                "/World/envs/env_0/FloorObstacleDrink7": 1.3,
+                "/World/envs/env_0/FloorObstacleDrink8": 1.0,
+                "/World/envs/env_0/FloorObstacleDrink9": 2.4,
+                "/World/envs/env_0/FloorObstacleDrink10": 1.4,
+            }
+
+            def _retune_mass(target_path: str):
+                target_prim = stage.GetPrimAtPath(target_path)
+                if not target_prim.IsValid():
+                    return (False, 0, 0.0, 0.0)
+                rigid_prims = []
+                for sub_prim in Usd.PrimRange(target_prim):
+                    sub_rigid = UsdPhysics.RigidBodyAPI.Get(stage, sub_prim.GetPath())
+                    if sub_rigid:
+                        rigid_prims.append(sub_prim)
+                if len(rigid_prims) == 0:
+                    return (False, 0, 0.0, 0.0)
+                target_total = float(desired_total_mass.get(target_path, 1.0))
+                per_mass = max(0.02, target_total / float(len(rigid_prims)))
+                for sub_prim in rigid_prims:
+                    mass_api = UsdPhysics.MassAPI.Apply(sub_prim)
+                    mass_api.GetMassAttr().Set(per_mass)
+                return (True, len(rigid_prims), target_total, per_mass)
+
+            for target_path in target_paths:
+                ok_tune, rigid_cnt_tune, target_total, per_mass = _retune_mass(target_path)
+                print(
+                    f"[livingroom_mass_tune] target={target_path} ok={ok_tune} "
+                    f"rigid_bodies={rigid_cnt_tune} target_total_mass={target_total} per_rigid_mass={per_mass}"
+                )
+            def _inspect_usd_mass(target_path: str):
+                target_prim = stage.GetPrimAtPath(target_path)
+                if not target_prim.IsValid():
+                    return (False, 0, 0, 0.0)
+                rigid_prims = []
+                explicit_mass_values = []
+                for sub_prim in Usd.PrimRange(target_prim):
+                    sub_rigid = UsdPhysics.RigidBodyAPI.Get(stage, sub_prim.GetPath())
+                    if sub_rigid:
+                        rigid_prims.append(sub_prim)
+                        mass_api = UsdPhysics.MassAPI.Get(stage, sub_prim.GetPath())
+                        if mass_api:
+                            mass_attr = mass_api.GetMassAttr()
+                            if mass_attr:
+                                v = mass_attr.Get()
+                                if v is not None:
+                                    explicit_mass_values.append(float(v))
+                return (True, len(rigid_prims), len(explicit_mass_values), float(sum(explicit_mass_values)))
+
+            scene_key_map = {"TableDrink": "table_drink"}
+            for i in range(1, 11):
+                scene_key_map[f"FloorObstacleDrink{i}"] = f"floor_obstacle_drink_{i}"
+            for target_path in target_paths:
+                ok, rigid_count, explicit_count, explicit_sum = _inspect_usd_mass(target_path)
+                basename = target_path.split("/")[-1]
+                scene_key = scene_key_map.get(basename)
+                runtime_mass = None
+                if scene_key is not None and scene_key in env.scene.keys():
+                    obj = env.scene[scene_key]
+                    if hasattr(obj, "root_physx_view") and obj.root_physx_view is not None:
+                        masses = obj.root_physx_view.get_masses()
+                        if masses is not None and len(masses) > 0:
+                            runtime_mass = float(masses[0])
+                print(
+                    f"[livingroom_mass] target={target_path} ok={ok} rigid_bodies={rigid_count} "
+                    f"explicit_mass_count={explicit_count} explicit_mass_sum={explicit_sum} "
+                    f"runtime_root_mass={runtime_mass}"
+                )
+        except Exception as e:
+            print(f"[livingroom_collision] setup failed: {e}")
     env.sim.reset()
     env.reset()
     if "football" in args_cli.task.lower():

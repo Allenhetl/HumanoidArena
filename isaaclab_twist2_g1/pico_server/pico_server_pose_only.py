@@ -383,7 +383,7 @@ def process_smpl_joints(body_pose, global_orient, transl):
     joints = compute_human_joints(
         body_pose=body_pose[..., :63],
         global_orient=global_orient_new,
-        human_joints_info_path="/home/hcl4070-1/Desktop/taowen/projects/HumanoidArena/GR00T-WholeBodyControl/gear_sonic/data/human/human_joints_info.pkl"
+        human_joints_info_path="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic/data/human/human_joints_info.pkl"
     )  # (*, 24, 3)
 
     # Apply base rotation removal and compute local joints
@@ -1246,7 +1246,7 @@ class PoseStreamer:
             latest_data["smpl_pose"].detach().cpu().numpy()[:, :63].reshape(-1, 21, 3)[0]
         ).astype(np.float32)
         smpl_joints_np = (
-            latest_data["smpl_joi   nts_local"].detach().cpu().numpy()[0].astype(np.float32)
+            latest_data["smpl_joints_local"].detach().cpu().numpy()[0].astype(np.float32)
         )
         body_quat_np = (
             latest_data["global_orient_quat"].detach().cpu().numpy()[0].astype(np.float32)

@@ -173,10 +173,10 @@ class MoveCylinderG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self):
         """Post initialization."""
         # general settings
-        self.decimation = 10  # Match TWIST2 MuJoCo training (4 physics steps per policy update)
+        self.decimation = 20  # Match TWIST2 MuJoCo training (4 physics steps per policy update)
         self.episode_length_s = 3600.0  # 1 hour - effectively infinite for teleoperation
         # simulation settings
-        self.sim.dt = 0.002  # 2ms timestep for stability (500Hz physics, 50Hz policy)
+        self.sim.dt = 0.001  # 2ms timestep for stability (500Hz physics, 50Hz policy)
         self.scene.contact_forces.update_period = self.sim.dt
         # Render interval (policy runs at 50Hz):
         # - render_interval=5 → 10fps (best performance, matches image transmission)

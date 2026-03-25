@@ -29,9 +29,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── GEAR-SONIC 模型路径 ────────────────────────────────────────────────
 # 默认路径（根据实际部署修改）
-GROOT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)/GR00T-WholeBodyControl"
-ENCODER_PATH="${SONIC_ENCODER_PATH:-${GROOT_ROOT}/ckpts/policy/release/model_encoder.onnx}"
-DECODER_PATH="${SONIC_DECODER_PATH:-${GROOT_ROOT}/ckpts/policy/release/model_decoder.onnx}"
+
+ENCODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_encoder.onnx"
+DECODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_decoder.onnx"
 
 # 命令行参数覆盖
 while [[ $# -gt 0 ]]; do
@@ -66,11 +66,45 @@ redis-cli DEL \
 
 # ── 启动 Isaac Lab 仿真 ───────────────────────────────────────────────
 cd "$SCRIPT_DIR"
+#Isaac-Move-ArtVIP-Livingroom-NoSofa-G129-Dex3-Wholebody
+#Isaac-Move-Cylinder-G129-Dex3-Wholebody
+#Isaac-Move-Football-G129-Dex3-Wholebody
+#Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody
+
+# 可切换：
+#   一般沙袋: Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody
+#   吊挂沙袋: Isaac-Move-Boxing-Bag-Hanging-G129-Dex3-Wholebody
+#   足球: Isaac-Move-Football-G129-Dex3-Wholebody
+#   双桌面拾放: Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody
+#   Push-T: Isaac-Push-T-G129-Dex3-Wholebody
+#   客厅交互：Isaac-Move-ArtVIP-Livingroom-G129-Dex3-Wholebody
+#   客厅抓杯：Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody
+#   三级台阶平台：Isaac-Move-Three-Step-Platform-G129-Dex3-Wholebody
+# ready
+# TASK_NAME="${TASK_NAME:-Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody}"
+# TASK_NAME="${TASK_NAME:-Isaac-Move-Football-G129-Dex3-Wholebody}"
+# TASK_NAME="${TASK_NAME:-Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody}"
+# TASK_NAME="${TASK_NAME:-Isaac-Move-Three-Step-Platform-G129-Dex3-Wholebody}"
+# TASK_NAME="${TASK_NAME:-Isaac-Move-ArtVIP-Livingroom-G129-Dex3-Wholebody}"
+TASK_NAME="${TASK_NAME:-Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody}"
+# TASK_NAME="${TASK_NAME:-Isaac-Move-Football-G129-Dex3-Wholebody}"
+
+# 机器人脚部碰撞版本切换：
+#   fourpoints  -> temp/g1_29dof_with_dex3_rev_1_0_fourpoints.usd（四球脚部碰撞）
+#   box         -> g1_29dof_with_dex3_rev_1_0.usd（长方体脚部碰撞）
+ROBOT_COLLIDER_MODE="${ROBOT_COLLIDER_MODE:-box}"
+if [ "${ROBOT_COLLIDER_MODE}" = "fourpoints" ]; then
+    export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/temp/g1_29dof_with_dex3_rev_1_0_fourpoints.usd"
+else
+    export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0.usd"
+fi
+echo "[robot_usd] mode=${ROBOT_COLLIDER_MODE}"
+echo "[robot_usd] path=${ROBOT_USD_OVERRIDE}"
 
 python sim_main.py \
     --device cuda \
     --enable_cameras \
-    --task Isaac-Move-Cylinder-G129-Dex3-Wholebody \
+    --task "${TASK_NAME}" \
     --robot_type g129 \
     --enable_dex3_dds \
     --action_source sonic_wholebody \

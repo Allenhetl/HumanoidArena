@@ -6,6 +6,8 @@ include the basic configuration for different robots, support scene-specific par
 support different robot variants: with/without waist joint, different finger configurations
 """
 
+import os
+
 from isaaclab.assets import ArticulationCfg
 from isaaclab.utils import configclass
 from robots.unitree import G129_CFG_WITH_DEX1_BASE_FIX, G129_CFG_WITH_DEX3_BASE_FIX, G129_CFG_WITH_INSPIRE_HAND, \
@@ -200,6 +202,12 @@ class G129dofRobotBaseCfg:
         # use the default base configuration
         if base_config is None:
             base_config = G129_CFG_WITH_DEX1_BASE_FIX
+
+        robot_usd_override = os.environ.get("ROBOT_USD_OVERRIDE")
+        if robot_usd_override:
+            base_config = base_config.replace(
+                spawn=base_config.spawn.replace(usd_path=robot_usd_override),
+            )
 
         if update_default_joint_pos:
             # build the complete default joint position

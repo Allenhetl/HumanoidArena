@@ -813,7 +813,7 @@ G129_CFG_WITH_DEX3_WHOLEBODY = ArticulationCfg(
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             # enabled_self_collisions=False, solver_position_iteration_count=4, solver_velocity_iteration_count=1
             # Increased iterations for stability with dt=0.005 (MuJoCo training timestep)
-            enabled_self_collisions=False, solver_position_iteration_count=8, solver_velocity_iteration_count=4
+            enabled_self_collisions=True, solver_position_iteration_count=16, solver_velocity_iteration_count=4
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(

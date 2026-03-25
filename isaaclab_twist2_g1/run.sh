@@ -50,14 +50,34 @@ redis-cli DEL \
   #   足球: Isaac-Move-Football-G129-Dex3-Wholebody
   #   双桌面拾放: Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody
   #   Push-T: Isaac-Push-T-G129-Dex3-Wholebody
+  #   客厅交互：Isaac-Move-ArtVIP-Livingroom-G129-Dex3-Wholebody
+  #   客厅抓杯：Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody
+  #   三级台阶平台：Isaac-Move-Three-Step-Platform-G129-Dex3-Wholebody
+  #ready
   # TASK_NAME="${TASK_NAME:-Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody}"
-  # TASK_NAME="${TASK_NAME:-Isaac-Move-Football-G129-Dex3-Wholebody}"
-  TASK_NAME="${TASK_NAME:-Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody}"
+  #  TASK_NAME="${TASK_NAME:-Isaac-Move-Football-G129-Dex3-Wholebody}"
+#   TASK_NAME="${TASK_NAME:-Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody}"
+    # TASK_NAME="${TASK_NAME:-Isaac-Move-Three-Step-Platform-G129-Dex3-Wholebody}"
+    # TASK_NAME="${TASK_NAME:-Isaac-Move-ArtVIP-Livingroom-G129-Dex3-Wholebody}"
+  TASK_NAME="${TASK_NAME:-Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody}"
+
 #  TASK_NAME="${TASK_NAME:-Isaac-Push-T-G129-Dex3-Wholebody}"
 #   TASK_NAME="${TASK_NAME:-Isaac-Move-Boxing-Bag-Hanging-G129-Dex3-Wholebody}"
 
   # Random seed for reproducibility (set to fixed value for deterministic behavior)
   SEED="${SEED:-42}"
+
+  # 机器人脚部碰撞版本切换：
+  #   fourpoints  -> temp/g1_29dof_with_dex3_rev_1_0_fourpoints.usd（四球脚部碰撞）
+  #   box         -> g1_29dof_with_dex3_rev_1_0.usd（长方体脚部碰撞）
+  ROBOT_COLLIDER_MODE="${ROBOT_COLLIDER_MODE:-box}"
+  if [ "${ROBOT_COLLIDER_MODE}" = "fourpoints" ]; then
+    export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/temp/g1_29dof_with_dex3_rev_1_0_fourpoints.usd"
+  else
+    export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0.usd"
+  fi
+  echo "[robot_usd] mode=${ROBOT_COLLIDER_MODE}"
+  echo "[robot_usd] path=${ROBOT_USD_OVERRIDE}"
 
   python "${SCRIPT_DIR}/sim_main.py" \
     --device cuda \
@@ -73,7 +93,7 @@ redis-cli DEL \
     --image_xrobot_bitrate 16777216 \
     --image_fps 30 \
     --image_xrobot_ffmpeg /usr/bin/ffmpeg \
-    --recording_save_dir /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/0319/zk \
+    --recording_save_dir /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/0319/tw \
     --camera_enable_depth \
     --camera_width 960 \
     --camera_height 540 \

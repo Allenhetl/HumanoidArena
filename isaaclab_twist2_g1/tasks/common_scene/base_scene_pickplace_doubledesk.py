@@ -7,6 +7,10 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from tasks.common_config import   CameraBaseCfg  # isort: skip
 import os
 project_root = os.environ.get("PROJECT_ROOT")
+PACKING_TABLE_L_POS = [-0.1, -3.2, -0.2]
+PACKING_TABLE_R_POS = [-4.0, -3.2, -0.2]
+OBJECT_L_POS_OFFSET = [-0.3, 0.0, 1.04]
+CONTAINER_R_POS_OFFSET = [0.3, 0.0, 1.00]
 @configclass
 class DoubleTableSceneCfg(InteractiveSceneCfg): # inherit from the interactive scene configuration class
     """object table scene configuration class
@@ -27,7 +31,7 @@ class DoubleTableSceneCfg(InteractiveSceneCfg): # inherit from the interactive s
     # 2. table configuration
     packing_table_l = AssetBaseCfg(
         prim_path="/World/envs/env_.*/PackingTable_l",    # table in the scene
-        init_state=AssetBaseCfg.InitialStateCfg(pos=[-0.1,-3.2,-0.2],   # initial position [x, y, z]
+        init_state=AssetBaseCfg.InitialStateCfg(pos=PACKING_TABLE_L_POS,   # initial position [x, y, z]
                                                 rot=[0.7071, 0.0, 0.0, 0.7071]), # initial rotation [x, y, z, w]
         spawn=UsdFileCfg(
             usd_path=f"{project_root}/assets/objects/table_with_yellowbox.usd",    # table model file
@@ -36,7 +40,7 @@ class DoubleTableSceneCfg(InteractiveSceneCfg): # inherit from the interactive s
     )
     packing_table_r = AssetBaseCfg(
         prim_path="/World/envs/env_.*/PackingTable_r",    # table in the scene
-        init_state=AssetBaseCfg.InitialStateCfg(pos=[-4.0,-3.2,-0.2],   # initial position [x, y, z]
+        init_state=AssetBaseCfg.InitialStateCfg(pos=PACKING_TABLE_R_POS,   # initial position [x, y, z]
                                                 rot=[-0.7071, 0.0, 0.0, 0.7071]), # initial rotation [x, y, z, w]
         spawn=UsdFileCfg(
             usd_path=f"{project_root}/assets/objects/table_with_yellowbox.usd",    # table model file
@@ -48,11 +52,16 @@ class DoubleTableSceneCfg(InteractiveSceneCfg): # inherit from the interactive s
     object_l = RigidObjectCfg(
         prim_path="/World/envs/env_.*/_l",
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=[-1.35, -3.1, 0.84],
+            pos=[
+                PACKING_TABLE_L_POS[0] + OBJECT_L_POS_OFFSET[0],
+                PACKING_TABLE_L_POS[1] + OBJECT_L_POS_OFFSET[1],
+                PACKING_TABLE_L_POS[2] + OBJECT_L_POS_OFFSET[2],
+            ],
             rot=[1, 0, 0, 0]
         ),
-        spawn=sim_utils.CuboidCfg(
-            size=(0.06, 0.06, 0.06),
+        spawn=sim_utils.CylinderCfg(
+            radius=0.03,
+            height=0.06,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,
                 retain_accelerations=False
@@ -73,6 +82,28 @@ class DoubleTableSceneCfg(InteractiveSceneCfg): # inherit from the interactive s
                 dynamic_friction=1.5,
                 restitution=0.01,
             ),
+        ),
+    )
+
+    container_r = AssetBaseCfg(
+        prim_path="/World/envs/env_.*/Container_r",
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=[
+                PACKING_TABLE_R_POS[0] + CONTAINER_R_POS_OFFSET[0],
+                PACKING_TABLE_R_POS[1] + CONTAINER_R_POS_OFFSET[1],
+                PACKING_TABLE_R_POS[2] + CONTAINER_R_POS_OFFSET[2],
+            ],
+            rot=[1.0, 0.0, 0.0, 0.0],
+        ),
+        spawn=UsdFileCfg(
+            usd_path=f"{project_root}/assets/objects/Props/general/SM_Crate_A08_Blue_01/SM_Crate_A08_Blue_01_physics.usd",
+            scale=(0.01, 0.01, 0.01),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                collision_enabled=True,
+                contact_offset=0.01,
+                rest_offset=0.0,
+            ),
+            activate_contact_sensors=False,
         ),
     )
     
@@ -117,4 +148,3 @@ class DoubleTableSceneCfg(InteractiveSceneCfg): # inherit from the interactive s
     world_camera = CameraBaseCfg.get_camera_config(prim_path="/World/PerspectiveCamera",
                                                     pos_offset=(-1.9, -5.0, 1.8),
                                                     rot_offset=( -0.40614,0.78544, 0.4277, -0.16986))
-
