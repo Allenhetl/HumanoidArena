@@ -8,19 +8,27 @@ Usage:
 """
 
 from collections import defaultdict, deque
+import json
 import os
 import subprocess
+import sys
 import threading
 import time
 
 import numpy as np
 from scipy.spatial.transform import Rotation as R, Rotation as sRot
 import torch
-import zmq
 
-from gear_sonic.utils.teleop.zmq.zmq_poller import ZMQPoller
-from gear_sonic.trl.utils.rotation_conversion import decompose_rotation_aa
-from gear_sonic.trl.utils.torch_transform import (
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+_SONIC_TOOLS_ROOT = os.path.join(_PROJECT_ROOT, "pico_server", "sonic_tools")
+_HUMAN_JOINTS_INFO_PATH = os.path.join(
+    _SONIC_TOOLS_ROOT, "data", "human", "human_joints_info.pkl"
+)
+
+from pico_server.sonic_tools.trl.utils.rotation_conversion import decompose_rotation_aa
+from pico_server.sonic_tools.trl.utils.torch_transform import (
     angle_axis_to_quaternion,
     compute_human_joints,
     quat_apply,
@@ -28,23 +36,12 @@ from gear_sonic.trl.utils.torch_transform import (
     quaternion_to_angle_axis,
     quaternion_to_rotation_matrix,
 )
+from pico_server.sonic_tools.utils.teleop.zmq.zmq_planner_sender import pack_pose_message
 
 try:
-    from gear_sonic.utils.teleop.zmq.zmq_planner_sender import (
-        pack_pose_message,
-        build_command_message,
-        build_planner_message,
-    )
+    from pico_server.sonic_tools.isaac_utils.rotations import remove_smpl_base_rot, smpl_root_ytoz_up
 except ImportError:
-    def pack_pose_message(*args, **kwargs) -> bytes:
-        raise RuntimeError("pack_pose_message unavailable")
-    build_command_message = None
-    build_planner_message = None
-
-try:
-    from gear_sonic.isaac_utils.rotations import remove_smpl_base_rot, smpl_root_ytoz_up
-except ImportError:
-    print("Warning: gear_sonic.isaac_utils.rotations not available.")
+    print("Warning: pico_server.sonic_tools.isaac_utils.rotations not available.")
     remove_smpl_base_rot = None
     smpl_root_ytoz_up = None
 
@@ -54,7 +51,12 @@ except ImportError:
     xrt = None
 
 try:
-    from gear_sonic.utils.teleop.solver.hand.g1_gripper_ik_solver import (
+    import redis
+except ImportError:
+    redis = None
+
+try:
+    from pico_server.sonic_tools.utils.teleop.solver.hand.g1_gripper_ik_solver import (
         G1GripperInverseKinematicsSolver,
     )
 except ImportError:
@@ -62,16 +64,46 @@ except ImportError:
     G1GripperInverseKinematicsSolver = None
 
 try:
-    from gear_sonic.utils.teleop.vis.vr3pt_pose_visualizer import VR3PtPoseVisualizer
+    from pico_server.sonic_tools.utils.teleop.vis.vr3pt_pose_visualizer import VR3PtPoseVisualizer
 except ImportError:
     print("Warning: VR3PtPoseVisualizer not available (pyvista may not be installed).")
     VR3PtPoseVisualizer = None
 
 try:
-    from gear_sonic.utils.teleop.vis.vr3pt_pose_visualizer import get_g1_key_frame_poses
+    from pico_server.sonic_tools.utils.teleop.vis.vr3pt_pose_visualizer import get_g1_key_frame_poses
 except ImportError:
     print("Warning: get_g1_key_frame_poses not available (pyvista may not be installed).")
     get_g1_key_frame_poses = None
+
+
+SMPL_JOINT_ORDER_24 = [
+    "Pelvis",
+    "Left_Hip",
+    "Right_Hip",
+    "Spine1",
+    "Left_Knee",
+    "Right_Knee",
+    "Spine2",
+    "Left_Ankle",
+    "Right_Ankle",
+    "Spine3",
+    "Left_Foot",
+    "Right_Foot",
+    "Neck",
+    "Left_Collar",
+    "Right_Collar",
+    "Head",
+    "Left_Shoulder",
+    "Right_Shoulder",
+    "Left_Elbow",
+    "Right_Elbow",
+    "Left_Wrist",
+    "Right_Wrist",
+    "Left_Hand",
+    "Right_Hand",
+]
+
+LEGACY_POSE_BATCH_REDIS_KEY = "sonic_pose_batch_unitree_g1_with_hands"
 
 
 # SMPL joint offsets for coordinate frame alignment
@@ -383,7 +415,7 @@ def process_smpl_joints(body_pose, global_orient, transl):
     joints = compute_human_joints(
         body_pose=body_pose[..., :63],
         global_orient=global_orient_new,
-        human_joints_info_path="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic/data/human/human_joints_info.pkl"
+        human_joints_info_path=_HUMAN_JOINTS_INFO_PATH,
     )  # (*, 24, 3)
 
     # Apply base rotation removal and compute local joints
@@ -748,7 +780,7 @@ class PicoReader:
 
 
 def _pose_stream_common(
-    socket,
+    redis_client,
     buffer_size: int,
     num_frames_to_send: int,
     target_fps: int,
@@ -782,7 +814,7 @@ def _pose_stream_common(
     )
 
     streamer = PoseStreamer(
-        socket=socket,
+        redis_client=redis_client,
         reader=reader,
         three_point=three_point,
         num_frames_to_send=num_frames_to_send,
@@ -854,7 +886,7 @@ class ThreePointPose:
         # Robot model for FK-based calibration (headless, no display required)
         self._robot_model = robot_model
         if self._robot_model is None:
-            from gear_sonic.data.robot_model.instantiation.g1 import (
+            from pico_server.sonic_tools.data.robot_model.instantiation.g1 import (
                 instantiate_g1_robot_model,
             )
 
@@ -990,7 +1022,7 @@ class ThreePointPose:
         if get_g1_key_frame_poses is None:
             raise RuntimeError(
                 "get_g1_key_frame_poses could not be imported. "
-                "Ensure gear_sonic.utils.teleop.vis.vr3pt_pose_visualizer is available."
+                "Ensure pico_server.sonic_tools.utils.teleop.vis.vr3pt_pose_visualizer is available."
             )
 
         # Convert 29-DOF override to full model config if needed
@@ -1108,7 +1140,7 @@ class PoseStreamer:
 
     def __init__(
         self,
-        socket,
+        redis_client,
         reader: PicoReader,
         three_point: ThreePointPose,
         num_frames_to_send: int,
@@ -1118,7 +1150,7 @@ class PoseStreamer:
         record_format: str,
         log_prefix: str = "PoseLoop",
     ):
-        self.socket = socket
+        self.redis_client = redis_client
         self.reader = reader
         self.num_frames_to_send = num_frames_to_send
         self.target_fps = target_fps
@@ -1184,6 +1216,11 @@ class PoseStreamer:
         # Data collection button state tracking (edge-triggered)
         self.toggle_data_collection_last = False
         self.toggle_data_abort_last = False
+        self.left_x_last = False
+        self.left_y_last = False
+        self._recording_command = "start"
+        self._recording_command_active_frames = 10
+        self._recording_command_seq = 1
 
         self.buffer_cleared = (
             True  # Start with buffer cleared - wait for full buffer before first send
@@ -1205,6 +1242,142 @@ class PoseStreamer:
         self.buffer_cleared = True
         self.step = 0
 
+    def _emit_recording_command(self, command: str, hold_frames: int = 6) -> None:
+        self._recording_command = command
+        self._recording_command_active_frames = max(1, hold_frames)
+        self._recording_command_seq += 1
+        print(f"[{self.log_prefix}] recording command -> {command}")
+
+    def _current_recording_control(self, timestamp_ms: int) -> dict:
+        if self._recording_command_active_frames > 0:
+            command = self._recording_command
+            self._recording_command_active_frames -= 1
+        else:
+            command = "none"
+            self._recording_command = "none"
+        active = command not in {"save", "cancel", "save_and_reset", "discard_and_reset"}
+        return {
+            "active": active,
+            "command": command,
+            "sequence": self._recording_command_seq,
+            "timestamp_ms": int(timestamp_ms),
+            "source": "sonic_pico_server",
+        }
+
+    def _build_controller_data(
+        self,
+        *,
+        frame_index: int,
+        timestamp_realtime: float,
+        timestamp_monotonic: float,
+        lx: float,
+        ly: float,
+        rx: float,
+        ry: float,
+        left_menu_button: bool,
+        right_menu_button: bool,
+        left_axis_click: bool,
+        right_axis_click: bool,
+        left_trigger: float,
+        right_trigger: float,
+        left_grip: float,
+        right_grip: float,
+        a_pressed: bool,
+        b_pressed: bool,
+        x_pressed: bool,
+        y_pressed: bool,
+        save_pressed: bool,
+        reset_pressed: bool,
+    ) -> dict:
+        return {
+            "frame_index": int(frame_index),
+            "timestamp_realtime": float(timestamp_realtime),
+            "timestamp_monotonic": float(timestamp_monotonic),
+            "source": "pico_server_pose_only",
+            "LeftController": {
+                "axis": [float(lx), float(ly)],
+                "axis_click": bool(left_axis_click),
+                "menu_button": bool(left_menu_button),
+                "grip": float(left_grip),
+                "index_trig": float(left_trigger),
+                "key_one": bool(x_pressed),
+                "key_two": bool(y_pressed),
+                "x_button": bool(x_pressed),
+                "y_button": bool(y_pressed),
+                "save_pressed": bool(save_pressed),
+                "reset_pressed": bool(reset_pressed),
+            },
+            "RightController": {
+                "axis": [float(rx), float(ry)],
+                "axis_click": bool(right_axis_click),
+                "menu_button": bool(right_menu_button),
+                "grip": float(right_grip),
+                "index_trig": float(right_trigger),
+                "a_button": bool(a_pressed),
+                "b_button": bool(b_pressed),
+            },
+        }
+
+    def _build_human_smplx_payload(self, body_poses_np: np.ndarray) -> dict:
+        payload = {}
+        for idx, joint_name in enumerate(SMPL_JOINT_ORDER_24):
+            pose = body_poses_np[idx]
+            payload[joint_name] = [
+                [float(v) for v in pose[:3]],
+                [float(v) for v in pose[3:7]],
+            ]
+        return payload
+
+    def _publish_pose_frame_to_redis(
+        self,
+        *,
+        body_poses_np: np.ndarray,
+        left_hand_joints: np.ndarray,
+        right_hand_joints: np.ndarray,
+        controller_data: dict,
+        recording_control: dict,
+        legacy_pose_batch: dict | None = None,
+    ) -> None:
+        if self.redis_client is None:
+            return
+        try:
+            pipeline = self.redis_client.pipeline()
+            pipeline.set(
+                "human_smplx_data_unitree_g1_with_hands",
+                json.dumps(self._build_human_smplx_payload(body_poses_np)),
+            )
+            pipeline.set(
+                "action_hand_left_unitree_g1_with_hands",
+                json.dumps(left_hand_joints.reshape(-1).astype(np.float32).tolist()),
+            )
+            pipeline.set(
+                "action_hand_right_unitree_g1_with_hands",
+                json.dumps(right_hand_joints.reshape(-1).astype(np.float32).tolist()),
+            )
+            pipeline.set("controller_data", json.dumps(controller_data))
+            pipeline.set(
+                "recording_control_unitree_g1_with_hands",
+                json.dumps(recording_control),
+            )
+            if legacy_pose_batch is not None:
+                pipeline.set(
+                    LEGACY_POSE_BATCH_REDIS_KEY,
+                    pack_pose_message(legacy_pose_batch, topic="pose", version=3),
+                )
+                pipeline.set(
+                    f"{LEGACY_POSE_BATCH_REDIS_KEY}:meta",
+                    json.dumps(
+                        {
+                            "topic": "pose",
+                            "source": "pico_server_pose_only",
+                            "fields": list(legacy_pose_batch.keys()),
+                        }
+                    ),
+                )
+            pipeline.execute()
+        except Exception as exc:
+            print(f"[{self.log_prefix}] Redis publish failed: {exc}")
+
     def run_once(self):
         """Execute one iteration of the pose streaming loop."""
         sample = self.reader.get_latest()
@@ -1219,7 +1392,9 @@ class PoseStreamer:
         (left_menu_button, left_trigger, right_trigger, left_grip, right_grip) = (
             get_controller_inputs()
         )
-        # Get A and B button states for data collection control
+        left_axis_click, right_axis_click = get_axis_clicks()
+        _, right_menu_button = get_menu_buttons()
+        lx, ly, rx, ry = get_controller_axes()
         a_pressed, b_pressed, x_pressed, y_pressed = get_abxy_buttons()
 
         # Data collection toggle logic (edge-triggered)
@@ -1233,6 +1408,14 @@ class PoseStreamer:
         toggle_data_abort = toggle_data_abort_tmp and not self.toggle_data_abort_last
         self.toggle_data_collection_last = toggle_data_collection_tmp
         self.toggle_data_abort_last = toggle_data_abort_tmp
+        save_pressed = x_pressed and not self.left_x_last
+        reset_pressed = y_pressed and not self.left_y_last
+        self.left_x_last = x_pressed
+        self.left_y_last = y_pressed
+        if save_pressed:
+            self._emit_recording_command("save")
+        elif reset_pressed:
+            self._emit_recording_command("discard_and_reset")
 
         left_hand_joints, right_hand_joints = compute_hand_joints_from_inputs(
             self.left_hand_ik_solver,
@@ -1371,12 +1554,37 @@ class PoseStreamer:
             self.buffer_cleared = False
 
         # Get joystick axes for yaw accumulation
-        _, _, rx, _ = get_controller_axes()
         self.yaw_accumulator.update(rx, self.frame_time)
+
+        controller_data = self._build_controller_data(
+            frame_index=self.step,
+            timestamp_realtime=sample.get("timestamp_realtime", 0.0),
+            timestamp_monotonic=sample.get("timestamp_monotonic", 0.0),
+            lx=lx,
+            ly=ly,
+            rx=rx,
+            ry=ry,
+            left_menu_button=left_menu_button,
+            right_menu_button=right_menu_button,
+            left_axis_click=left_axis_click,
+            right_axis_click=right_axis_click,
+            left_trigger=left_trigger,
+            right_trigger=right_trigger,
+            left_grip=left_grip,
+            right_grip=right_grip,
+            a_pressed=a_pressed,
+            b_pressed=b_pressed,
+            x_pressed=x_pressed,
+            y_pressed=y_pressed,
+            save_pressed=save_pressed,
+            reset_pressed=reset_pressed,
+        )
+        recording_control = self._current_recording_control(int(time.time() * 1000))
+        legacy_pose_batch = None
 
         # Only send if buffer is full and we're not waiting for fresh data
         if buffer_is_full and not self.buffer_cleared:
-            numpy_data = {
+            legacy_pose_batch = {
                 "smpl_pose": np.stack((self.frame_buffer["smpl_pose"]), axis=0),
                 "smpl_joints": np.stack((self.frame_buffer["smpl_joints"]), axis=0),
                 "body_quat_w": np.stack((self.frame_buffer["body_quat_w"]), axis=0),
@@ -1406,13 +1614,19 @@ class PoseStreamer:
                 ),
             }
 
-            packed_message = pack_pose_message(numpy_data, topic="pose")
-            self.socket.send(packed_message)
-
             if self.record_dir:
                 out_path = os.path.join(self.record_dir, f"pose_{self.record_idx:06d}.npz")
-                np.savez_compressed(out_path, **numpy_data)
+                np.savez_compressed(out_path, **legacy_pose_batch)
                 self.record_idx += 1
+
+        self._publish_pose_frame_to_redis(
+            body_poses_np=sample["body_poses_np"],
+            left_hand_joints=left_hand_joints,
+            right_hand_joints=right_hand_joints,
+            controller_data=controller_data,
+            recording_control=recording_control,
+            legacy_pose_batch=legacy_pose_batch,
+        )
 
         self.step += 1
         self.next_target_ns += step_ns
@@ -1435,9 +1649,10 @@ class PoseStreamer:
 
 def run_pico(
     buffer_size: int = 15,
-    port: int = 5556,
     num_frames_to_send: int = 5,
     target_fps: int = 50,
+    redis_host: str = "localhost",
+    redis_port: int = 6379,
     use_cuda: bool = False,
     record_dir: str = "",
     record_format: str = "npz",
@@ -1446,7 +1661,7 @@ def run_pico(
     enable_waist_tracking: bool = False,
     enable_smpl_vis: bool = False,
 ):
-    """Run Pico body tracking with real-time visualization and ZMQ streaming."""
+    """Run Pico body tracking with Redis publishing."""
     if xrt is None:
         raise ImportError(
             "XRoboToolkit SDK not available. Install xrobotoolkit_sdk to run Pico streaming."
@@ -1457,20 +1672,14 @@ def run_pico(
     while not xrt.is_body_data_available():
         print("waiting for body data...")
         time.sleep(1)
-    context = zmq.Context()
-    socket = context.socket(zmq.PUB)
-    socket.bind(f"tcp://*:{port}")
-    time.sleep(0.1)
-    print(f"ZMQ socket bound to port {port}")
-    if build_command_message is not None and build_planner_message is not None:
-        try:
-            socket.send(build_command_message(start=False, stop=False, planner=False))
-            socket.send(build_planner_message(0, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], -1.0, -1.0))
-        except Exception as e:
-            print(f"Warning: failed to send initial command/planner messages: {e}")
+    if redis is None:
+        raise ImportError("redis package is required for Redis transport")
+    redis_client = redis.Redis(host=redis_host, port=redis_port, db=0)
+    redis_client.ping()
+    print(f"Redis publisher connected to {redis_host}:{redis_port}")
     try:
         _pose_stream_common(
-            socket=socket,
+            redis_client=redis_client,
             buffer_size=buffer_size,
             num_frames_to_send=num_frames_to_send,
             target_fps=target_fps,
@@ -1485,9 +1694,7 @@ def run_pico(
             enable_smpl_vis=enable_smpl_vis,
         )
     finally:
-        socket.close()
-        context.term()
-        print("Threads stopped, ZMQ socket closed")
+        print("Threads stopped, Redis publisher closed")
 
 
 
@@ -1502,7 +1709,8 @@ if __name__ == "__main__":
         description="Pico SMPL Server - POSE Mode Only (VR Whole-body Teleoperation)"
     )
     parser.add_argument("--buffer_size", type=int, default=15, help="Sliding window buffer size")
-    parser.add_argument("--port", type=int, default=5556, help="ZMQ server port (default: 5556)")
+    parser.add_argument("--redis_host", type=str, default="localhost", help="Redis host")
+    parser.add_argument("--redis_port", type=int, default=6379, help="Redis port")
     parser.add_argument(
         "--num_frames_to_send", type=int, default=5, help="Number of frames to send (default: 5)"
     )
@@ -1551,7 +1759,8 @@ if __name__ == "__main__":
     print("Pico SMPL Server - POSE Mode Only")
     print("VR Whole-body Teleoperation")
     print("=" * 70)
-    print(f"Port: {args.port}")
+    print("Transport: redis")
+    print(f"Redis: {args.redis_host}:{args.redis_port}")
     print(f"Target FPS: {args.target_fps}")
     print(f"Buffer size: {args.buffer_size}")
     print(f"Frames to send: {args.num_frames_to_send}")
@@ -1566,9 +1775,10 @@ if __name__ == "__main__":
     # Run pose streaming mode
     run_pico(
         buffer_size=args.buffer_size,
-        port=args.port,
         num_frames_to_send=args.num_frames_to_send,
         target_fps=args.target_fps,
+        redis_host=args.redis_host,
+        redis_port=args.redis_port,
         use_cuda=args.cuda,
         record_dir=args.record_dir,
         record_format=args.record_format,

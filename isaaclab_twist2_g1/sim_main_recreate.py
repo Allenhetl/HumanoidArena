@@ -60,8 +60,6 @@ parser.add_argument("--image_dds_topic", type=str, default="rt/isaac_image", hel
 parser.add_argument("--image_xrobot_host", type=str, default="172.20.10.2", help="XRobot/Pico IP")
 parser.add_argument("--image_xrobot_port", type=int, default=12345, help="XRobot/Pico port")
 parser.add_argument("--image_xrobot_bitrate", type=int, default=4000000, help="XRobot/Pico H264 bitrate")
-parser.add_argument("--image_xrobot_width", type=int, default=256, help="XRobot/Pico output width")
-parser.add_argument("--image_xrobot_height", type=int, default=256, help="XRobot/Pico output height")
 parser.add_argument("--image_xrobot_ffmpeg", type=str, default="", help="ffmpeg path for XRobot streaming")
 
 # 添加 Isaac Lab 的参数
@@ -454,8 +452,8 @@ def main():
             xrobot_host=args_cli.image_xrobot_host,
             xrobot_port=args_cli.image_xrobot_port,
             xrobot_bitrate=args_cli.image_xrobot_bitrate,
-            xrobot_width=args_cli.image_xrobot_width or None,
-            xrobot_height=args_cli.image_xrobot_height or None,
+            xrobot_width=None,
+            xrobot_height=None,
             xrobot_ffmpeg=args_cli.image_xrobot_ffmpeg or None,
         )
         print(f"✅ Image server created (transport={args_cli.image_transport}, port={args_cli.image_zmq_port})")

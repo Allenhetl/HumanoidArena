@@ -18,8 +18,8 @@ from pathlib import Path
 import time
 
 # Add project roots to path
-OPENPI_ROOT = "/home/hcl4070-1/Desktop/taowen/projects/openpi"
-GMR_ROOT = "/home/hcl4070-1/Desktop/taowen/projects/GMR"
+OPENPI_ROOT = os.environ.get("OPENPI_ROOT", "/home/hcl4070-1/Desktop/taowen/projects/openpi")
+GMR_ROOT = os.environ.get("GMR_ROOT", "/home/hcl4070-1/Desktop/taowen/projects/GMR")
 if OPENPI_ROOT not in sys.path:
     sys.path.insert(0, OPENPI_ROOT)
 if GMR_ROOT not in sys.path:
@@ -196,7 +196,7 @@ class OpenPIActionProvider(ActionProvider):
         """Initialize TWIST2 motion tracker policy."""
         print(f"[{self.name}] Loading TWIST2 policy...")
 
-        twist2_model_path = args_cli.twist2_model_path
+        twist2_model_path = getattr(args_cli, "twist2_model_path", "") or getattr(args_cli, "model_path", "")
         if not os.path.exists(twist2_model_path):
             raise FileNotFoundError(f"TWIST2 model not found: {twist2_model_path}")
 

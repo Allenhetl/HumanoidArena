@@ -27,23 +27,12 @@ import time
 from pathlib import Path
 
 import numpy as np
+from pico_server.sonic_tools.utils.teleop.zmq.zmq_planner_sender import pack_pose_message
 
 try:
     import zmq
 except ImportError as e:
     raise SystemExit(f"Missing dependency: pyzmq. ({e})")
-
-# Reuse packer from gear_sonic (same wire-format as Pico manager)
-_GROOT_PACKER = (
-    Path(__file__).resolve().parents[2]
-    / "GR00T-WholeBodyControl"
-    / "gear_sonic"
-    / "utils"
-    / "teleop"
-    / "zmq"
-    / "zmq_planner_sender.py"
-)
-
 
 def _quat_to_axis_angle_wxyz(q: np.ndarray) -> np.ndarray:
     """Convert quaternion (w,x,y,z) to axis-angle (x,y,z)."""
@@ -326,16 +315,6 @@ def main() -> int:
     robot_qpos_actual = d["robot_qpos_before_decimation"] if "robot_qpos_before_decimation" in d else None
     robot_qvel = d["robot_qvel_before_decimation"] if "robot_qvel_before_decimation" in d else None
     robot_qpos = robot_qpos_target if robot_qpos_target is not None else robot_qpos_actual
-
-    # lazy import to avoid sys.path issues if user doesn't have GR00T in PYTHONPATH
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location("zmq_planner_sender", str(_GROOT_PACKER))
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Failed to load packer from {_GROOT_PACKER}")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)  # type: ignore[attr-defined]
-    pack_pose_message = getattr(mod, "pack_pose_message")
 
     ctx = zmq.Context()
     sock = ctx.socket(zmq.PUB)

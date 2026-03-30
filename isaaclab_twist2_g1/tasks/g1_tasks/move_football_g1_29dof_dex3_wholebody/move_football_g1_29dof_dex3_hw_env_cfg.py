@@ -21,6 +21,7 @@ from . import mdp
 
 from tasks.common_config import G1RobotPresets, CameraPresets
 from tasks.common_event.event_manager import SimpleEvent, SimpleEventManager
+from tasks.common_runtime import apply_optional_runtime_augments
 from tasks.common_scene.base_scene_football_cfg_wholebody import (
     TableFootballSceneCfgWH,
     ROBOT_INIT_X,
@@ -176,32 +177,111 @@ class MoveFootballG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physics_material.restitution_combine_mode = "max"
 
         self.event_manager = SimpleEventManager()
+        self._task_adjust_args_cli = None
 
         self.event_manager.register(
             "reset_object_self",
             SimpleEvent(
-                func=lambda env: base_mdp.reset_root_state_uniform(
-                    env,
-                    torch.arange(env.num_envs, device=env.device),
-                    pose_range={"x": [-0.05, 0.05], "y": [0.0, 0.05]},
-                    velocity_range={},
-                    asset_cfg=SceneEntityCfg("object"),
-                )
+                func=lambda env: self._reset_object_self(env)
             ),
         )
 
         self.event_manager.register(
             "reset_all_self",
             SimpleEvent(
-                func=lambda env: base_mdp.reset_scene_to_default(
-                    env,
-                    torch.arange(env.num_envs, device=env.device),
-                )
+                func=lambda env: self._reset_all_self(env)
             ),
         )
 
         # Setup foot collision rebuild callback
         self._foot_collision_setup_done = False
+
+    def initialize_task_scene(self, env, args_cli=None):
+        self._task_adjust_args_cli = args_cli
+        self.adjust_task_scene(env, phase="init", args_cli=args_cli)
+
+    def adjust_task_scene(self, env, phase="init", args_cli=None):
+        args_cli = args_cli if args_cli is not None else self._task_adjust_args_cli
+        if phase == "init":
+            self._apply_init_adjustments(args_cli=args_cli)
+        elif phase == "reset":
+            self._apply_reset_adjustments()
+
+    def _reset_object_self(self, env):
+        base_mdp.reset_root_state_uniform(
+            env,
+            torch.arange(env.num_envs, device=env.device),
+            pose_range={"x": [-0.05, 0.05], "y": [0.0, 0.05]},
+            velocity_range={},
+            asset_cfg=SceneEntityCfg("object"),
+        )
+
+    def _reset_all_self(self, env):
+        base_mdp.reset_scene_to_default(
+            env,
+            torch.arange(env.num_envs, device=env.device),
+        )
+        self.adjust_task_scene(env, phase="reset")
+
+    def _apply_init_adjustments(self, args_cli=None):
+        """Apply football-specific stage patches before the first reset."""
+        try:
+            from tools.football_physics_material import apply_football_physics_material
+            from tools.grass_ground_material import apply_grass_pbr_to_ground
+            import omni.usd
+            from tools.pitch_lines import DEFAULT_LINE_WIDTH, create_simple_debug_lines
+
+            if args_cli is not None:
+                apply_optional_runtime_augments(args_cli)
+            grass_ok_pre = apply_grass_pbr_to_ground(
+                prim_path="/World/GroundPlane",
+                uv_scale=(100.0, 100.0),
+            )
+            print(f"[grass_ground_material] before reset apply result: {grass_ok_pre}")
+            try:
+                apply_football_physics_material(restitution=0.75)
+            except Exception as exc:
+                print(f"[football_physics] skipped: {exc}")
+
+            stage = omni.usd.get_context().get_stage()
+            create_simple_debug_lines(
+                stage,
+                line_color=(32.0 / 255.0, 32.0 / 255.0, 32.0 / 255.0),
+                draw_goal_reference_lines=True,
+                goal_centers=GOAL_REFERENCE_LINE_ABSOLUTE_CENTERS,
+                goal_relative_offsets=GOAL_REFERENCE_LINE_RELATIVE_OFFSETS,
+                goal_line_length=GOAL_REFERENCE_LINE_LENGTH,
+                goal_line_width=DEFAULT_LINE_WIDTH * GOAL_REFERENCE_LINE_WIDTH_RATIO,
+                goal_line_color=GOAL_REFERENCE_LINE_COLOR,
+            )
+            print(
+                f"[pitch_lines] goal reference lines color={GOAL_REFERENCE_LINE_COLOR}, "
+                f"centers={GOAL_REFERENCE_LINE_ABSOLUTE_CENTERS}, "
+                f"offsets={GOAL_REFERENCE_LINE_RELATIVE_OFFSETS}"
+            )
+            print("[football_runtime] applying foot collision rebuild before first reset")
+            self.setup_foot_collisions()
+        except Exception as exc:
+            print(f"[football_runtime] setup skipped: {exc}")
+
+    def _apply_reset_adjustments(self):
+        """Apply football-specific runtime validation after reset."""
+        try:
+            from tools.grass_ground_material import apply_grass_pbr_to_ground
+
+            grass_ok_post = apply_grass_pbr_to_ground(
+                prim_path="/World/GroundPlane",
+                uv_scale=(15.0, 15.0),
+            )
+            print(f"[grass_ground_material] after reset apply result: {grass_ok_post}")
+        except Exception as exc:
+            print(f"[football_runtime] post-reset grass skipped: {exc}")
+
+        try:
+            print("[football_runtime] post-reset foot collision validation only (no live rebuild)")
+            self.log_foot_collision_status()
+        except Exception as exc:
+            print(f"[football_runtime] foot collision setup skipped: {exc}")
 
     def _emit_foot_collision_log(self, message: str) -> str:
         """Print foot collision validation output and append it to a log file."""
@@ -238,12 +318,21 @@ class MoveFootballG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
         return collision_prim_path, None
 
     def setup_foot_collisions(self):
-        """Rebuild ankle-roll collisions using convex decomposition from mesh."""
+        """Rebuild ankle-roll collisions using convex decomposition from mesh.
+
+        This must run before the first simulation reset. Reapplying it after PhysX
+        tensor views are constructed can invalidate the live simulation view.
+        """
         import omni.usd
         from pxr import UsdPhysics
 
         stage = omni.usd.get_context().get_stage()
         log_path = ""
+
+        if self._foot_collision_setup_done:
+            return self._emit_foot_collision_log(
+                "[foot_collision] apply skipped already_initialized"
+            )
 
         for env_idx in range(self.scene.num_envs):
             robot_prim_path = f"/World/envs/env_{env_idx}/Robot"

@@ -1,20 +1,8 @@
-# sudo ufw disable
+#!/usr/bin/env bash
 
-#source ~/miniconda3/bin/activate gmr
+set -e
 
-cd deploy_real
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# this is my unitree g1's ip in wifi
-# redis_ip="192.168.110.24"
-# localhost if you are using laptop to verify sim2sim or sim2real
-redis_ip="localhost"
-
-# the height (empirically) should be smaller than the actual human height, due to inaccuracy of the PICO estimation.
-actual_human_height=1.72
-python xrobot_teleop_to_robot_w_hand.py --robot unitree_g1 \
-             --actual_human_height $actual_human_height \
-             --redis_ip $redis_ip \
-             --target_fps 100 \
-             --measure_fps 1 \
-            #  --smooth \
-            #  --pinch_mode
+exec "${REPO_ROOT}/isaaclab_twist2_g1/pico_server/run_twist2_teleop_server.sh" "$@"

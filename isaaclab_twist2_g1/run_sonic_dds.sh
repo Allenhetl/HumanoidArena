@@ -42,6 +42,7 @@ redis-cli DEL \
 
 # ── 启动 Isaac Lab 仿真 ───────────────────────────────────────────────
 cd "$SCRIPT_DIR"
+ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/sonic_default.yaml}"
 
 # 使用 action_source=dds（复用 twist2 现有 DDS 基础设施）
 # sonic_wbc_bridge.py 会发布到 DDS rt/lowcmd
@@ -50,6 +51,7 @@ cd "$SCRIPT_DIR"
 python sim_main.py \
     --device cuda \
     --enable_cameras \
+    --env_config_yaml "${ENV_CONFIG_YAML}" \
     --task Isaac-Move-Cylinder-G129-Dex3-Wholebody \
     --robot_type g129 \
     --enable_dex3_dds \
@@ -57,8 +59,6 @@ python sim_main.py \
     --image_transport xrobot \
     --image_xrobot_host 10.42.0.35 \
     --image_xrobot_port 12345 \
-    --image_xrobot_width 640 \
-    --image_xrobot_height 480 \
     --image_xrobot_bitrate 4194304 \
     --image_fps 30 \
     --image_xrobot_ffmpeg /usr/bin/ffmpeg \

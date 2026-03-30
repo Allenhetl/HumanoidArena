@@ -135,6 +135,7 @@ redis-cli DEL \
 
 # 启动 Isaac Lab（真正走 sonic_wholebody）
 cd "$SCRIPT_DIR"
+ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/sonic_default.yaml}"
 
 {
   echo "[$(date '+%F %T')] Starting sim_main.py"
@@ -147,6 +148,7 @@ cd "$SCRIPT_DIR"
 "$PYTHON_BIN" sim_main.py \
   --device cuda \
   --enable_cameras \
+  --env_config_yaml "$ENV_CONFIG_YAML" \
   --task Isaac-Move-Football-G129-Dex3-Wholebody \
   --robot_type g129 \
   --enable_dex3_dds \
@@ -159,4 +161,3 @@ cd "$SCRIPT_DIR"
   --image_fps 30 \
   --image_zmq_port 5555 \
   --enable_world_camera 2>&1 | tee -a "$SIM_LOG"
-

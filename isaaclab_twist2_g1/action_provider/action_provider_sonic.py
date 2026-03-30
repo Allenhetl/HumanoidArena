@@ -4,9 +4,9 @@
 
 POSE 模式数据流：
   Pico 头显 + 手腕控制器 + 脚踝 tracker
-    → pico_manager_thread_server.py  (gear_sonic 侧，独立运行)
-    → ZMQ "pose" topic（含完整 SMPL 数据）
-    → SonicActionProvider._fetch_zmq_pose()
+    → pico_server/pico_server_pose_only.py
+    → Redis keys（主链路）/ legacy ZMQ "pose"（兼容链路）
+    → SonicActionProvider._fetch_*_pose()
     → GEAR-SONIC ONNX encoder + decoder（全身 retargeting）
     → Isaac Lab 全身关节目标（29 DOF，含腿部）
 
@@ -27,7 +27,7 @@ ZMQ "pose" 消息关键字段（POSE 模式，Protocol v3）：
 
 Usage:
     python sim_main.py --action_source sonic_wholebody \\
-        --sonic_zmq_host localhost --sonic_zmq_port 5556 \\
+        --sonic_pose_source redis --sonic_redis_host localhost --sonic_redis_port 6379 \\
         --sonic_encoder_path /path/to/model_encoder.onnx \\
         --sonic_decoder_path /path/to/model_decoder.onnx \\
         --task Isaac-Move-Cylinder-G129-Dex3-Wholebody \\
@@ -36,16 +36,17 @@ Usage:
 
 import json
 import os
-import sys
 import time
 from bisect import bisect_left, bisect_right
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import torch
 from scipy.spatial.transform import Rotation as R
 
 from action_provider.action_base import ActionProvider
+from action_provider.recording_common import AsyncEpisodeRecorder
+from action_provider.reset_control import consume_reset_complete, publish_reset_command
 
 # Isaac Sim imports for RTF monitoring
 try:
@@ -53,23 +54,12 @@ try:
 except ImportError:
     omni = None
 
-# ---------------------------------------------------------------------------
-# Resolve gear_sonic package path
-# ---------------------------------------------------------------------------
-_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-_TWIST2_ROOT = os.path.dirname(_THIS_DIR)
-# Fixed: GR00T-WholeBodyControl is at /home/dreams/Users/taowen/GR00T-WholeBodyControl
-# not under HumanoidArena/
-_GROOT_ROOT = "/home/dreams/Users/taowen/GR00T-WholeBodyControl"
-if _GROOT_ROOT not in sys.path:
-    sys.path.insert(0, _GROOT_ROOT)
-
 try:
-    from gear_sonic.utils.teleop.zmq.zmq_poller import ZMQPoller
+    from pico_server.sonic_tools.utils.teleop.zmq.zmq_poller import ZMQPoller
     _HAS_ZMQ_POLLER = True
 except ImportError:
     _HAS_ZMQ_POLLER = False
-    print("[SonicActionProvider] WARNING: gear_sonic ZMQPoller not found.")
+    print("[SonicActionProvider] WARNING: local sonic_tools ZMQPoller not found.")
 
 try:
     import redis
@@ -286,8 +276,8 @@ def joint_slice_str(
 # ---------------------------------------------------------------------------
 
 try:
-    from gear_sonic.trl.utils.rotation_conversion import decompose_rotation_aa
-    from gear_sonic.trl.utils.torch_transform import (
+    from pico_server.sonic_tools.trl.utils.rotation_conversion import decompose_rotation_aa
+    from pico_server.sonic_tools.trl.utils.torch_transform import (
         angle_axis_to_quaternion,
         compute_human_joints,
         quat_apply,
@@ -303,10 +293,10 @@ except ImportError as e:
     quat_inv = None
     quaternion_to_angle_axis = None
     quaternion_to_rotation_matrix = None
-    print(f"[SonicActionProvider] WARNING: gear_sonic trl utils import failed: {e}")
+    print(f"[SonicActionProvider] WARNING: local sonic_tools trl utils import failed: {e}")
 
 try:
-    from gear_sonic.isaac_utils.rotations import remove_smpl_base_rot, smpl_root_ytoz_up
+    from pico_server.sonic_tools.isaac_utils.rotations import remove_smpl_base_rot, smpl_root_ytoz_up
 except ImportError:
     remove_smpl_base_rot = None
     smpl_root_ytoz_up = None
@@ -516,7 +506,7 @@ def _compute_wrist_joint_pos_from_smpl_pose(smpl_pose_np: np.ndarray) -> np.ndar
         other joints remain 0.
     """
     if decompose_rotation_aa is None:
-        raise RuntimeError("decompose_rotation_aa is not available (gear_sonic not installed?)")
+        raise RuntimeError("decompose_rotation_aa is not available (local sonic_tools not installed?)")
 
     # Expected: smpl_pose_np shape (21,3), axis-angle (rotvec) for 21 joints.
     body_pose = smpl_pose_np.reshape(-1, 21, 3)  # (1,21,3)
@@ -589,7 +579,7 @@ def _pico_single_frame_from_body_poses(
     the format expected by pico_manager_thread_server.py::PoseStreamer.run_once.
     """
     if decompose_rotation_aa is None or compute_human_joints is None:
-        raise RuntimeError("gear_sonic trl utils not available; cannot compute smpl fields.")
+        raise RuntimeError("local sonic_tools trl utils not available; cannot compute smpl fields.")
 
     latest_data = _compute_from_body_poses(_PICO_PARENT_INDICES, device, body_poses_24x7.astype(np.float32))
 
@@ -897,6 +887,210 @@ def sorted_insert_unique(sorted_list: list[int], value: int) -> None:
         sorted_list.insert(pos, value)
 
 
+def _json_default(value: Any):
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, (np.floating, np.integer, np.bool_)):
+        return value.item()
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().tolist()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def _json_string(value: Any) -> str:
+    return json.dumps(value, default=_json_default, separators=(",", ":"))
+
+
+def _organize_sonic_episode(data_buffer: list[dict[str, Any]], timestamp_us: int) -> dict[str, Any]:
+    if not data_buffer:
+        raise ValueError("empty sonic recording buffer")
+
+    first = data_buffer[0]
+    meta = first["meta"]
+    num_frames = len(data_buffer)
+
+    def _stack(path: tuple[str, ...], dtype=None):
+        values = []
+        for frame in data_buffer:
+            current = frame
+            for key in path:
+                current = current[key]
+            values.append(np.asarray(current))
+        return np.stack(values).astype(dtype) if dtype is not None else np.stack(values)
+
+    organized: dict[str, Any] = {
+        "schema_version": np.array("sonic_episode_v1"),
+        "task": np.array(meta["task"]),
+        "episode_id": np.array(meta["episode_id"], dtype=np.int64),
+        "save_timestamp_us": np.array(timestamp_us, dtype=np.int64),
+        "num_frames": np.array(num_frames, dtype=np.int32),
+        "meta_control_dt": np.array(meta["control_dt"], dtype=np.float32),
+        "meta_physics_dt": np.array(meta["physics_dt"], dtype=np.float32),
+        "meta_decimation": np.array(meta["decimation"], dtype=np.int32),
+        "meta_pose_source": np.array(meta["pose_source"]),
+        "meta_encoder_path": np.array(meta["encoder_path"]),
+        "meta_decoder_path": np.array(meta["decoder_path"]),
+        "frame_index": _stack(("markers", "frame_index"), np.int64),
+        "episode_step": _stack(("markers", "episode_step"), np.int64),
+        "timestamp_wall": _stack(("markers", "timestamp_wall"), np.float64),
+        "timestamp_monotonic": _stack(("markers", "timestamp_monotonic"), np.float64),
+        "timestamp_realtime": _stack(("markers", "timestamp_realtime"), np.float64),
+        "recording_command": np.array(
+            [frame["markers"]["recording_command"] for frame in data_buffer]
+        ),
+        "reset_requested": _stack(("markers", "reset_requested"), np.bool_),
+        "reset_completed": _stack(("markers", "reset_completed"), np.bool_),
+        "save_triggered": _stack(("markers", "save_triggered"), np.bool_),
+        "human_left_hand": _stack(("human_raw", "left_hand"), np.float32),
+        "human_right_hand": _stack(("human_raw", "right_hand"), np.float32),
+        "human_smpl_joints": _stack(("human_processed", "smpl_joints"), np.float32),
+        "human_smpl_pose": _stack(("human_processed", "smpl_pose"), np.float32),
+        "human_body_quat_w": _stack(("human_processed", "body_quat_w"), np.float32),
+        "human_vr_position": _stack(("human_processed", "vr_position"), np.float32),
+        "human_vr_orientation": _stack(("human_processed", "vr_orientation"), np.float32),
+        "human_heading_increment": _stack(("human_processed", "heading_increment"), np.float32),
+        "anchor_heading_initialized": _stack(
+            ("human_processed", "anchor_heading_initialized"), np.bool_
+        ),
+        "anchor_use_heading_align": _stack(
+            ("human_processed", "anchor_use_heading_align"), np.bool_
+        ),
+        "anchor_init_base_quat_wxyz": _stack(
+            ("human_processed", "anchor_init_base_quat_wxyz"), np.float32
+        ),
+        "anchor_init_ref_quat_wxyz": _stack(
+            ("human_processed", "anchor_init_ref_quat_wxyz"), np.float32
+        ),
+        "anchor_heading_align_quat_wxyz": _stack(
+            ("human_processed", "anchor_heading_align_quat_wxyz"), np.float32
+        ),
+        "encoder_input": _stack(("sonic_model_io", "encoder_input"), np.float32),
+        "encoder_smpl_joint_window": _stack(
+            ("sonic_model_io", "smpl_joint_window"), np.float32
+        ),
+        "encoder_anchor_window": _stack(("sonic_model_io", "anchor_window"), np.float32),
+        "encoder_wrist_window": _stack(("sonic_model_io", "wrist_window"), np.float32),
+        "encoder_motion_joint_pos_hist": _stack(
+            ("sonic_model_io", "motion_joint_pos_hist"), np.float32
+        ),
+        "encoder_motion_joint_vel_hist": _stack(
+            ("sonic_model_io", "motion_joint_vel_hist"), np.float32
+        ),
+        "encoder_motion_root_z_hist": _stack(
+            ("sonic_model_io", "motion_root_z_hist"), np.float32
+        ),
+        "encoder_motion_anchor_rot6d_hist": _stack(
+            ("sonic_model_io", "motion_anchor_rot6d_hist"), np.float32
+        ),
+        "encoder_robot_joint_pos_hist": _stack(
+            ("sonic_model_io", "robot_joint_pos_hist"), np.float32
+        ),
+        "encoder_robot_joint_vel_hist": _stack(
+            ("sonic_model_io", "robot_joint_vel_hist"), np.float32
+        ),
+        "encoder_latent": _stack(("sonic_model_io", "encoder_latent"), np.float32),
+        "decoder_obs": _stack(("sonic_model_io", "decoder_obs"), np.float32),
+        "decoder_ang_vel_hist": _stack(("sonic_model_io", "ang_vel_hist"), np.float32),
+        "decoder_gravity_dir_hist": _stack(("sonic_model_io", "gravity_dir_hist"), np.float32),
+        "decoder_last_action_hist": _stack(("sonic_model_io", "last_action_hist"), np.float32),
+        "decoder_raw_action": _stack(("sonic_model_io", "decoder_raw_action"), np.float32),
+        "decoder_target_action": _stack(("sonic_model_io", "decoder_target_action"), np.float32),
+        "robot_qpos_before_decimation": _stack(
+            ("robot", "qpos_before_decimation"), np.float32
+        ),
+        "robot_qvel_before_decimation": _stack(
+            ("robot", "qvel_before_decimation"), np.float32
+        ),
+        "robot_root_position": _stack(("robot", "root_position"), np.float32),
+        "robot_root_orientation": _stack(("robot", "root_orientation"), np.float32),
+        "robot_root_lin_vel_local": _stack(("robot", "root_lin_vel_local"), np.float32),
+        "robot_root_ang_vel_local": _stack(("robot", "root_ang_vel_local"), np.float32),
+        "robot_root_lin_vel_world": _stack(("robot", "root_lin_vel_world"), np.float32),
+        "robot_root_ang_vel_world": _stack(("robot", "root_ang_vel_world"), np.float32),
+        "final_body_action_29dof": _stack(("action", "body_action_29dof"), np.float32),
+        "final_full_action": _stack(("action", "full_action"), np.float32),
+        "body_effort_target": _stack(("action", "body_effort_target"), np.float32),
+        "hand_action_left": _stack(("action", "hand_action_left"), np.float32),
+        "hand_action_right": _stack(("action", "hand_action_right"), np.float32),
+        "human_raw_smplx_json": np.array(
+            _json_string([frame["human_raw"]["smplx_frame"] for frame in data_buffer])
+        ),
+        "human_controller_json": np.array(
+            _json_string([frame["human_raw"]["controller_data"] for frame in data_buffer])
+        ),
+        "human_recording_control_json": np.array(
+            _json_string([frame["human_raw"]["recording_control"] for frame in data_buffer])
+        ),
+    }
+
+    football_states = [frame["env"]["football"] for frame in data_buffer]
+    if any(state is not None for state in football_states):
+        organized["env_obj_football_position"] = np.array(
+            [
+                state["position"] if state is not None else np.zeros(3, dtype=np.float32)
+                for state in football_states
+            ],
+            dtype=np.float32,
+        )
+        organized["env_obj_football_linear_velocity"] = np.array(
+            [
+                state["linear_velocity"] if state is not None else np.zeros(3, dtype=np.float32)
+                for state in football_states
+            ],
+            dtype=np.float32,
+        )
+        organized["env_obj_football_angular_velocity"] = np.array(
+            [
+                state["angular_velocity"] if state is not None else np.zeros(3, dtype=np.float32)
+                for state in football_states
+            ],
+            dtype=np.float32,
+        )
+
+    table_states = [frame["env"]["table_drink"] for frame in data_buffer]
+    if any(state is not None for state in table_states):
+        organized["env_obj_table_drink_position"] = np.array(
+            [
+                state["position"] if state is not None else np.zeros(3, dtype=np.float32)
+                for state in table_states
+            ],
+            dtype=np.float32,
+        )
+        organized["env_obj_table_drink_linear_velocity"] = np.array(
+            [
+                state["linear_velocity"] if state is not None else np.zeros(3, dtype=np.float32)
+                for state in table_states
+            ],
+            dtype=np.float32,
+        )
+        organized["env_obj_table_drink_angular_velocity"] = np.array(
+            [
+                state["angular_velocity"] if state is not None else np.zeros(3, dtype=np.float32)
+                for state in table_states
+            ],
+            dtype=np.float32,
+        )
+
+    rgb_frames = []
+    depth_frames = []
+    vision_indices = []
+    for idx, frame in enumerate(data_buffer):
+        rgb = frame["env"]["vision"].get("rgb")
+        depth = frame["env"]["vision"].get("depth")
+        if rgb is not None:
+            rgb_frames.append(rgb)
+            vision_indices.append(idx)
+        if depth is not None:
+            depth_frames.append(depth)
+    if rgb_frames:
+        organized["vision_rgb"] = np.array(rgb_frames)
+        organized["vision_frame_indices"] = np.array(vision_indices, dtype=np.int32)
+    if depth_frames:
+        organized["vision_depth"] = np.array(depth_frames)
+
+    return organized
+
+
 class SonicActionProvider(ActionProvider):
     """POSE 模式全身遥操作 ActionProvider。
 
@@ -909,6 +1103,7 @@ class SonicActionProvider(ActionProvider):
         super().__init__("SonicActionProvider")
         self.env = env
         self.device = env.device
+        self.task_name = getattr(args_cli, "task", "sonic")
 
         # Debug/perf knobs (默认关闭高频打印，否则会把控制环拖到个位数 Hz)
         # - SONIC_DEBUG=1: 打开详细日志
@@ -923,13 +1118,46 @@ class SonicActionProvider(ActionProvider):
 
         self.enable_dex3    = getattr(args_cli, "enable_dex3_dds",   False)
         self.enable_gripper = getattr(args_cli, "enable_dex1_dds",   False)
-        self._pose_source   = getattr(args_cli, "sonic_pose_source", "zmq")  # "zmq" | "redis"
+        self._pose_source   = getattr(args_cli, "sonic_pose_source", "redis")  # "zmq" | "redis"
         self.zmq_host       = getattr(args_cli, "sonic_zmq_host",    "localhost")
         self.zmq_port       = getattr(args_cli, "sonic_zmq_port",    5556)
         self.redis_host     = getattr(args_cli, "sonic_redis_host",  "localhost")
         self.redis_port     = getattr(args_cli, "sonic_redis_port",  6379)
         self.encoder_path   = getattr(args_cli, "sonic_encoder_path", "")
         self.decoder_path   = getattr(args_cli, "sonic_decoder_path", "")
+        self.recording_manager = AsyncEpisodeRecorder(
+            save_dir=getattr(args_cli, "recording_save_dir", "./recording_data"),
+            task_name=f"{self.task_name}_sonic",
+            organize_fn=_organize_sonic_episode,
+            max_frames=10000,
+        )
+        self._should_start_recording_on_first_call = True
+        self._recording_command = "none"
+        self._recording_active = False
+        self._recording_display_state = "idle"
+        self._save_in_progress = False
+        self._save_completion_state = None
+        self._waiting_for_reset_complete = False
+        self._reset_complete_received = False
+        self._episode_id = 0
+        self._latest_human_smplx_frame = None
+        self._latest_controller_data = None
+        self._latest_recording_control = None
+        self._latest_recording_control_sequence = -1
+        self._latest_pose_payload = {}
+        self._latest_encoder_input = np.zeros((1762,), dtype=np.float32)
+        self._latest_smpl_joint_window = np.zeros((_STEP1_FRAMES, _N_SMPL_JOINTS, 3), dtype=np.float32)
+        self._latest_anchor_window = np.zeros((_STEP1_FRAMES, 6), dtype=np.float32)
+        self._latest_wrist_window = np.zeros((_STEP1_FRAMES, len(OFFICIAL_WRIST_INDICES)), dtype=np.float32)
+        self._latest_decoder_obs = np.zeros((994,), dtype=np.float32)
+        self._latest_decoder_raw_action = np.zeros((29,), dtype=np.float32)
+        self._latest_decoder_target = self._sonic_default_np.copy() if hasattr(self, "_sonic_default_np") else np.zeros((29,), dtype=np.float32)
+        self._latest_decoder_body_effort = np.zeros(29, dtype=np.float32)
+        self._latest_frame_index = -1
+        self._latest_timestamp_realtime = 0.0
+        self._latest_timestamp_monotonic = 0.0
+        self._latest_heading_increment = 0.0
+        self._command_edge_this_frame = "none"
         # self._sonic_warmup_steps = int(getattr(args_cli, "sonic_warmup_steps", 50))  # warmup 已注释，仅用 history_ready
         self._sonic_warmup_steps = 0
         self._sonic_smooth_steps = int(getattr(args_cli, "sonic_smooth_steps", 20))
@@ -944,6 +1172,7 @@ class SonicActionProvider(ActionProvider):
             self._setup_zmq()
         self._setup_policy()
         self._setup_buffers()
+        self._latest_decoder_target = self._sonic_default_np.copy()
         self._setup_hand_dds(args_cli)
 
         print(f"[SonicActionProvider] POSE mode ready  "
@@ -1067,6 +1296,7 @@ class SonicActionProvider(ActionProvider):
     def _setup_redis(self):
         """Redis 直连：从 human_smplx_data_unitree_g1_with_hands 读 pose，不再经 ZMQ。"""
         self._redis_client = None
+        self._redis_control_client = None
         self._redis_frame_index = 0
         if not _HAS_REDIS:
             print("[SonicActionProvider] WARNING: redis not installed. pip install redis")
@@ -1075,7 +1305,11 @@ class SonicActionProvider(ActionProvider):
             self._redis_client = redis.Redis(
                 host=self.redis_host, port=self.redis_port, db=0, decode_responses=False
             )
+            self._redis_control_client = redis.Redis(
+                host=self.redis_host, port=self.redis_port, db=0, decode_responses=True
+            )
             self._redis_client.ping()
+            self._redis_control_client.ping()
             print(f"[SonicActionProvider] Redis connected "
                   f"{self.redis_host}:{self.redis_port} key=human_smplx_data_unitree_g1_with_hands")
         except Exception as e:
@@ -1266,6 +1500,219 @@ class SonicActionProvider(ActionProvider):
         self._stream_frame_step = 1
         # print(f"[SONIC] on_env_reset: frame_count reset, warmup={self._sonic_warmup_steps}")  # warmup 已注释
         print(f"[SONIC] on_env_reset: frame_count and history reset")
+
+    def _begin_episode_recording(self) -> None:
+        if not self.recording_manager.is_recording:
+            self.recording_manager.start_recording()
+        self._recording_active = True
+        self._recording_display_state = "recording"
+        self._save_in_progress = False
+
+    def _trigger_complete_reset(self) -> None:
+        try:
+            publish_reset_command(
+                reset_category="3",
+                redis_client=self._redis_control_client,
+                host=self.redis_host,
+                port=self.redis_port,
+            )
+            print("[SONIC] complete reset requested via Redis")
+        except Exception as exc:
+            print(f"[SONIC] failed to send reset trigger: {exc}")
+
+    def _check_reset_complete(self) -> bool:
+        try:
+            return consume_reset_complete(
+                redis_client=self._redis_control_client,
+                host=self.redis_host,
+                port=self.redis_port,
+            )
+        except Exception as exc:
+            print(f"[SONIC] failed to check reset complete: {exc}")
+            return False
+
+    def _handle_recording_command(self) -> None:
+        command = self._recording_command
+        if command == "none":
+            return
+        print(f"[SONIC] recording command received: {command}")
+
+        if command == "start":
+            self._begin_episode_recording()
+
+        elif command == "save":
+            if self.recording_manager.is_recording:
+                def _on_save_complete(success: bool) -> None:
+                    self._save_completion_state = "success" if success else "failure"
+                    self._save_in_progress = False
+
+                self.recording_manager.save_recording(completion_callback=_on_save_complete)
+                self._save_in_progress = True
+                self._recording_active = False
+                self._episode_id += 1
+                self._begin_episode_recording()
+
+        elif command == "cancel":
+            self.recording_manager.cancel_recording()
+            self._recording_active = False
+
+        elif command == "save_and_reset":
+            if self.recording_manager.is_recording:
+                self.recording_manager.save_recording(completion_callback=None)
+                self.recording_manager.save_queue.join()
+            self._recording_active = False
+            self._trigger_complete_reset()
+            self._waiting_for_reset_complete = True
+            self._reset_complete_received = False
+
+        elif command == "discard_and_reset":
+            self.recording_manager.cancel_recording()
+            self._recording_active = False
+            self._trigger_complete_reset()
+            self._waiting_for_reset_complete = True
+            self._reset_complete_received = False
+
+        self._recording_command = "none"
+
+    def _collect_env_state(self) -> dict[str, Any]:
+        env_state = {"football": None, "table_drink": None}
+        try:
+            if "object" in self.env.scene.keys():
+                obj = self.env.scene["object"]
+                root_state = obj.data.root_state_w
+                env_state["football"] = {
+                    "position": root_state[0, 0:3].cpu().numpy(),
+                    "linear_velocity": root_state[0, 7:10].cpu().numpy(),
+                    "angular_velocity": root_state[0, 10:13].cpu().numpy(),
+                }
+        except Exception:
+            env_state["football"] = None
+        try:
+            if "table_drink" in self.env.scene.keys():
+                obj = self.env.scene["table_drink"]
+                root_state = obj.data.root_state_w
+                env_state["table_drink"] = {
+                    "position": root_state[0, 0:3].cpu().numpy(),
+                    "linear_velocity": root_state[0, 7:10].cpu().numpy(),
+                    "angular_velocity": root_state[0, 10:13].cpu().numpy(),
+                }
+        except Exception:
+            env_state["table_drink"] = None
+        return env_state
+
+    def _collect_vision_state(self) -> dict[str, Any]:
+        vision = {"rgb": None, "depth": None}
+        try:
+            if "front_camera" not in self.env.scene.keys():
+                return vision
+            camera = self.env.scene["front_camera"]
+            if "rgb" in camera.data.output:
+                vision["rgb"] = camera.data.output["rgb"][0].cpu().numpy().copy()
+            if "distance_to_image_plane" in camera.data.output:
+                vision["depth"] = camera.data.output["distance_to_image_plane"][0].cpu().numpy().copy()
+        except Exception:
+            return vision
+        return vision
+
+    def _collect_recording_data(
+        self,
+        *,
+        full_action: torch.Tensor,
+        sonic_targets: np.ndarray,
+        body_effort_target: np.ndarray,
+    ) -> dict[str, Any]:
+        robot = self.env.scene["robot"].data
+        root_state = robot.root_state_w
+        joint_pos = robot.joint_pos[0, self._sonic_idx].cpu().numpy().astype(np.float32)
+        joint_vel = robot.joint_vel[0, self._sonic_idx].cpu().numpy().astype(np.float32)
+        return {
+            "meta": {
+                "task": self.task_name,
+                "episode_id": self._episode_id,
+                "control_dt": float(self.env.physics_dt * self._decimation),
+                "physics_dt": float(self.env.physics_dt),
+                "decimation": int(self._decimation),
+                "pose_source": self._pose_source,
+                "encoder_path": self.encoder_path,
+                "decoder_path": self.decoder_path,
+            },
+            "markers": {
+                "frame_index": int(self._latest_frame_index),
+                "episode_step": int(self.recording_manager.frame_count),
+                "timestamp_wall": float(time.time()),
+                "timestamp_monotonic": float(self._latest_timestamp_monotonic),
+                "timestamp_realtime": float(self._latest_timestamp_realtime),
+                "recording_command": self._command_edge_this_frame,
+                "reset_requested": bool(
+                    self._waiting_for_reset_complete
+                    or self._command_edge_this_frame in {"save_and_reset", "discard_and_reset"}
+                ),
+                "reset_completed": bool(self._reset_complete_received),
+                "save_triggered": bool(self._command_edge_this_frame == "save"),
+            },
+            "human_raw": {
+                "smplx_frame": self._latest_human_smplx_frame,
+                "left_hand": self._left_hand_target.copy(),
+                "right_hand": self._right_hand_target.copy(),
+                "controller_data": self._latest_controller_data,
+                "recording_control": self._latest_recording_control,
+            },
+            "human_processed": {
+                "smpl_joints": self._smpl_joints_buf[-1].copy(),
+                "smpl_pose": self._smpl_pose_buf[-1].copy(),
+                "body_quat_w": self._ref_body_quat_window[-1].copy(),
+                "vr_position": self._vr_3pt_position.copy(),
+                "vr_orientation": self._vr_3pt_orientation.copy(),
+                "heading_increment": np.array([self._latest_heading_increment], dtype=np.float32),
+                "anchor_heading_initialized": np.array([self._anchor_heading_initialized], dtype=np.bool_),
+                "anchor_use_heading_align": np.array([self._anchor_use_heading_align], dtype=np.bool_),
+                "anchor_init_base_quat_wxyz": self._anchor_init_base_quat_wxyz.copy(),
+                "anchor_init_ref_quat_wxyz": self._anchor_init_ref_quat_wxyz.copy(),
+                "anchor_heading_align_quat_wxyz": self._anchor_heading_align_quat_wxyz.copy(),
+            },
+            "sonic_model_io": {
+                "encoder_input": self._latest_encoder_input.copy(),
+                "smpl_joint_window": self._latest_smpl_joint_window.copy(),
+                "anchor_window": self._latest_anchor_window.copy(),
+                "wrist_window": self._latest_wrist_window.copy(),
+                "motion_joint_pos_hist": self._motion_joint_pos_hist.copy(),
+                "motion_joint_vel_hist": self._motion_joint_vel_hist.copy(),
+                "motion_root_z_hist": self._motion_root_z_hist.copy(),
+                "motion_anchor_rot6d_hist": self._motion_anchor_rot6d_hist.copy(),
+                "robot_joint_pos_hist": self._robot_joint_pos_hist.copy(),
+                "robot_joint_vel_hist": self._robot_joint_vel_hist.copy(),
+                "encoder_latent": np.zeros((64,), dtype=np.float32)
+                if self._latent is None
+                else np.asarray(self._latent).reshape(-1).astype(np.float32),
+                "decoder_obs": self._latest_decoder_obs.copy(),
+                "ang_vel_hist": self._ang_vel_hist.copy(),
+                "gravity_dir_hist": self._grav_dir_hist.copy(),
+                "last_action_hist": self._last_action_hist.copy(),
+                "decoder_raw_action": self._latest_decoder_raw_action.copy(),
+                "decoder_target_action": self._latest_decoder_target.copy(),
+            },
+            "robot": {
+                "qpos_before_decimation": joint_pos,
+                "qvel_before_decimation": joint_vel,
+                "root_position": root_state[0, 0:3].cpu().numpy(),
+                "root_orientation": root_state[0, 3:7].cpu().numpy(),
+                "root_lin_vel_local": robot.root_lin_vel_b[0].cpu().numpy(),
+                "root_ang_vel_local": robot.root_ang_vel_b[0].cpu().numpy(),
+                "root_lin_vel_world": root_state[0, 7:10].cpu().numpy(),
+                "root_ang_vel_world": root_state[0, 10:13].cpu().numpy(),
+            },
+            "action": {
+                "body_action_29dof": sonic_targets.astype(np.float32).copy(),
+                "full_action": full_action.detach().cpu().numpy().astype(np.float32),
+                "body_effort_target": body_effort_target.astype(np.float32).copy(),
+                "hand_action_left": self._left_hand_target.copy(),
+                "hand_action_right": self._right_hand_target.copy(),
+            },
+            "env": {
+                **self._collect_env_state(),
+                "vision": self._collect_vision_state(),
+            },
+        }
 
     def _prune_stream_reference_timeline(self):
         """Keep a bounded streamed reference timeline around the playback cursor."""
@@ -1546,32 +1993,35 @@ class SonicActionProvider(ActionProvider):
     def _fetch_redis_pose(self):
         """从 Redis 读取遥操 pose（human_smplx_data_unitree_g1_with_hands），转成与 ZMQ 同格式后更新缓冲。"""
         if self._redis_client is None:
-            print("[REDIS] Redis client is None, skipping fetch")
             return
-        # Read required keys (removed debug packet check since sender doesn't provide it)
         try:
-            raw_smplx = self._redis_client.get("human_smplx_data_unitree_g1_with_hands")
-            raw_left = self._redis_client.get("action_hand_left_unitree_g1_with_hands")
-            raw_right = self._redis_client.get("action_hand_right_unitree_g1_with_hands")
+            (
+                raw_smplx,
+                raw_left,
+                raw_right,
+                controller_raw,
+                recording_control_raw,
+            ) = self._redis_client.mget(
+                [
+                    "human_smplx_data_unitree_g1_with_hands",
+                    "action_hand_left_unitree_g1_with_hands",
+                    "action_hand_right_unitree_g1_with_hands",
+                    "controller_data",
+                    "recording_control_unitree_g1_with_hands",
+                ]
+            )
         except Exception as e:
             print(f"[REDIS] Failed to read from Redis: {e}")
             return
-        raw = raw_smplx
-        if raw is None:
-            print("[REDIS] raw_smplx is None, no data in Redis")
+        if raw_smplx is None:
             return
         try:
-            s = raw.decode("utf-8") if isinstance(raw, bytes) else raw
-            frame = json.loads(s)
-            print(f"[REDIS] Successfully parsed JSON, frame keys: {list(frame.keys())[:5]}...")
+            frame = json.loads(raw_smplx.decode("utf-8") if isinstance(raw_smplx, bytes) else raw_smplx)
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             print(f"[REDIS] JSON decode failed: {e}")
             return
         if not isinstance(frame, dict):
-            print(f"[REDIS] Frame is not a dict, got {type(frame)}")
             return
-        # Validate that the received SMPL frame matches the exact joint names
-        # expected by tools/sonic_pose_npz_replay_server.py::_frame_to_pose_fields.
         try:
             from tools.sonic_pose_npz_replay_server import SMPL_JOINT_ORDER_24
         except ImportError as e:
@@ -1580,11 +2030,8 @@ class SonicActionProvider(ActionProvider):
 
         missing = [name for name in SMPL_JOINT_ORDER_24 if name not in frame]
         if missing:
-            print(f"[REDIS][SMPL_FRAME_MISSING_KEYS] missing={missing}", flush=True)
             return
 
-        # Basic structure check: each joint entry should be [pos3, quat4]
-        # where pos3 has 3 numbers and quat4 has 4 numbers.
         try:
             for name in SMPL_JOINT_ORDER_24:
                 v = frame.get(name)
@@ -1595,49 +2042,69 @@ class SonicActionProvider(ActionProvider):
                     raise TypeError(f"{name}[0] pos3 must have 3 numbers, got {pos3}")
                 if not isinstance(quat4, (list, tuple)) or len(quat4) != 4:
                     raise TypeError(f"{name}[1] quat4 must have 4 numbers, got {quat4}")
-            print(f"[REDIS] SMPL frame structure validation passed")
         except Exception as e:
             print(f"[REDIS][SMPL_FRAME_BAD_FORMAT] {e}", flush=True)
             return
-        left_hand = right_hand = None
-        for key, which in [
-            ("action_hand_left_unitree_g1_with_hands", "left"),
-            ("action_hand_right_unitree_g1_with_hands", "right"),
-        ]:
+
+        self._latest_human_smplx_frame = frame
+        self._latest_controller_data = None
+        self._latest_recording_control = None
+        if controller_raw is not None:
             try:
-                raw_h = raw_left if which == "left" else raw_right
-                if raw_h is not None:
-                    sh = raw_h.decode("utf-8") if isinstance(raw_h, bytes) else raw_h
-                    arr = np.asarray(json.loads(sh), dtype=np.float32)
-                    if arr.size == 7:
-                        if which == "left":
-                            left_hand = arr
-                        else:
-                            right_hand = arr
+                payload = controller_raw.decode("utf-8") if isinstance(controller_raw, bytes) else controller_raw
+                self._latest_controller_data = json.loads(payload)
+            except Exception:
+                self._latest_controller_data = None
+        if recording_control_raw is not None:
+            try:
+                payload = (
+                    recording_control_raw.decode("utf-8")
+                    if isinstance(recording_control_raw, bytes)
+                    else recording_control_raw
+                )
+                self._latest_recording_control = json.loads(payload)
+                sequence = int(self._latest_recording_control.get("sequence", -1))
+                command = str(self._latest_recording_control.get("command", "none"))
+                self._recording_active = bool(self._latest_recording_control.get("active", False))
+                if (
+                    not self._waiting_for_reset_complete
+                    and command != "none"
+                    and sequence != self._latest_recording_control_sequence
+                ):
+                    self._latest_recording_control_sequence = sequence
+                    self._command_edge_this_frame = command
+                    self._recording_command = command
+            except Exception:
+                self._latest_recording_control = None
+
+        left_hand = right_hand = None
+        for raw_h, which in [(raw_left, "left"), (raw_right, "right")]:
+            try:
+                if raw_h is None:
+                    continue
+                sh = raw_h.decode("utf-8") if isinstance(raw_h, bytes) else raw_h
+                arr = np.asarray(json.loads(sh), dtype=np.float32)
+                if arr.size == 7:
+                    if which == "left":
+                        left_hand = arr
+                    else:
+                        right_hand = arr
             except Exception:
                 pass
-        # Convert frame dict to (24, 7) numpy array format expected by _frame_to_pose_fields
-        # Format: each row is [pos_x, pos_y, pos_z, quat_x, quat_y, quat_z, quat_w]
-        # Redis format: frame[joint_name] = [[pos_x, pos_y, pos_z], [quat_x, quat_y, quat_z, quat_w]]
+
         try:
             body_poses_24x7 = np.zeros((24, 7), dtype=np.float32)
             for i, joint_name in enumerate(SMPL_JOINT_ORDER_24):
-                joint_data = frame[joint_name]  # [[pos3], [quat4]]
-                pos3 = joint_data[0]  # [x, y, z]
-                quat4 = joint_data[1]  # [x, y, z, w] from scipy.spatial.transform.Rotation
-
-                # Store as [pos_x, pos_y, pos_z, quat_x, quat_y, quat_z, quat_w]
+                joint_data = frame[joint_name]
+                pos3 = joint_data[0]
+                quat4 = joint_data[1]
                 body_poses_24x7[i, 0:3] = pos3
-                body_poses_24x7[i, 3:7] = quat4  # Already in [x, y, z, w] format
-
-            print(f"[REDIS] Converted frame dict to body_poses_24x7 shape: {body_poses_24x7.shape}")
+                body_poses_24x7[i, 3:7] = quat4
         except Exception as e:
             print(f"[REDIS] Failed to convert frame dict to body_poses_24x7: {e}")
             return
 
         self._redis_frame_index += 1
-        # Provide proprioception (joint_pos/joint_vel) from the current Isaac Lab robot state.
-        # Replay/ZMQ often carries this; teleop/Redis typically doesn't, so we must source it here.
         joint_pos = joint_vel = None
         try:
             robot = self.env.scene["robot"].data
@@ -1650,9 +2117,6 @@ class SonicActionProvider(ActionProvider):
             joint_pos = None
             joint_vel = None
         try:
-            # Ported from pico_manager_thread_server.py PoseStreamer.run_once:
-            # dict(frame) -> numpy (24,7) -> compute smpl_pose/smpl_joints/body_quat_w
-            # + wrist joint_pos, then overwrite with simulator proprioception.
             data = _pico_single_frame_from_body_poses(
                 device=self.device,
                 body_poses_24x7=body_poses_24x7,
@@ -1662,11 +2126,16 @@ class SonicActionProvider(ActionProvider):
                 joint_pos=joint_pos,
                 joint_vel=joint_vel,
             )
-            print(f"[REDIS] Successfully converted frame to pose fields, data keys: {list(data.keys())}")
         except Exception as e:
             print(f"[REDIS] Failed to convert frame to pose fields: {e}")
             return
-        print(f"[REDIS] About to call _apply_pose_data with {len(data)} fields")
+        self._latest_frame_index = int(np.asarray(data.get("frame_index", [self._redis_frame_index])).reshape(-1)[-1])
+        if "timestamp_realtime" in data:
+            self._latest_timestamp_realtime = float(np.asarray(data["timestamp_realtime"]).reshape(-1)[-1])
+        if "timestamp_monotonic" in data:
+            self._latest_timestamp_monotonic = float(np.asarray(data["timestamp_monotonic"]).reshape(-1)[-1])
+        if "heading_increment" in data:
+            self._latest_heading_increment = float(np.asarray(data["heading_increment"]).reshape(-1)[-1])
         self._apply_pose_data(data, "redis")
 
     def _apply_pose_data(self, data: dict, source: str = "zmq"):
@@ -1677,6 +2146,7 @@ class SonicActionProvider(ActionProvider):
         if "timestamp_realtime" in data:
             current_ts = float(data["timestamp_realtime"][0] if data["timestamp_realtime"].ndim > 0
                                else data["timestamp_realtime"])
+            self._latest_timestamp_realtime = current_ts
 
             if not hasattr(self, "_smpl_ts_history"):
                 self._smpl_ts_history = []
@@ -1693,10 +2163,18 @@ class SonicActionProvider(ActionProvider):
                 print(f"[SMPL_INTERVAL_TEST] frame={self._frame_count} "
                       f"intervals_ms={[f'{x:.1f}' for x in intervals]} "
                       f"mean={np.mean(intervals):.1f}ms")
+        if "timestamp_monotonic" in data:
+            self._latest_timestamp_monotonic = float(
+                data["timestamp_monotonic"][0]
+                if np.asarray(data["timestamp_monotonic"]).ndim > 0
+                else data["timestamp_monotonic"]
+            )
 
         raw_frame_indices = None
         if "frame_index" in data:
             raw_frame_indices = np.asarray(data["frame_index"], dtype=np.int64).reshape(-1)
+            if raw_frame_indices.size > 0:
+                self._latest_frame_index = int(raw_frame_indices[-1])
             current_idx = int(data["frame_index"][0] if hasattr(data["frame_index"], '__len__')
                               else data["frame_index"])
 
@@ -1927,6 +2405,8 @@ class SonicActionProvider(ActionProvider):
                     f"[{tag}][VR_3PT_ORN] "
                     f"range={array_range_str(self._vr_3pt_orientation)}"
                 )
+        if "heading_increment" in data:
+            self._latest_heading_increment = float(np.asarray(data["heading_increment"]).reshape(-1)[-1])
 
         if (
             raw_frame_indices is not None
@@ -2133,6 +2613,10 @@ class SonicActionProvider(ActionProvider):
                 smpl_anchor_orient_flat,                # 60
                 motion_wrist_pos,                       # 60
             ])[np.newaxis]  # (1, 1762)
+            self._latest_encoder_input = encoder_input[0].astype(np.float32, copy=True)
+            self._latest_smpl_joint_window = smpl_joint_window.astype(np.float32, copy=True)
+            self._latest_anchor_window = anchor_window.astype(np.float32, copy=True)
+            self._latest_wrist_window = wrist_window.astype(np.float32, copy=True)
 
             if do_log:
                 print(f"[SONIC] Encoder input shape: {encoder_input.shape}, expected: (1, 1762)")
@@ -2193,6 +2677,7 @@ class SonicActionProvider(ActionProvider):
                 self._last_action_hist.flatten(),          # his_last_actions
                 self._grav_dir_hist.flatten(),             # his_gravity_dir
             ])[np.newaxis].astype(np.float32)  # (1, 994)
+            self._latest_decoder_obs = dec_obs[0].astype(np.float32, copy=True)
 
             if do_log:
                 print(f"[SONIC] Decoder input shape: {dec_obs.shape}, expected: (1, 994)")
@@ -2207,6 +2692,7 @@ class SonicActionProvider(ActionProvider):
 
             # Match deploy semantics: do not clip the raw policy output locally.
             raw_sonic = raw_sonic_unclipped
+            self._latest_decoder_raw_action = raw_sonic_unclipped.astype(np.float32, copy=True)
             if do_log:
                 print(f"[SONIC] Raw sonic range (after clip): [{raw_sonic.min():.4f}, {raw_sonic.max():.4f}]")
 
@@ -2219,6 +2705,7 @@ class SonicActionProvider(ActionProvider):
             # 参考 GR00T g1_deploy_onnx_ref.cpp:2824
             # target = action * action_scale + default_angle
             target_sonic = raw_sonic * G1_ACTION_SCALE_ISAACLAB + self._sonic_default_np
+            self._latest_decoder_target = target_sonic.astype(np.float32, copy=True)
             if do_log:
                 print(f"[SONIC] ✓ Final target range (before safety clip): [{target_sonic.min():.4f}, {target_sonic.max():.4f}]")
 
@@ -2301,9 +2788,22 @@ class SonicActionProvider(ActionProvider):
                 self._frame_count = 0
                 print("\n[SONIC] Real get_action path enabled")
             self._frame_count += 1
+            self._command_edge_this_frame = "none"
             debug_log = self._sonic_debug and (
                 self._frame_count <= 3 or self._frame_count % self._sonic_log_every == 0
             )
+            if self._waiting_for_reset_complete:
+                if self._check_reset_complete():
+                    print("[SONIC] reset complete received")
+                    self._waiting_for_reset_complete = False
+                    self._reset_complete_received = True
+                    self.on_env_reset()
+                    self._episode_id += 1
+                    self._begin_episode_recording()
+                else:
+                    return self._default_pos.clone().squeeze(0)
+            if not self.recording_manager.is_recording:
+                self._begin_episode_recording()
 
             # RTF monitoring initialization
             if self._enable_rtf_monitor and self._rtf_wall_time_start is None:
@@ -2352,6 +2852,11 @@ class SonicActionProvider(ActionProvider):
             full_action.index_copy_(0, self._sonic_idx, sonic_t)
 
             use_body_effort = self._use_effort_control
+            body_effort_preview = (
+                self._compute_sonic_effort(sonic_targets).detach().cpu().numpy().astype(np.float32)
+                if use_body_effort
+                else np.zeros((29,), dtype=np.float32)
+            )
 
             # 4. 手部关节
             self._apply_hand_targets(full_action)
@@ -2359,6 +2864,22 @@ class SonicActionProvider(ActionProvider):
                 self._ensure_effort_mode_runtime_config(env)
             else:
                 self._ensure_position_mode_runtime_config(env)
+
+            self._latest_decoder_body_effort = body_effort_preview.copy()
+            if self.recording_manager.is_recording:
+                self.recording_manager.add_frame(
+                    self._collect_recording_data(
+                        full_action=full_action,
+                        sonic_targets=sonic_targets,
+                        body_effort_target=body_effort_preview,
+                    )
+                )
+                if self._reset_complete_received:
+                    self._reset_complete_received = False
+            if self._recording_command != "none":
+                self._handle_recording_command()
+                if self._waiting_for_reset_complete:
+                    return self._default_pos.clone().squeeze(0)
 
             # 5. 步进仿真（decimation）
             t_sim0 = time.perf_counter()
@@ -2553,8 +3074,22 @@ class SonicActionProvider(ActionProvider):
                              device=self.device))
 
     def cleanup(self):
+        try:
+            self.recording_manager.shutdown()
+        except Exception:
+            pass
         if self._zmq_poller is not None:
             try:
                 self._zmq_poller.close()
+            except Exception:
+                pass
+        if getattr(self, "_redis_client", None) is not None:
+            try:
+                self._redis_client.close()
+            except Exception:
+                pass
+        if getattr(self, "_redis_control_client", None) is not None:
+            try:
+                self._redis_control_client.close()
             except Exception:
                 pass

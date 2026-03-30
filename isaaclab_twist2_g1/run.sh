@@ -19,8 +19,6 @@ redis-cli DEL \
 #    --image_transport xrobot \
 #    --image_xrobot_host 10.42.0.35 \
 #    --image_xrobot_port 12345 \
-#    --image_xrobot_width 640 \
-#    --image_xrobot_height 480 \
 #    --image_xrobot_bitrate 4194304 \
 #    --image_fps 30 \
 #    --image_xrobot_ffmpeg /usr/bin/ffmpeg
@@ -35,8 +33,6 @@ redis-cli DEL \
   #   --image_transport xrobot \
   #   --image_xrobot_host 10.42.0.35 \
   #   --image_xrobot_port 12345 \
-  #   --image_xrobot_width 480 \
-  #   --image_xrobot_height 320 \
   #   --image_xrobot_bitrate 4194304 \
   #   --image_fps 30 \
   #   --image_xrobot_ffmpeg /usr/bin/ffmpeg \
@@ -54,15 +50,17 @@ redis-cli DEL \
   #   客厅抓杯：Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody
   #   三级台阶平台：Isaac-Move-Three-Step-Platform-G129-Dex3-Wholebody
   #ready
-  # TASK_NAME="${TASK_NAME:-Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody}"
-  #  TASK_NAME="${TASK_NAME:-Isaac-Move-Football-G129-Dex3-Wholebody}"
-#   TASK_NAME="${TASK_NAME:-Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody}"
-    # TASK_NAME="${TASK_NAME:-Isaac-Move-Three-Step-Platform-G129-Dex3-Wholebody}"
-    # TASK_NAME="${TASK_NAME:-Isaac-Move-ArtVIP-Livingroom-G129-Dex3-Wholebody}"
-  TASK_NAME="${TASK_NAME:-Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody}"
+#TASK_NAME="${TASK_NAME:-Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody}"
+#TASK_NAME="${TASK_NAME:-Isaac-Move-Football-G129-Dex3-Wholebody}"
+#TASK_NAME="${TASK_NAME:-Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody}"
+#TASK_NAME="${TASK_NAME:-Isaac-Move-Three-Step-Platform-G129-Dex3-Wholebody}"
+#TASK_NAME="${TASK_NAME:-Isaac-Move-ArtVIP-Livingroom-G129-Dex3-Wholebody}"
+#TASK_NAME="${TASK_NAME:-Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody}"
+TASK_NAME="${TASK_NAME:-Isaac-Move-Football-Single-G129-Dex3-Wholebody}"
+ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/twist2_default.yaml}"
 
-#  TASK_NAME="${TASK_NAME:-Isaac-Push-T-G129-Dex3-Wholebody}"
-#   TASK_NAME="${TASK_NAME:-Isaac-Move-Boxing-Bag-Hanging-G129-Dex3-Wholebody}"
+#TASK_NAME="${TASK_NAME:-Isaac-Push-T-G129-Dex3-Wholebody}"
+#TASK_NAME="${TASK_NAME:-Isaac-Move-Boxing-Bag-Hanging-G129-Dex3-Wholebody}"
 
   # Random seed for reproducibility (set to fixed value for deterministic behavior)
   SEED="${SEED:-42}"
@@ -80,21 +78,19 @@ redis-cli DEL \
   echo "[robot_usd] path=${ROBOT_USD_OVERRIDE}"
 
   python "${SCRIPT_DIR}/sim_main.py" \
-    --device cuda \
+    --device cpu \
     --enable_cameras \
+    --env_config_yaml "${ENV_CONFIG_YAML}" \
+    --input_source pico_twist2 \
+    --gmt_backend twist2 \
     --task "${TASK_NAME}" \
     --robot_type g129 \
     --enable_dex3_dds \
     --image_transport xrobot \
     --image_xrobot_host 10.42.0.35 \
     --image_xrobot_port 12345 \
-    --image_xrobot_width 960 \
-    --image_xrobot_height 540 \
     --image_xrobot_bitrate 16777216 \
     --image_fps 30 \
     --image_xrobot_ffmpeg /usr/bin/ffmpeg \
     --recording_save_dir /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/0319/tw \
-    --camera_enable_depth \
-    --camera_width 960 \
-    --camera_height 540 \
     --seed "${SEED}"

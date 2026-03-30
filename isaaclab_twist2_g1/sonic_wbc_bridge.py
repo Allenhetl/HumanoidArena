@@ -22,8 +22,7 @@
 
 Usage:
     # Terminal 1: Pico VR
-    cd GR00T-WholeBodyControl
-    python gear_sonic/scripts/pico_manager_thread_server.py --manager --port 5556
+    bash pico_server/run_sonic_teleop_server.sh
 
     # Terminal 2: 本脚本
     python sonic_wbc_bridge.py \\
@@ -39,19 +38,13 @@ Usage:
 
 import argparse
 import json
-import sys
 import time
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
 
-# ── 添加 gear_sonic 到路径 ────────────────────────────────────────────
-GROOT_ROOT = Path(__file__).parent.parent / "GR00T-WholeBodyControl"
-sys.path.insert(0, str(GROOT_ROOT))
-
 try:
-    from gear_sonic.utils.teleop.zmq.zmq_poller import ZMQPoller
+    from pico_server.sonic_tools.utils.teleop.zmq.zmq_poller import ZMQPoller
     from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher
     from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_
     from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowCmd_
@@ -59,8 +52,8 @@ try:
     import onnxruntime as ort
 except ImportError as e:
     print(f"Import error: {e}")
-    print("请确保已安装 gear_sonic 和 unitree_sdk2py。")
-    sys.exit(1)
+    print("请确保本地 sonic_tools、unitree_sdk2py 和 onnxruntime 可用。")
+    raise SystemExit(1)
 
 
 # ── ZMQ 消息解析 ──────────────────────────────────────────────────────

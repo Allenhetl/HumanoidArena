@@ -30,18 +30,21 @@ redis-cli DEL \
   t_action \
   isaac_reset_trigger
 
+ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/twist2_default.yaml}"
+
 # Call sim_main.py directly with all required arguments
 python sim_main.py \
   --device cuda \
   --enable_cameras \
+  --env_config_yaml "${ENV_CONFIG_YAML}" \
+  --input_source pico_twist2 \
+  --gmt_backend twist2 \
   --task Isaac-Move-Football-G129-Dex3-Wholebody \
   --robot_type g129 \
   --enable_dex3_dds \
   --image_transport xrobot \
   --image_xrobot_host 10.42.0.35 \
   --image_xrobot_port 12345 \
-  --image_xrobot_width 480 \
-  --image_xrobot_height 320 \
   --image_xrobot_bitrate 4194304 \
   --image_fps 30 \
   --image_xrobot_ffmpeg /usr/bin/ffmpeg \
