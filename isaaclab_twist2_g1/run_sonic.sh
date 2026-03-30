@@ -125,7 +125,7 @@ python sim_main.py \
     --image_xrobot_bitrate 2097152 \
     --image_fps 30 \
     --image_xrobot_ffmpeg /usr/bin/ffmpeg \
-     --headless \
+#     --headless \
 #     --enable_rtf_monitor \
 #    --headless \
 #    --enable_world_camera \
