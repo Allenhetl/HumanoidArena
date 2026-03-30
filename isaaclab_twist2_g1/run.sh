@@ -74,7 +74,7 @@ redis-cli DEL \
   if [ "${ROBOT_COLLIDER_MODE}" = "fourpoints" ]; then
     export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/temp/g1_29dof_with_dex3_rev_1_0_fourpoints.usd"
   else
-    export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0.usd"
+    export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2.usd"
   fi
   echo "[robot_usd] mode=${ROBOT_COLLIDER_MODE}"
   echo "[robot_usd] path=${ROBOT_USD_OVERRIDE}"

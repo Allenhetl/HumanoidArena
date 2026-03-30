@@ -84,10 +84,11 @@ cd "$SCRIPT_DIR"
 # TASK_NAME="${TASK_NAME:-Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody}"
 # TASK_NAME="${TASK_NAME:-Isaac-Move-Football-G129-Dex3-Wholebody}"
 # TASK_NAME="${TASK_NAME:-Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody}"
-# TASK_NAME="${TASK_NAME:-Isaac-Move-Three-Step-Platform-G129-Dex3-Wholebody}"
-# TASK_NAME="${TASK_NAME:-Isaac-Move-ArtVIP-Livingroom-G129-Dex3-Wholebody}"
+#  TASK_NAME="${TASK_NAME:-Isaac-Move-Three-Step-Platform-G129-Dex3-Wholebody}"
+#  TASK_NAME="${TASK_NAME:-Isaac-Move-ArtVIP-Livingroom-G129-Dex3-Wholebody}"
 #TASK_NAME="${TASK_NAME:-Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody}"
- TASK_NAME="${TASK_NAME:-Isaac-Move-Football-G129-Dex3-Wholebody}"
+# TASK_NAME="${TASK_NAME:-Isaac-Move-Football-G129-Dex3-Wholebody}"
+ TASK_NAME="${TASK_NAME:-Isaac-Move-Football-Single-G129-Dex3-Wholebody}"
 
 # 机器人脚部碰撞版本切换：
 #   fourpoints  -> temp/g1_29dof_with_dex3_rev_1_0_fourpoints.usd（四球脚部碰撞）
@@ -96,13 +97,13 @@ ROBOT_COLLIDER_MODE="${ROBOT_COLLIDER_MODE:-box}"
 if [ "${ROBOT_COLLIDER_MODE}" = "fourpoints" ]; then
     export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/temp/g1_29dof_with_dex3_rev_1_0_fourpoints.usd"
 else
-    export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0.usd"
+    export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2.usd"
 fi
 echo "[robot_usd] mode=${ROBOT_COLLIDER_MODE}"
 echo "[robot_usd] path=${ROBOT_USD_OVERRIDE}"
 
 python sim_main.py \
-    --device cuda \
+    --device cpu \
     --enable_cameras \
     --task "${TASK_NAME}" \
     --robot_type g129 \
@@ -117,10 +118,16 @@ python sim_main.py \
     --image_xrobot_port 12345 \
     --image_xrobot_width 640 \
     --image_xrobot_height 480 \
-    --image_xrobot_bitrate 4194304 \
+    --camera_width 640 \
+    --camera_height 480 \
+    --image_xrobot_bitrate 2097152 \
     --image_fps 30 \
     --image_xrobot_ffmpeg /usr/bin/ffmpeg \
-    --enable_world_camera
+     --headless \
+     --enable_rtf_monitor \
+#    --headless \
+#    --enable_world_camera \
+#    --headless \
 
 # 注意：
 # 1. POSE 模式需要 Pico 脚踝 tracker，否则腿部跟踪不可用
