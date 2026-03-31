@@ -1,6 +1,6 @@
 <div align="center">
-  <h1>TWIST2 + IsaacLab 遥操作指南</h1>
-  <p>使用 XRobot 头显在 IsaacLab 仿真中进行全身遥操作</p>
+  <h1>HumanoidArena 遥操作与 Replay 指南</h1>
+  <p>TWIST2 / SONIC / Isaac Lab G1 全身遥操作、录制与 replay</p>
   <p><i>Taowen Wang</i></p>
 </div>
 
@@ -12,20 +12,25 @@
 - [安装](#安装)
 - [使用流程](#使用流程)
   - [Step 1：打开 XRobotToolkit](#step-1打开-xrobottoolkit)
-  - [Step 2：运行 teleop.sh](#step-2运行-teleopsh)
-  - [Step 3：运行 run.sh](#step-3运行-runsh)
+  - [Step 2：运行 teleop 或 Pico server](#step-2运行-teleop-或-pico-server)
+  - [Step 3：运行 Isaac Lab](#step-3运行-isaac-lab)
+  - [Step 4：运行 replay](#step-4运行-replay)
 
 ---
 
 ## 概述
 
-本文档介绍如何使用 TWIST2 配合 XRobot PICO 头显，在 IsaacLab 仿真环境中进行全身遥操作。
+本文档介绍当前仓库里两条主要链路：
+
+- `TWIST2 + IsaacLab`
+- `SONIC + IsaacLab`
 
 | 步骤 | 组件                    | 作用                          |
 | ---- | ----------------------- | ----------------------------- |
 | 1    | XRobotToolkit（Linux）  | 接收头显姿态数据并串流        |
-| 2    | TWIST2 `teleop.sh`      | 姿态解算，通过 Redis 发布动作 |
-| 3    | IsaacLab `run.sh`       | 仿真接收动作并驱动机器人      |
+| 2    | TWIST2 / SONIC 上游输入 | 姿态解算，通过 Redis 发布动作 |
+| 3    | IsaacLab `run_*.sh`     | 仿真接收动作并驱动机器人      |
+| 4    | IsaacLab `run_replay_*.sh` | 从录制 `.npz` 做 replay   |
 
 ---
 
@@ -33,10 +38,10 @@
 
 运行前请先完成以下两个组件的安装：
 
-| 组件      | 安装文档                                         |
-| --------- |----------------------------------------------|
-| IsaacLab  | [README.md](../isaaclab_twist2_g1/README.md) |
-| TWIST2    | [TWIST2/README.md](../TWIST2/README.md)      |
+| 组件      | 安装文档 |
+| --------- | -------- |
+| IsaacLab 仿真桥接 | [isaaclab_twist2_g1/README.md](./isaaclab_twist2_g1/README.md) |
+| TWIST2    | [TWIST2/README.md](./TWIST2/README.md) |
 
 ---
 
@@ -52,9 +57,9 @@
 
 ---
 
-### Step 2：运行 teleop.sh
+### Step 2：运行 teleop 或 Pico server
 
-进入 TWIST2 目录，启动遥操作脚本：
+如果走 `TWIST2`，进入 `TWIST2` 目录，启动遥操作脚本：
 
 ```bash
 cd TWIST2
@@ -62,6 +67,8 @@ bash teleop.sh
 ```
 
 脚本会自动激活 `gmr` conda 环境，并运行 `xrobot_teleop_to_robot_w_hand.py`。
+
+如果走 `SONIC`，通常需要先启动 `isaaclab_twist2_g1/pico_server/` 下对应的 Pico server。
 
 #### 调整人体高度
 
@@ -77,12 +84,37 @@ actual_human_height=1.79   # 单位：米，根据实际身高调整
 
 ---
 
-### Step 3：运行 run.sh
+### Step 3：运行 Isaac Lab
 
 在 `isaaclab_twist2_g1` 根目录下启动仿真：
 
 ```bash
-bash run.sh
+bash run_twist2.sh
+# 或
+bash run_sonic.sh
 ```
 
-脚本会先清空 Redis 中的历史动作数据，再启动 IsaacLab 仿真。机器人将实时跟随遥操作姿态运动。
+脚本顶部参数区可直接修改：
+
+- 任务名
+- 机器人 USD / 碰撞模式
+- 录制目录
+- 图传地址
+- replay 文件路径
+
+更完整的入口说明见：
+
+- [isaaclab_twist2_g1/README.md](./isaaclab_twist2_g1/README.md)
+
+### Step 4：运行 replay
+
+```bash
+bash isaaclab_twist2_g1/run_replay_twist2.sh
+# 或
+bash isaaclab_twist2_g1/run_replay_sonic.sh
+```
+
+对应数据格式说明：
+
+- [TWIST2_DATA_FORMAT.md](./isaaclab_twist2_g1/docs/TWIST2_DATA_FORMAT.md)
+- [SONIC_DATA_FORMAT.md](./isaaclab_twist2_g1/docs/SONIC_DATA_FORMAT.md)
