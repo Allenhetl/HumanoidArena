@@ -225,6 +225,18 @@ class RecordingManager:
             'system_timestamp': np.zeros(num_frames, dtype=np.float64),
         }
 
+        first_robot = first_frame.get('robot', {})
+        first_torque = first_robot.get('applied_torque_before_decimation')
+        if first_torque is not None:
+            organized['robot_applied_torque_before_decimation'] = np.zeros(
+                (num_frames, len(first_torque)), dtype=np.float32
+            )
+        first_contact_forces = first_robot.get('body_net_contact_forces')
+        if first_contact_forces is not None:
+            organized['robot_body_net_contact_forces'] = np.zeros(
+                (num_frames,) + np.asarray(first_contact_forces).shape, dtype=np.float32
+            )
+
         # Store observation semantics (same for all frames, store once)
         organized['observation_semantics'] = json.dumps(data_buffer[0]['robot']['observation']['semantics'])
 
@@ -286,6 +298,14 @@ class RecordingManager:
             organized['robot_root_ang_vel_world'][i] = frame_data['robot']['root_ang_vel_world']
             organized['robot_twist2_inference_qpos'][i] = frame_data['robot']['twist2_inference_qpos']
             organized['robot_obs_buf'][i] = frame_data['robot']['observation']['obs_buf']
+            if 'robot_applied_torque_before_decimation' in organized:
+                torque = frame_data['robot'].get('applied_torque_before_decimation')
+                if torque is not None:
+                    organized['robot_applied_torque_before_decimation'][i] = torque
+            if 'robot_body_net_contact_forces' in organized:
+                contact_forces = frame_data['robot'].get('body_net_contact_forces')
+                if contact_forces is not None:
+                    organized['robot_body_net_contact_forces'][i] = contact_forces
 
             # Vision data (only store selected frames)
             if i in vision_indices:
@@ -476,20 +496,6 @@ class DDSRLActionProvider(ActionProvider):
         print(f"[{self.name}] 🔴 AUTO-START RECORDING ENABLED")
         print(f"[{self.name}] Recording will start on first get_action() call")
         print(f"[{self.name}] This ensures Frame 0 captures real physics state")
-
-        # Create debug log file immediately
-        import datetime
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_dir = "./recording_debug_logs"
-        os.makedirs(log_dir, exist_ok=True)
-        log_path = os.path.join(log_dir, f"recording_debug_{timestamp}.log")
-        self._debug_log_file = open(log_path, 'w')
-        self._debug_log_enabled = True
-        self._debug_log_file.write(f"=== Recording Debug Log (AUTO-START) ===\n")
-        self._debug_log_file.write(f"Started immediately after initialization\n")
-        self._debug_log_file.write(f"Log file: {log_path}\n\n")
-        self._debug_log_file.flush()
-        print(f"[{self.name}] Debug log enabled: {log_path}")
 
         # Debug: Fix root in air for PID tuning
         # Set to True to fix robot root at a fixed height, preventing falls during teleop debugging
@@ -999,9 +1005,11 @@ class DDSRLActionProvider(ActionProvider):
             available = []
 
         providers = []
-        if str(self.env.device).startswith("cuda") and "CUDAExecutionProvider" in available:
+        if "CUDAExecutionProvider" in available:
             providers.append("CUDAExecutionProvider")
         providers.append("CPUExecutionProvider")
+        print(f"[{self.name}] ONNX available providers: {available}")
+        print(f"[{self.name}] ONNX selected providers: {providers}")
 
         # Configure session options for deterministic inference
         sess_options = ort.SessionOptions()
@@ -2048,6 +2056,20 @@ class DDSRLActionProvider(ActionProvider):
         # TWIST2 inference output
         robot_data["twist2_inference_qpos"] = target_29.cpu().numpy().squeeze(0)  # [29]
 
+        try:
+            robot_data["applied_torque_before_decimation"] = (
+                self.env.scene["robot"].data.applied_torque[0, idx].cpu().numpy()
+            )
+        except Exception:
+            robot_data["applied_torque_before_decimation"] = None
+
+        try:
+            robot_data["body_net_contact_forces"] = (
+                self.env.scene["robot"].data.body_net_contact_force_w[0].cpu().numpy()
+            )
+        except Exception:
+            robot_data["body_net_contact_forces"] = None
+
         # Observation data
         robot_data["observation"] = {
             "obs_buf": obs_buf.cpu().numpy().squeeze(0),  # [1402]
@@ -2208,12 +2230,6 @@ class DDSRLActionProvider(ActionProvider):
     def cleanup(self):
         """Clean up DDS resources and recording manager"""
         try:
-            # Close debug log file
-            if hasattr(self, '_debug_log_file') and self._debug_log_file is not None:
-                print(f"[{self.name}] Closing debug log file...")
-                self._debug_log_file.close()
-                self._debug_log_file = None
-
             # Shutdown recording manager first (wait for pending saves)
             if hasattr(self, 'recording_manager'):
                 self.recording_manager.shutdown()

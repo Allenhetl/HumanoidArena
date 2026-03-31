@@ -17,9 +17,14 @@ for arg in "$@"; do
 done
 
 cd "${SCRIPT_DIR}"
+#python pico_server_pose_only.py \
+#  --redis_host "${REDIS_HOST}" \
+#  --redis_port "${REDIS_PORT}" \
+#  --vis_vr3pt \
+#  --vis_smpl \
+#  "$@"
+
 python pico_server_pose_only.py \
   --redis_host "${REDIS_HOST}" \
   --redis_port "${REDIS_PORT}" \
-  --vis_vr3pt \
-  --vis_smpl \
   "$@"

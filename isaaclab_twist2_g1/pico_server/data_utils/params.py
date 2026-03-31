@@ -1,5 +1,8 @@
 import numpy as np
 
+HAND_COMMAND_THRESHOLD = 0.5
+HAND_MOVEMENT_STEP = 0.05
+
 DEFAULT_MIMIC_OBS_G1 = np.concatenate([
                     np.array([0, 0]), # xy velocity
                     np.array([0.8]), # z position

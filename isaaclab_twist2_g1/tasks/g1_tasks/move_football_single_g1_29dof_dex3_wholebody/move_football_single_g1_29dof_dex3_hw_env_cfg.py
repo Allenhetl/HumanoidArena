@@ -83,7 +83,7 @@ class FootballTableSceneCfg(TableFootballSceneCfgWH):
         debug_vis=False,
     )
 
-    front_camera = CameraPresets.g1_world_camera()
+    front_camera = CameraPresets.g1_front_camera()
     # front_camera = CameraPresets.g1_front_camera()
     # world_camera = CameraPresets.g1_world_camera()
 
@@ -160,12 +160,13 @@ class MoveFootballG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
     curriculum = None
 
     def __post_init__(self):
-        self.decimation = 4
+        self.decimation = 10
         self.episode_length_s = 20.0
 
-        self.sim.dt = 0.005
+        self.sim.dt = 0.001
         self.scene.contact_forces.update_period = self.sim.dt
         self.sim.render_interval = self.decimation
+        self.sim.physx.enable_enhanced_determinism = True
         self.sim.physx.bounce_threshold_velocity = 0.01
         self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 1024 * 1024 * 4
         self.sim.physx.gpu_total_aggregate_pairs_capacity = 16 * 1024

@@ -53,6 +53,7 @@ done
 SONIC_REDIS_HOST="${SONIC_REDIS_HOST:-localhost}"
 SONIC_REDIS_PORT="${SONIC_REDIS_PORT:-6379}"
 ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/sonic_default.yaml}"
+RECORDING_SAVE_DIR="${RECORDING_SAVE_DIR:-${SCRIPT_DIR}/recording_data/sonic/tw}"
 
 # ── 清理 Redis 缓存（twist2 惯例）─────────────────────────────────────
 redis-cli DEL \
@@ -87,11 +88,11 @@ cd "$SCRIPT_DIR"
 # TASK_NAME="${TASK_NAME:-Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody}"
 # TASK_NAME="${TASK_NAME:-Isaac-Move-Football-G129-Dex3-Wholebody}"
 # TASK_NAME="${TASK_NAME:-Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody}"
-  TASK_NAME="${TASK_NAME:-Isaac-Move-Three-Step-Platform-G129-Dex3-Wholebody}"
+#  TASK_NAME="${TASK_NAME:-Isaac-Move-Three-Step-Platform-G129-Dex3-Wholebody}"
 #  TASK_NAME="${TASK_NAME:-Isaac-Move-ArtVIP-Livingroom-G129-Dex3-Wholebody}"
 #TASK_NAME="${TASK_NAME:-Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody}"
 # TASK_NAME="${TASK_NAME:-Isaac-Move-Football-G129-Dex3-Wholebody}"
-# TASK_NAME="${TASK_NAME:-Isaac-Move-Football-Single-G129-Dex3-Wholebody}"
+ TASK_NAME="${TASK_NAME:-Isaac-Move-Football-Single-G129-Dex3-Wholebody}"
 
 # 机器人脚部碰撞版本切换：
 #   fourpoints  -> temp/g1_29dof_with_dex3_rev_1_0_fourpoints.usd（四球脚部碰撞）
@@ -104,6 +105,7 @@ else
 fi
 echo "[robot_usd] mode=${ROBOT_COLLIDER_MODE}"
 echo "[robot_usd] path=${ROBOT_USD_OVERRIDE}"
+echo "[recording] save_dir=${RECORDING_SAVE_DIR}"
 
 python sim_main.py \
     --device cpu \
@@ -125,7 +127,8 @@ python sim_main.py \
     --image_xrobot_bitrate 2097152 \
     --image_fps 30 \
     --image_xrobot_ffmpeg /usr/bin/ffmpeg \
-#     --headless \
+    --recording_save_dir "${RECORDING_SAVE_DIR}" \
+     --headless \
 #     --enable_rtf_monitor \
 #    --headless \
 #    --enable_world_camera \

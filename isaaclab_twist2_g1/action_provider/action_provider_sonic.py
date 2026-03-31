@@ -1135,6 +1135,8 @@ class SonicActionProvider(ActionProvider):
         self._recording_command = "none"
         self._recording_active = False
         self._recording_display_state = "idle"
+        self._recording_display_counter = 0
+        self._recording_display_duration = 10
         self._save_in_progress = False
         self._save_completion_state = None
         self._waiting_for_reset_complete = False
@@ -1506,7 +1508,38 @@ class SonicActionProvider(ActionProvider):
             self.recording_manager.start_recording()
         self._recording_active = True
         self._recording_display_state = "recording"
+        self._recording_display_counter = 0
         self._save_in_progress = False
+
+    def is_recording_active(self):
+        return self._recording_active
+
+    def get_recording_command(self):
+        return self._recording_command
+
+    def _update_recording_display_state(self) -> None:
+        if self._save_completion_state is not None:
+            if self._save_completion_state == "success":
+                self._recording_display_state = "saved"
+            else:
+                self._recording_display_state = "discard"
+            self._recording_display_counter = 0
+            self._save_in_progress = False
+            self._save_completion_state = None
+        elif self._save_in_progress:
+            return
+        elif self._recording_display_state in ["saved", "discard"]:
+            self._recording_display_counter += 1
+            if self._recording_display_counter >= self._recording_display_duration:
+                self._recording_display_counter = 0
+                if not self.recording_manager.is_recording and not self._waiting_for_reset_complete:
+                    self._begin_episode_recording()
+                else:
+                    self._recording_display_state = "recording" if self.recording_manager.is_recording else "idle"
+        elif self.recording_manager.is_recording:
+            self._recording_display_state = "recording"
+        elif self._recording_display_state == "recording":
+            self._recording_display_state = "idle"
 
     def _trigger_complete_reset(self) -> None:
         try:
@@ -1549,17 +1582,26 @@ class SonicActionProvider(ActionProvider):
                 self.recording_manager.save_recording(completion_callback=_on_save_complete)
                 self._save_in_progress = True
                 self._recording_active = False
+                self._recording_display_state = "saving"
+                self._recording_display_counter = 0
+                self._save_completion_state = None
                 self._episode_id += 1
-                self._begin_episode_recording()
 
         elif command == "cancel":
             self.recording_manager.cancel_recording()
             self._recording_active = False
+            self._recording_display_state = "discard"
+            self._recording_display_counter = 0
+            self._save_in_progress = False
 
         elif command == "save_and_reset":
             if self.recording_manager.is_recording:
+                self._recording_display_state = "saving"
+                self._recording_display_counter = 0
+                self._save_in_progress = True
                 self.recording_manager.save_recording(completion_callback=None)
                 self.recording_manager.save_queue.join()
+                self._save_in_progress = False
             self._recording_active = False
             self._trigger_complete_reset()
             self._waiting_for_reset_complete = True
@@ -1568,6 +1610,9 @@ class SonicActionProvider(ActionProvider):
         elif command == "discard_and_reset":
             self.recording_manager.cancel_recording()
             self._recording_active = False
+            self._recording_display_state = "discard"
+            self._recording_display_counter = 0
+            self._save_in_progress = False
             self._trigger_complete_reset()
             self._waiting_for_reset_complete = True
             self._reset_complete_received = False
@@ -2802,7 +2847,12 @@ class SonicActionProvider(ActionProvider):
                     self._begin_episode_recording()
                 else:
                     return self._default_pos.clone().squeeze(0)
-            if not self.recording_manager.is_recording:
+            if (
+                not self.recording_manager.is_recording
+                and not self._waiting_for_reset_complete
+                and not self._save_in_progress
+                and self._recording_display_state not in {"saving", "saved", "discard"}
+            ):
                 self._begin_episode_recording()
 
             # RTF monitoring initialization
@@ -2880,6 +2930,7 @@ class SonicActionProvider(ActionProvider):
                 self._handle_recording_command()
                 if self._waiting_for_reset_complete:
                     return self._default_pos.clone().squeeze(0)
+            self._update_recording_display_state()
 
             # 5. 步进仿真（decimation）
             t_sim0 = time.perf_counter()

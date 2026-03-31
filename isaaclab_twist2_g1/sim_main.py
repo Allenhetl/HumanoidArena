@@ -474,10 +474,13 @@ def main():
     _initialize_task_scene(env, env_cfg, args_cli)
     env.sim.reset()
     env.reset()
-    try:
-        _trigger_task_reset_event(env_cfg, "reset_all_self", env)
-    except Exception as exc:
-        print(f"[env_runtime] startup reset_all_self failed: {exc}")
+    if getattr(env_cfg, "startup_task_reset_enabled", True):
+        try:
+            _trigger_task_reset_event(env_cfg, "reset_all_self", env)
+        except Exception as exc:
+            print(f"[env_runtime] startup reset_all_self failed: {exc}")
+    else:
+        print("[env_runtime] startup reset_all_self skipped by task config")
 
     # --- set default viewport camera (GUI only) ---
     try:
@@ -695,7 +698,10 @@ def main():
             print("\n" + "="*80)
             print("🔴 STARTING RECORDING IMMEDIATELY AFTER ENV.RESET()")
             print("="*80)
-            action_provider.recording_manager.start_recording()
+            if hasattr(action_provider, "_begin_episode_recording") and callable(action_provider._begin_episode_recording):
+                action_provider._begin_episode_recording()
+            else:
+                action_provider.recording_manager.start_recording()
             action_provider._should_start_recording_on_first_call = False
             print("✅ Recording started to capture all random state from the beginning")
             print("="*80 + "\n")

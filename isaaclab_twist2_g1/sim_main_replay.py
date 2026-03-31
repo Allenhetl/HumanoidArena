@@ -19,6 +19,7 @@ import sys
 import signal
 import torch
 import gymnasium as gym
+import numpy as np
 from pathlib import Path
 
 # Isaac Lab AppLauncher
@@ -29,6 +30,12 @@ from image_server.image_server import ImageServer
 # add command line arguments
 parser = argparse.ArgumentParser(description="Unitree Simulation Replay")
 parser.add_argument("--task", type=str, default="Isaac-PickPlace-G129-Head-Waist-Fix", help="task name")
+parser.add_argument(
+    "--env_config_yaml",
+    type=str,
+    default="",
+    help="YAML file with env config overrides. Relative paths resolve under tasks/common_env_config.",
+)
 
 # Replay-specific arguments
 parser.add_argument("--replay_file", type=str, required=True, help="Path to replay .npz file")
@@ -40,6 +47,13 @@ parser.add_argument("--replay_loop", action="store_true", default=False,
 
 parser.add_argument("--robot_type", type=str, default="g129", help="robot type")
 parser.add_argument("--stats_interval", type=float, default=10.0, help="statistics print interval (seconds)")
+parser.add_argument(
+    "--replay_video_save_dir",
+    type=str,
+    default="./recording_data/replay_videos",
+    help="Directory to save replay mp4 videos.",
+)
+parser.add_argument("--video_fps", type=int, default=30, help="FPS for saved replay video.")
 
 # ONNX model path (for inference mode)
 parser.add_argument("--model_path", type=str,
@@ -62,7 +76,7 @@ parser.add_argument("--step_hz", type=int, default=50, help="control frequency")
 parser.add_argument("--enable_profiling", action="store_true", default=False, help="enable performance analysis")
 parser.add_argument("--profile_interval", type=int, default=500, help="performance analysis report interval (steps)")
 
-parser.add_argument("--gravity_z", type=float, default=-9.8, help="override gravity z (e.g., -9.8)")
+parser.add_argument("--gravity_z", type=float, default=None, help="override gravity z (e.g., -9.81)")
 
 # random seed for reproducibility
 parser.add_argument("--seed", type=int, default=None, help="random seed for reproducibility (default: None)")
@@ -70,6 +84,28 @@ parser.add_argument("--seed", type=int, default=None, help="random seed for repr
 # add AppLauncher parameters
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+
+
+def _resolve_replay_task_name(args_cli):
+    """Prefer the task stored in the replay file so replay uses the recorded environment."""
+    try:
+        with np.load(args_cli.replay_file, allow_pickle=True) as replay_data:
+            recorded_task = replay_data.get("task")
+            if recorded_task is None:
+                return
+            if hasattr(recorded_task, "item"):
+                recorded_task = recorded_task.item()
+            recorded_task = str(recorded_task)
+    except Exception as exc:
+        print(f"[replay] failed to read task metadata from replay file: {exc}")
+        return
+
+    if args_cli.task != recorded_task:
+        print(f"[replay] overriding task from CLI '{args_cli.task}' -> recorded '{recorded_task}'")
+        args_cli.task = recorded_task
+
+
+_resolve_replay_task_name(args_cli)
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -82,12 +118,54 @@ from layeredcontrol.robot_control_system import (
 import tasks
 from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
 from action_provider.action_provider_wh_twist2_replay import ReplayActionProvider
-
-from tools.grass_ground_material import apply_grass_pbr_to_ground
-import tools.pitch_lines as pitch_lines_mod
-from tools.pitch_lines import create_simple_debug_lines
-from tools.football_physics_material import apply_football_physics_material
+from tasks.common_env_config import apply_env_config_yaml
+from tasks.common_runtime import apply_optional_runtime_augments
 from tools.get_stiffness import get_robot_stiffness_from_env
+from utils.video_recorder import SimpleVideoRecorder
+
+
+def _initialize_task_scene(env, env_cfg, args_cli):
+    try:
+        initialize_task_scene = getattr(env_cfg, "initialize_task_scene", None)
+        if callable(initialize_task_scene):
+            initialize_task_scene(env, args_cli)
+            return
+        apply_optional_runtime_augments(args_cli)
+        legacy_runtime_setup = getattr(env_cfg, "apply_runtime_setup", None)
+        if callable(legacy_runtime_setup):
+            legacy_runtime_setup(env, args_cli)
+    except Exception as exc:
+        print(f"[env_runtime] init setup failed: {exc}")
+
+
+def _trigger_task_reset_event(env_cfg, event_name, env):
+    event_manager = getattr(env_cfg, "event_manager", None)
+    if event_manager is None:
+        return False
+    event_manager.trigger(event_name, env)
+    return True
+
+
+def _make_replay_video_path(args_cli) -> Path:
+    replay_path = Path(args_cli.replay_file)
+    output_dir = Path(args_cli.replay_video_save_dir).expanduser()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir / f"{replay_path.stem}_{args_cli.replay_mode}.mp4"
+
+
+def _record_replay_video_frame(video_recorder, env):
+    if video_recorder is None:
+        return
+    try:
+        if "front_camera" not in env.scene.keys():
+            return
+        camera = env.scene["front_camera"]
+        if "rgb" not in camera.data.output:
+            return
+        frame = camera.data.output["rgb"][0].cpu().numpy()
+        video_recorder.add_frame(frame)
+    except Exception as exc:
+        print(f"[sim_main_replay] Failed to record replay video frame: {exc}")
 
 def setup_signal_handlers(controller, image_server=None, simulation_app=None):
     """set signal handlers
@@ -146,6 +224,9 @@ def setup_signal_handlers(controller, image_server=None, simulation_app=None):
 
 def main():
     """main function"""
+    video_recorder = None
+    video_output_path = None
+
     print("=" * 60)
     print("robot control system started (REPLAY MODE)")
     print(f"Task: {args_cli.task}")
@@ -158,6 +239,12 @@ def main():
     try:
         env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=1)
         env_cfg.env_name = args_cli.task
+        apply_env_config_yaml(
+            env_cfg,
+            args_cli.env_config_yaml,
+            task_name=args_cli.task,
+            route_name="twist2",
+        )
         # Set seed: command line argument takes priority, otherwise use default 42
         seed_value = args_cli.seed if args_cli.seed is not None else 42
         env_cfg.seed = seed_value
@@ -215,98 +302,20 @@ def main():
     print("***  Please left-click on the Sim window to activate rendering. ***")
     print("\n")
 
-    # reset environment
-
-    
-    # if "football" in args_cli.task.lower():
-    #     grass_ok_pre = apply_grass_pbr_to_ground(prim_path="/World/GroundPlane", uv_scale=(100.0, 100.0))
-    #     print(f"[grass_ground_material] before reset apply result: {grass_ok_pre}")
-    #     try:
-    #         apply_football_physics_material(restitution=0.75)
-    #     except Exception as e:
-    #         print(f"[football_physics] 跳過: {e}")
-    #     try:
-    #         import omni.usd
-    #         stage = omni.usd.get_context().get_stage()
-    #         print(f"[pitch_lines] module file: {pitch_lines_mod.__file__}")
-    #         create_simple_debug_lines(stage, line_color=(32.0 / 255.0, 32.0 / 255.0, 32.0 / 255.0))
-    #     except Exception as e:
-    #         print(f"[pitch_lines] 標線未建立或跳過: {e}")
-
-    if "football" in args_cli.task.lower():
-        grass_ok_pre = apply_grass_pbr_to_ground(prim_path="/World/GroundPlane", uv_scale=(100.0, 100.0))
-        print(f"[grass_ground_material] before reset apply result: {grass_ok_pre}")
-        try:
-            apply_football_physics_material(restitution=0.75)
-        except Exception as e:
-            print(f"[football_physics] 跳過: {e}")
-        try:
-            import omni.usd
-            from tasks.g1_tasks.move_football_g1_29dof_dex3_wholebody.move_football_g1_29dof_dex3_hw_env_cfg import (
-                GOAL_REFERENCE_LINE_ABSOLUTE_CENTERS,
-                GOAL_REFERENCE_LINE_COLOR,
-                GOAL_REFERENCE_LINE_LENGTH,
-                GOAL_REFERENCE_LINE_RELATIVE_OFFSETS,
-                GOAL_REFERENCE_LINE_WIDTH_RATIO,
-            )
-            from tools.pitch_lines import DEFAULT_LINE_WIDTH
-            stage = omni.usd.get_context().get_stage()
-            print(f"[pitch_lines] module file: {pitch_lines_mod.__file__}")
-            create_simple_debug_lines(
-                stage,
-                line_color=(32.0 / 255.0, 32.0 / 255.0, 32.0 / 255.0),
-                draw_goal_reference_lines=True,
-                goal_centers=GOAL_REFERENCE_LINE_ABSOLUTE_CENTERS,
-                goal_relative_offsets=GOAL_REFERENCE_LINE_RELATIVE_OFFSETS,
-                goal_line_length=GOAL_REFERENCE_LINE_LENGTH,
-                goal_line_width=DEFAULT_LINE_WIDTH * GOAL_REFERENCE_LINE_WIDTH_RATIO,
-                goal_line_color=GOAL_REFERENCE_LINE_COLOR,
-            )
-            print(
-                f"[pitch_lines] goal reference lines color={GOAL_REFERENCE_LINE_COLOR}, "
-                f"centers={GOAL_REFERENCE_LINE_ABSOLUTE_CENTERS}, offsets={GOAL_REFERENCE_LINE_RELATIVE_OFFSETS}"
-            )
-        except Exception as e:
-            print(f"[pitch_lines] 標線未建立或跳過: {e}")
-
+    _initialize_task_scene(env, env_cfg, args_cli)
     env.sim.reset()
     env.reset()
-    if "football" in args_cli.task.lower():
-        grass_ok_post = apply_grass_pbr_to_ground(prim_path="/World/GroundPlane", uv_scale=(15.0, 15.0))
-        print(f"[grass_ground_material] after reset apply result: {grass_ok_post}")
+    if getattr(env_cfg, "startup_task_reset_enabled", True):
+        try:
+            _trigger_task_reset_event(env_cfg, "reset_all_self", env)
+        except Exception as exc:
+            print(f"[env_runtime] startup reset_all_self failed: {exc}")
+    else:
+        print("[env_runtime] startup reset_all_self skipped by task config")
 
     # ================= Debug: print Box & Cube physics properties =================
     print("\n" + "=" * 60)
     print("[DEBUG] Inspecting physics properties using IsaacLab API")
-
-    inspect_targets = ["object_l", "object", "box", "hurdle"]
-    for target_name in inspect_targets:
-        if target_name not in env.scene.keys():
-            continue
-        target_obj = env.scene[target_name]
-        print(f"\n[{target_name.upper()}] Prim path: {target_obj.cfg.prim_path}")
-        print(f"  Scene object type: {type(target_obj).__name__}")
-        has_physx_view = hasattr(target_obj, "root_physx_view") and target_obj.root_physx_view is not None
-        if has_physx_view:
-            masses = target_obj.root_physx_view.get_masses()
-            print(f"  Mass (runtime): {masses[0] if len(masses) > 0 else 'N/A'} kg")
-            print(f"  Mass (from config): {target_obj.cfg.spawn.mass_props.mass if hasattr(target_obj.cfg.spawn, 'mass_props') and target_obj.cfg.spawn.mass_props else 'Not set in config'} kg")
-            try:
-                materials = target_obj.root_physx_view.get_material_properties()
-                if materials is not None and len(materials) > 0:
-                    mat = materials[0]
-                    print(f"  Static friction (from PhysX): {mat[0].item()}")
-                    print(f"  Dynamic friction (from PhysX): {mat[1].item()}")
-                    print(f"  Restitution (from PhysX): {mat[2].item()}")
-                else:
-                    print(f"  Material properties: Unable to retrieve via PhysX view API")
-            except Exception as e:
-                print(f"  Material properties: Unable to retrieve ({e})")
-        else:
-            print("  Runtime mass/material inspection skipped (no root_physx_view)")
-        if hasattr(target_obj.cfg, "spawn") and hasattr(target_obj.cfg.spawn, "rigid_props") and target_obj.cfg.spawn.rigid_props:
-            print(f"  Gravity disabled: {target_obj.cfg.spawn.rigid_props.disable_gravity}")
-        break
 
     # --- set default viewport camera to first-person view (GUI only) ---
     try:
@@ -393,6 +402,15 @@ def main():
         return
     print("========= create image server success =========")
 
+    try:
+        video_output_path = _make_replay_video_path(args_cli)
+        video_recorder = SimpleVideoRecorder(str(video_output_path), fps=args_cli.video_fps)
+        print(f"[sim_main_replay] Replay video will be saved to: {video_output_path}")
+    except Exception as e:
+        print(f"[sim_main_replay] Failed to initialize replay video recorder: {e}")
+        video_recorder = None
+        video_output_path = None
+
     # create replay action provider
     print(f"\ncreate replay action provider...")
     try:
@@ -402,22 +420,11 @@ def main():
         print(f"Failed to create replay action provider: {e}")
         return
 
-    # CRITICAL: Set initial state BEFORE simulation starts
-    # This must be done after creating action provider but before starting control loop
     print(f"\n" + "="*60)
-    print("Setting initial state from Frame 0")
+    print("Replay Initialization Check")
     print("="*60)
-    try:
-        # Simply set the initial state - do NOT call env.reset() after this!
-        # env.reset() would overwrite our carefully set initial state
-        # action_provider.set_initial_state_before_simulation()
-        print(f"✅ Initial state set successfully")
-
-    except Exception as e:
-        print(f"❌ Failed to set initial state: {e}")
-        import traceback
-        traceback.print_exc()
-        return
+    print("Replaying from the task's normal reset state.")
+    print("Frame 0 is not written back to simulation; startup must match recording.")
     print("="*60 + "\n")
 
     # create controller
@@ -473,6 +480,7 @@ def main():
 
                     # execute control step
                     controller.step()
+                    _record_replay_video_frame(video_recorder, env)
 
                     # print statistics periodically
                     if current_time - last_stats_time >= args_cli.stats_interval:
@@ -519,6 +527,17 @@ def main():
     finally:
         # clean up resources
         print("\nclean up resources...")
+        if video_recorder is not None:
+            try:
+                video_recorder.save()
+                print(f"[sim_main_replay] Replay video saved: {video_output_path}")
+            except Exception as exc:
+                print(f"[sim_main_replay] Failed to save replay video: {exc}")
+            finally:
+                try:
+                    video_recorder.close()
+                except Exception:
+                    pass
         controller.cleanup()
 
         env.close()

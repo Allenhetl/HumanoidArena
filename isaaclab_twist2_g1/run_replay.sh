@@ -9,6 +9,9 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}" || exit 1
+
 # Check if replay file is provided
 if [ -z "$1" ]; then
     echo "Error: Replay file path is required"
@@ -23,6 +26,9 @@ fi
 REPLAY_FILE="$1"
 REPLAY_MODE="${2:-inference}"  # Default to inference mode
 LOOP_FLAG=""
+ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/twist2_default.yaml}"
+REPLAY_DEVICE="${REPLAY_DEVICE:-cpu}"
+REPLAY_VIDEO_SAVE_DIR="${REPLAY_VIDEO_SAVE_DIR:-/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/replay_videos}"
 
 # Check for --loop flag
 if [ "$3" == "--loop" ] || [ "$2" == "--loop" ]; then
@@ -45,8 +51,12 @@ echo "=========================================="
 echo "Starting Replay Simulation"
 echo "=========================================="
 echo "Replay file: $REPLAY_FILE"
+echo "Task: ${TASK_NAME:-will-resolve-from-file}"
 echo "Replay mode: $REPLAY_MODE"
 echo "Loop: ${LOOP_FLAG:-disabled}"
+echo "Env config YAML: $ENV_CONFIG_YAML"
+echo "Device: $REPLAY_DEVICE"
+echo "Replay video dir: $REPLAY_VIDEO_SAVE_DIR"
 echo "=========================================="
 
 # Random seed for reproducibility (set to fixed value for deterministic behavior)
@@ -55,8 +65,42 @@ echo "Random seed: $SEED"
 echo "=========================================="
 
 # Set environment variables
-export PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PROJECT_ROOT="${SCRIPT_DIR}"
 export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH}"
+
+if [ -z "${TASK_NAME:-}" ]; then
+    TASK_NAME="$(python - "$REPLAY_FILE" <<'PY'
+import sys
+import numpy as np
+
+replay_file = sys.argv[1]
+with np.load(replay_file, allow_pickle=True) as data:
+    task = data.get("task")
+    if task is None:
+        raise SystemExit("Replay file missing 'task' metadata")
+    if hasattr(task, "item"):
+        task = task.item()
+    print(task)
+PY
+)"
+fi
+
+if [ -z "${TASK_NAME}" ]; then
+    echo "Error: Failed to resolve task name from replay file"
+    exit 1
+fi
+
+echo "Detected replay task: $TASK_NAME"
+
+# Match the robot USD override used by run_twist2.sh.
+ROBOT_COLLIDER_MODE="${ROBOT_COLLIDER_MODE:-box}"
+if [ "${ROBOT_COLLIDER_MODE}" = "fourpoints" ]; then
+    export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/temp/g1_29dof_with_dex3_rev_1_0_fourpoints.usd"
+else
+    export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2.usd"
+fi
+echo "[robot_usd] mode=${ROBOT_COLLIDER_MODE}"
+echo "[robot_usd] path=${ROBOT_USD_OVERRIDE}"
 
 # Isaac Lab environment setup
 ISAACLAB_PATH="${ISAACLAB_PATH:-$HOME/.local/share/ov/pkg/isaac-sim-4.2.0}"
@@ -68,10 +112,11 @@ else
 fi
 
 # Launch replay simulation
-python sim_main_replay.py \
-    --device cuda:0 \
+python "${SCRIPT_DIR}/sim_main_replay.py" \
+    --device "${REPLAY_DEVICE}" \
     --enable_cameras \
-    --task Isaac-Move-Football-G129-Dex3-Wholebody \
+    --task "${TASK_NAME}" \
+    --env_config_yaml "${ENV_CONFIG_YAML}" \
     --robot_type g129 \
     --replay_file "$REPLAY_FILE" \
     --replay_mode "$REPLAY_MODE" \
@@ -82,7 +127,8 @@ python sim_main_replay.py \
     --image_zmq_port 5555 \
     --stats_interval 10.0 \
     --step_hz 50 \
-    --gravity_z -9.8 \
+    --replay_video_save_dir "${REPLAY_VIDEO_SAVE_DIR}" \
+    --video_fps 30 \
     --seed "${SEED}"
 
 echo ""

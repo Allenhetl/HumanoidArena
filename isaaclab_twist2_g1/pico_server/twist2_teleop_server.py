@@ -69,7 +69,11 @@ import redis
 from rich import print
 from general_motion_retargeting import XRobotStreamer
 
-from data_utils.params import DEFAULT_MIMIC_OBS, DEFAULT_HAND_POSE
+from data_utils.params import (
+    DEFAULT_HAND_POSE,
+    DEFAULT_MIMIC_OBS,
+    HAND_MOVEMENT_STEP,
+)
 from data_utils.rot_utils import euler_from_quaternion_np, quat_diff_np, quat_rotate_inverse_np
 from data_utils.fps_monitor import FPSMonitor
 
@@ -163,7 +167,7 @@ class StateMachine:
         self.hand_right_position = 0.0
         self.use_pinch = use_pinch
         # Hand control parameters
-        self.hand_movement_step = 0.05  # 5% movement per press/hold
+        self.hand_movement_step = HAND_MOVEMENT_STEP
 
         # Velocity commands from joystick
         self.velocity_commands = np.array([0.0, 0.0, 0.0])  # [vx, vy, vyaw]

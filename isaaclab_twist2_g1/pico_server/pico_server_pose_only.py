@@ -36,6 +36,11 @@ from pico_server.sonic_tools.trl.utils.torch_transform import (
     quaternion_to_angle_axis,
     quaternion_to_rotation_matrix,
 )
+from pico_server.data_utils.params import (
+    DEFAULT_HAND_POSE,
+    HAND_COMMAND_THRESHOLD,
+    HAND_MOVEMENT_STEP,
+)
 from pico_server.sonic_tools.utils.teleop.zmq.zmq_planner_sender import pack_pose_message
 
 try:
@@ -54,14 +59,6 @@ try:
     import redis
 except ImportError:
     redis = None
-
-try:
-    from pico_server.sonic_tools.utils.teleop.solver.hand.g1_gripper_ik_solver import (
-        G1GripperInverseKinematicsSolver,
-    )
-except ImportError:
-    print("Warning: G1GripperInverseKinematicsSolver not available.")
-    G1GripperInverseKinematicsSolver = None
 
 try:
     from pico_server.sonic_tools.utils.teleop.vis.vr3pt_pose_visualizer import VR3PtPoseVisualizer
@@ -104,6 +101,7 @@ SMPL_JOINT_ORDER_24 = [
 ]
 
 LEGACY_POSE_BATCH_REDIS_KEY = "sonic_pose_batch_unitree_g1_with_hands"
+HAND_POSE_ROBOT_NAME = "unitree_g1_with_hands"
 
 
 # SMPL joint offsets for coordinate frame alignment
@@ -461,30 +459,6 @@ def process_smpl_joints(body_pose, global_orient, transl):
     }
 
 
-def generate_finger_data(hand: str, trigger: float, grip: float) -> np.ndarray:
-    """
-    Generate finger position data from Pico controller button states.
-
-    Args:
-        hand: "left" or "right"
-        trigger: Trigger button value (0-1)
-        grip: Grip button value (0-1)
-
-    Returns:
-        Array of shape [25, 4, 4] representing fingertip positions
-    """
-    fingertips = np.zeros([25, 4, 4])
-
-    thumb = 0
-    middle = 10
-    # Control thumb based on shoulder button state (index 4 is thumb tip)
-    fingertips[4 + thumb, 0, 3] = 1.0  # open thumb
-    if trigger > 0.5:
-        fingertips[4 + middle, 0, 3] = 1.0  # close middle
-
-    return fingertips
-
-
 # Joystick deadzone threshold
 JOYSTICK_DEADZONE = 0.15
 
@@ -566,17 +540,6 @@ def compute_from_body_poses(parent_indices: list, device, body_poses_np: np.ndar
 #     body_poses = xrt.get_body_joints_pose()
 #     body_poses_np = np.array(body_poses)
 #     return compute_from_body_poses(parent_indices, device, body_poses_np)
-
-
-def init_hand_ik_solvers():
-    """Initialize hand IK solvers if available."""
-    if G1GripperInverseKinematicsSolver is not None:
-        left_solver = G1GripperInverseKinematicsSolver(side="left")
-        right_solver = G1GripperInverseKinematicsSolver(side="right")
-        print("Hand IK solvers initialized")
-        return left_solver, right_solver
-    print("Warning: Hand IK solvers not available")
-    return None, None
 
 
 def get_controller_inputs():
@@ -665,18 +628,42 @@ def get_abxy_buttons():
         return False, False, False, False
 
 
-def compute_hand_joints_from_inputs(
-    left_solver, right_solver, left_trigger, left_grip, right_trigger, right_grip
+def _update_hand_position(
+    position: float,
+    trigger: float,
+    grip: float,
+    movement_step: float = HAND_MOVEMENT_STEP,
+    threshold: float = HAND_COMMAND_THRESHOLD,
+) -> float:
+    """Update a latched hand-opening scalar to match twist2 semantics."""
+    if trigger > threshold:
+        return min(1.0, position + movement_step)
+    if grip > threshold:
+        return max(0.0, position - movement_step)
+    return position
+
+
+def _interpolate_hand_pose(
+    side: str,
+    position: float,
+    robot_name: str = HAND_POSE_ROBOT_NAME,
+) -> np.ndarray:
+    """Interpolate a 7-DoF hand target between the configured open/close poses."""
+    side_poses = DEFAULT_HAND_POSE[robot_name][side]
+    open_pose = side_poses["open"].astype(np.float32)
+    close_pose = side_poses["close"].astype(np.float32)
+    pose = open_pose + (close_pose - open_pose) * float(position)
+    return pose.astype(np.float32).reshape(1, -1)
+
+
+def compute_hand_joints_from_positions(
+    left_position: float,
+    right_position: float,
+    robot_name: str = HAND_POSE_ROBOT_NAME,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Compute left/right hand joints using IK solvers, or zeros if unavailable."""
-    if left_solver is not None and right_solver is not None:
-        left_finger_data = generate_finger_data("left", left_trigger, left_grip)
-        right_finger_data = generate_finger_data("right", right_trigger, right_grip)
-        left_hand_joints = left_solver({"position": left_finger_data})
-        right_hand_joints = right_solver({"position": right_finger_data})
-    else:
-        left_hand_joints = np.zeros((1, 7), dtype=np.float32)
-        right_hand_joints = np.zeros((1, 7), dtype=np.float32)
+    """Compute left/right hand targets from persistent open-close state."""
+    left_hand_joints = _interpolate_hand_pose("left", left_position, robot_name)
+    right_hand_joints = _interpolate_hand_pose("right", right_position, robot_name)
     return left_hand_joints, right_hand_joints
 
 
@@ -1169,7 +1156,6 @@ class PoseStreamer:
             os.makedirs(record_dir, exist_ok=True)
         self.record_idx = 0
 
-        self.left_hand_ik_solver, self.right_hand_ik_solver = init_hand_ik_solvers()
         self.parent_indices = [
             -1,
             0,
@@ -1221,6 +1207,10 @@ class PoseStreamer:
         self._recording_command = "start"
         self._recording_command_active_frames = 10
         self._recording_command_seq = 1
+        self.hand_pose_robot_name = HAND_POSE_ROBOT_NAME
+        self.hand_left_position = 0.0
+        self.hand_right_position = 0.0
+        self.hand_movement_step = HAND_MOVEMENT_STEP
 
         self.buffer_cleared = (
             True  # Start with buffer cleared - wait for full buffer before first send
@@ -1247,6 +1237,43 @@ class PoseStreamer:
         self._recording_command_active_frames = max(1, hold_frames)
         self._recording_command_seq += 1
         print(f"[{self.log_prefix}] recording command -> {command}")
+
+    def _update_hand_state(
+        self,
+        *,
+        left_trigger: float,
+        left_grip: float,
+        right_trigger: float,
+        right_grip: float,
+    ) -> None:
+        """Match twist2 hand behavior: close holds until an explicit open command arrives."""
+        prev_left = self.hand_left_position
+        prev_right = self.hand_right_position
+        self.hand_left_position = _update_hand_position(
+            self.hand_left_position,
+            left_trigger,
+            left_grip,
+            movement_step=self.hand_movement_step,
+        )
+        self.hand_right_position = _update_hand_position(
+            self.hand_right_position,
+            right_trigger,
+            right_grip,
+            movement_step=self.hand_movement_step,
+        )
+        if not np.isclose(prev_left, self.hand_left_position):
+            action = "closing" if self.hand_left_position > prev_left else "opening"
+            print(f"[{self.log_prefix}] Left hand {action}: {self.hand_left_position:.2f}")
+        if not np.isclose(prev_right, self.hand_right_position):
+            action = "closing" if self.hand_right_position > prev_right else "opening"
+            print(f"[{self.log_prefix}] Right hand {action}: {self.hand_right_position:.2f}")
+
+    def _get_hand_joint_targets(self) -> tuple[np.ndarray, np.ndarray]:
+        return compute_hand_joints_from_positions(
+            self.hand_left_position,
+            self.hand_right_position,
+            robot_name=self.hand_pose_robot_name,
+        )
 
     def _current_recording_control(self, timestamp_ms: int) -> dict:
         if self._recording_command_active_frames > 0:
@@ -1417,14 +1444,13 @@ class PoseStreamer:
         elif reset_pressed:
             self._emit_recording_command("discard_and_reset")
 
-        left_hand_joints, right_hand_joints = compute_hand_joints_from_inputs(
-            self.left_hand_ik_solver,
-            self.right_hand_ik_solver,
-            left_trigger,
-            left_grip,
-            right_trigger,
-            right_grip,
+        self._update_hand_state(
+            left_trigger=left_trigger,
+            left_grip=left_grip,
+            right_trigger=right_trigger,
+            right_grip=right_grip,
         )
+        left_hand_joints, right_hand_joints = self._get_hand_joint_targets()
         smpl_pose_np = (
             latest_data["smpl_pose"].detach().cpu().numpy()[:, :63].reshape(-1, 21, 3)[0]
         ).astype(np.float32)

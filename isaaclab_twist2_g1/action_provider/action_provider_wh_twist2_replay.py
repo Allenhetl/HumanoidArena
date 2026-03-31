@@ -7,7 +7,6 @@ Based on action_provider_wh_twist2.py, replacing Redis data source with npz file
 """
 
 from action_provider.action_base import ActionProvider
-from action_provider.replay_debug_logger import ReplayDebugLogger
 from typing import Optional
 import torch
 import os
@@ -44,32 +43,8 @@ class ReplayActionProvider(ActionProvider):
         self.replay_file = args_cli.replay_file
         self.replay_mode = args_cli.replay_mode  # "inference" or "direct"
         self.replay_loop = args_cli.replay_loop
-
-        # Create debug log file
-        import datetime
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_dir = "./replay_debug_logs"
-        os.makedirs(log_dir, exist_ok=True)
-        replay_name = os.path.splitext(os.path.basename(self.replay_file))[0]
-        log_path = os.path.join(log_dir, f"replay_debug_{replay_name}_{timestamp}.log")
-        self._debug_log_file = open(log_path, 'w')
-        self._debug_log_file.write(f"=== Replay Debug Log ===\n")
-        self._debug_log_file.write(f"Replay file: {self.replay_file}\n")
-        self._debug_log_file.write(f"Replay mode: {self.replay_mode}\n")
-        self._debug_log_file.write(f"Log file: {log_path}\n\n")
-        self._debug_log_file.flush()
-        print(f"[{self.name}] Debug log enabled: {log_path}")
-
-        # Debug logging (enabled by default, can be disabled via args)
-        self.enable_debug_log = getattr(args_cli, 'enable_replay_debug_log', True)
-        if self.enable_debug_log:
-            log_dir = getattr(args_cli, 'replay_debug_log_dir', './replay_debug_logs')
-            log_name = os.path.splitext(os.path.basename(self.replay_file))[0]
-            self.debug_logger = ReplayDebugLogger(log_dir=log_dir, log_name=log_name)
-            print(f"[{self.name}] Debug logging enabled: {log_dir}/{log_name}")
-        else:
-            self.debug_logger = None
-            print(f"[{self.name}] Debug logging disabled")
+        self.enable_dex3_replay = False
+        self._initial_state_compared = False
 
         # Validate replay file
         if not os.path.exists(self.replay_file):
@@ -171,6 +146,16 @@ class ReplayActionProvider(ActionProvider):
             self.replay_data_obs = None
             print(f"[{self.name}] Warning: No observation data found in replay file")
 
+        if 'human_hand_left' in data and 'human_hand_right' in data:
+            self.replay_data_hand_left = data['human_hand_left']  # [N, 7]
+            self.replay_data_hand_right = data['human_hand_right']  # [N, 7]
+            print(f"[{self.name}] Loaded left hand data: {self.replay_data_hand_left.shape}")
+            print(f"[{self.name}] Loaded right hand data: {self.replay_data_hand_right.shape}")
+        else:
+            self.replay_data_hand_left = None
+            self.replay_data_hand_right = None
+            print(f"[{self.name}] No recorded hand data found in replay file")
+
         # Load qpos data (for direct mode)
         # Use twist2_inference_qpos which is the ONNX output (target positions for PD controller)
         # This is: target_29 = raw_action * 0.5 + default_pos (after clip)
@@ -232,6 +217,16 @@ class ReplayActionProvider(ActionProvider):
             print(f"[{self.name}] ⚠️ WARNING: No joint velocity data found!")
             self.replay_data_qvel = None
 
+        if 'env_obj_football_position' in data:
+            self.replay_data_football_pos = data['env_obj_football_position']
+            self.replay_data_football_lin_vel = data.get('env_obj_football_linear_velocity')
+            self.replay_data_football_ang_vel = data.get('env_obj_football_angular_velocity')
+            print(f"[{self.name}] Loaded football state: {self.replay_data_football_pos.shape}")
+        else:
+            self.replay_data_football_pos = None
+            self.replay_data_football_lin_vel = None
+            self.replay_data_football_ang_vel = None
+
         # Load physics state data (for analysis, not for writing back)
         if 'robot_applied_torque_before_decimation' in data:
             self.replay_data_applied_torque = data['robot_applied_torque_before_decimation']  # [N, 29]
@@ -264,7 +259,6 @@ class ReplayActionProvider(ActionProvider):
         try:
             # Create ONNX runtime session
             sess_options = ort.SessionOptions()
-            sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
             # Configure for deterministic inference if seed is set
             if self.onnx_seed is not None:
@@ -273,16 +267,16 @@ class ReplayActionProvider(ActionProvider):
                 sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
                 print(f"[{self.name}] ONNX Runtime configured for deterministic inference (seed={self.onnx_seed})")
 
-            # Check available providers and use CUDA if available
+            # Match TWIST2 recording path: prefer CUDA whenever onnxruntime exposes it.
             available_providers = ort.get_available_providers()
             print(f"[{self.name}] Available ONNX providers: {available_providers}")
 
-            if 'CUDAExecutionProvider' in available_providers:
-                providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+            if "CUDAExecutionProvider" in available_providers:
+                providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
                 print(f"[{self.name}] Using CUDAExecutionProvider")
             else:
-                providers = ['CPUExecutionProvider']
-                print(f"[{self.name}] CUDA not available, using CPUExecutionProvider")
+                providers = ["CPUExecutionProvider"]
+                print(f"[{self.name}] Using CPUExecutionProvider")
 
             self.policy = ort.InferenceSession(
                 self.policy_path,
@@ -349,10 +343,157 @@ class ReplayActionProvider(ActionProvider):
         # Get default joint positions (keep [1, 29] shape like recording script)
         self.twist2_default_pos = self.env.scene["robot"].data.default_joint_pos[:, self.twist2_action_indices]
 
+        self.left_hand_joint_mapping = {
+            "left_hand_thumb_0_joint": 0,
+            "left_hand_thumb_1_joint": 1,
+            "left_hand_thumb_2_joint": 2,
+            "left_hand_middle_0_joint": 3,
+            "left_hand_middle_1_joint": 4,
+            "left_hand_index_0_joint": 5,
+            "left_hand_index_1_joint": 6,
+        }
+        self.right_hand_joint_mapping = {
+            "right_hand_thumb_0_joint": 0,
+            "right_hand_thumb_1_joint": 1,
+            "right_hand_thumb_2_joint": 2,
+            "right_hand_middle_0_joint": 3,
+            "right_hand_middle_1_joint": 4,
+            "right_hand_index_0_joint": 5,
+            "right_hand_index_1_joint": 6,
+        }
+
+        left_hand_missing = [n for n in self.left_hand_joint_mapping if n not in self.joint_to_index]
+        right_hand_missing = [n for n in self.right_hand_joint_mapping if n not in self.joint_to_index]
+        if (
+            self.replay_data_hand_left is not None
+            and self.replay_data_hand_right is not None
+            and not left_hand_missing
+            and not right_hand_missing
+        ):
+            self._left_hand_target_indices = [
+                self.joint_to_index[name] for name in self.left_hand_joint_mapping.keys()
+            ]
+            self._left_hand_source_indices = [idx for idx in self.left_hand_joint_mapping.values()]
+            self._right_hand_target_indices = [
+                self.joint_to_index[name] for name in self.right_hand_joint_mapping.keys()
+            ]
+            self._right_hand_source_indices = [idx for idx in self.right_hand_joint_mapping.values()]
+            self._left_hand_target_idx_t = torch.tensor(
+                self._left_hand_target_indices, dtype=torch.long, device=self.env.device
+            )
+            self._left_hand_source_idx_t = torch.tensor(
+                self._left_hand_source_indices, dtype=torch.long, device=self.env.device
+            )
+            self._right_hand_target_idx_t = torch.tensor(
+                self._right_hand_target_indices, dtype=torch.long, device=self.env.device
+            )
+            self._right_hand_source_idx_t = torch.tensor(
+                self._right_hand_source_indices, dtype=torch.long, device=self.env.device
+            )
+            self._left_hand_buf = torch.empty(
+                len(self._left_hand_source_indices), device=self.env.device, dtype=torch.float32
+            )
+            self._right_hand_buf = torch.empty(
+                len(self._right_hand_source_indices), device=self.env.device, dtype=torch.float32
+            )
+            self.enable_dex3_replay = True
+            print(f"[{self.name}] Dex3 hand replay enabled")
+        elif self.replay_data_hand_left is not None or self.replay_data_hand_right is not None:
+            print(
+                f"[{self.name}] Dex3 hand replay disabled: "
+                f"missing left joints={left_hand_missing}, missing right joints={right_hand_missing}"
+            )
+
         print(f"[{self.name}] Joint mapping setup complete (29 DOF)")
         print(f"[{self.name}] Joint order: {self.twist2_action_joint_names[:5]}... (showing first 5)")
         print(f"[{self.name}] Isaac indices: {self.twist2_action_indices[:5]}... (showing first 5)")
         print(f"[{self.name}] Default pos shape: {self.twist2_default_pos.shape}")
+
+    def _apply_recorded_hand_action(self, full_action: torch.Tensor, frame_idx: int) -> None:
+        if not self.enable_dex3_replay:
+            return
+
+        self._left_hand_buf.copy_(
+            torch.from_numpy(self.replay_data_hand_left[frame_idx]).to(self.env.device, dtype=torch.float32)
+        )
+        self._right_hand_buf.copy_(
+            torch.from_numpy(self.replay_data_hand_right[frame_idx]).to(self.env.device, dtype=torch.float32)
+        )
+        left_vals = self._left_hand_buf.index_select(0, self._left_hand_source_idx_t)
+        right_vals = self._right_hand_buf.index_select(0, self._right_hand_source_idx_t)
+        full_action.index_copy_(0, self._left_hand_target_idx_t, left_vals)
+        full_action.index_copy_(0, self._right_hand_target_idx_t, right_vals)
+
+    def _log_initial_state_comparison(self) -> None:
+        if self._initial_state_compared:
+            return
+        self._initial_state_compared = True
+
+        print(f"\n[{self.name}] ========== INITIAL STATE COMPARISON (Frame 0, pre-action) ==========")
+        try:
+            robot = self.env.scene["robot"]
+            root_state = robot.data.root_state_w[0]
+            joint_pos = robot.data.joint_pos[0, self.twist2_action_indices].cpu().numpy()
+            joint_vel = robot.data.joint_vel[0, self.twist2_action_indices].cpu().numpy()
+
+            root_pos = root_state[0:3].cpu().numpy()
+            root_quat = root_state[3:7].cpu().numpy()
+            root_lin_vel = root_state[7:10].cpu().numpy()
+            root_ang_vel = root_state[10:13].cpu().numpy()
+
+            expected_joint_pos = self.replay_data_qpos_actual[0] if self.replay_data_qpos_actual is not None else self.replay_data_qpos[0]
+            asset_msg = f"[{self.name}] Asset state: joint_pos_err={np.linalg.norm(joint_pos - expected_joint_pos):.6f} rad"
+            if self.replay_data_root_pos is not None:
+                asset_msg += f", root_pos_err={np.linalg.norm(root_pos - self.replay_data_root_pos[0]):.6f} m"
+            if self.replay_data_root_quat is not None:
+                asset_msg += f", root_quat_err={np.linalg.norm(root_quat - self.replay_data_root_quat[0]):.6f}"
+            print(asset_msg)
+            if (
+                self.replay_data_qvel is not None
+                and self.replay_data_root_lin_vel is not None
+                and self.replay_data_root_ang_vel is not None
+            ):
+                print(
+                    f"[{self.name}] PhysX state:"
+                    f" joint_vel_err={np.linalg.norm(joint_vel - self.replay_data_qvel[0]):.6f} rad/s,"
+                    f" root_lin_vel_err={np.linalg.norm(root_lin_vel - self.replay_data_root_lin_vel[0]):.6f} m/s,"
+                    f" root_ang_vel_err={np.linalg.norm(root_ang_vel - self.replay_data_root_ang_vel[0]):.6f} rad/s"
+                )
+
+            if (
+                self.replay_data_football_pos is not None
+                and self.replay_data_football_lin_vel is not None
+                and self.replay_data_football_ang_vel is not None
+                and "object" in self.env.scene.keys()
+            ):
+                football = self.env.scene["object"]
+                football_state = football.data.root_state_w[0]
+                football_pos = football_state[0:3].cpu().numpy()
+                football_lin_vel = football_state[7:10].cpu().numpy()
+                football_ang_vel = football_state[10:13].cpu().numpy()
+                print(
+                    f"[{self.name}] Football asset state:"
+                    f" pos_err={np.linalg.norm(football_pos - self.replay_data_football_pos[0]):.6f} m,"
+                    f" lin_vel_err={np.linalg.norm(football_lin_vel - self.replay_data_football_lin_vel[0]):.6f} m/s,"
+                    f" ang_vel_err={np.linalg.norm(football_ang_vel - self.replay_data_football_ang_vel[0]):.6f} rad/s"
+                )
+
+            if self._enable_torque_analysis and self.replay_data_applied_torque is not None:
+                replay_torque = robot.data.applied_torque[0, self.twist2_action_indices].cpu().numpy()
+                print(
+                    f"[{self.name}] PhysX actuator state:"
+                    f" applied_torque_err={np.linalg.norm(replay_torque - self.replay_data_applied_torque[0]):.6f} Nm"
+                )
+
+            if self._enable_contact_analysis and self.replay_data_contact_forces is not None:
+                replay_contact = robot.data.body_net_contact_force_w[0].cpu().numpy()
+                print(
+                    f"[{self.name}] PhysX contact state:"
+                    f" body_contact_err={np.linalg.norm(replay_contact - self.replay_data_contact_forces[0]):.6f} N"
+                )
+        except Exception as exc:
+            print(f"[{self.name}] Initial state comparison failed: {exc}")
+        print(f"[{self.name}] ===============================================================\n")
 
     # def set_initial_state_before_simulation(self, force=False):
     #     """Set initial state from Frame 0 BEFORE simulation starts
@@ -561,6 +702,7 @@ class ReplayActionProvider(ActionProvider):
             # CRITICAL: First call (current_frame == 0) applies Frame 0 action (ONNX output)
             # This matches the recording flow and transitions state from Frame 0 to Frame 1
             if self.current_frame == 0:
+                self._log_initial_state_comparison()
                 print(f"\n[{self.name}] ========== FIRST get_action() CALL: Applying Frame 0 Action ==========")
                 print(f"[{self.name}] Applying Frame 0 action (ONNX output) to match recording flow")
                 print(f"[{self.name}] After decimation loop, state should transition to Frame 1")
@@ -577,6 +719,7 @@ class ReplayActionProvider(ActionProvider):
                 full_action.copy_(self.env.scene["robot"].data.default_joint_pos.squeeze(0))
                 full_action.index_copy_(0, torch.tensor(self.twist2_action_indices, device=self.env.device,
                                                         dtype=torch.long), target_29.squeeze(0))
+                self._apply_recorded_hand_action(full_action, 0)
 
                 # Run decimation loop to stabilize Frame 0 state
                 for i in range(self._twist2_decimation):
@@ -636,13 +779,6 @@ class ReplayActionProvider(ActionProvider):
 
             # Check if replay finished
             if self.current_frame >= self.total_frames:
-                # Save debug data immediately when replay completes
-                if self.debug_logger is not None:
-                    print(f"[{self.name}] Replay completed, saving debug logs...")
-                    self.debug_logger.close()
-                    self.debug_logger = None
-                    print(f"[{self.name}] ✅ Debug logs saved successfully")
-
                 if self.replay_loop:
                     print(f"[{self.name}] Replay finished, looping back to frame 1")
                     self.current_frame = 1  # Loop back to frame 1 (frame 0 is initialization)
@@ -651,11 +787,6 @@ class ReplayActionProvider(ActionProvider):
                 else:
                     print(f"[{self.name}] Replay finished")
                     return None
-
-            # CRITICAL: Log state comparison BEFORE decimation loop
-            # This matches the recording flow where state is captured before decimation
-            if self.debug_logger is not None and self.current_frame >= 1:
-                self._log_state_comparison(self.current_frame)
 
             # Monitor root movement and detect potential falls
             if self.current_frame > 0 and self.current_frame % 10 == 0:
@@ -686,15 +817,6 @@ class ReplayActionProvider(ActionProvider):
             full_action = self._full_action_buf
             full_action.zero_()
 
-            # Debug logging: log first 3 frames to file
-            robot = self.env.scene["robot"]
-            if self.current_frame <= 2:
-                self._debug_log_file.write(f'\n=== Replay Frame {self.current_frame} START ===\n')
-                self._debug_log_file.write(f'  Before action:\n')
-                self._debug_log_file.write(f'    joint_pos (first 5): {robot.data.joint_pos[0, self.twist2_action_indices[:5]]}\n')
-                self._debug_log_file.write(f'    joint_vel (first 5): {robot.data.joint_vel[0, self.twist2_action_indices[:5]]}\n')
-                self._debug_log_file.flush()
-
             # 1. Get action based on replay mode
             if self.replay_mode == "inference":
                 # Inference mode: use recorded observation directly for ONNX inference
@@ -710,21 +832,9 @@ class ReplayActionProvider(ActionProvider):
                 ort_outputs = self.policy.run(None, ort_inputs)
                 action_data = torch.from_numpy(ort_outputs[0])  # [1, 29] - raw ONNX output
 
-                # Debug logging: log inference results to file
-                if self.current_frame <= 2:
-                    self._debug_log_file.write(f'  Inference mode:\n')
-                    self._debug_log_file.write(f'    obs_tensor (first 10): {obs_tensor[0, :10]}\n')
-                    self._debug_log_file.write(f'    action_data (first 5): {action_data[0, :5]}\n')
-                    self._debug_log_file.flush()
-
                 # 2. Action preparation (same as original)
                 raw_action = torch.clip(action_data.to(self.env.device, dtype=torch.float32), -10.0, 10.0)
                 target_29 = raw_action * 0.5 + self.twist2_default_pos  # [1,29]
-
-                # Debug logging: log target_29 to file
-                if self.current_frame <= 2:
-                    self._debug_log_file.write(f'    target_29 (first 5): {target_29[0, :5]}\n')
-                    self._debug_log_file.flush()
 
                 # Debug: Print action statistics
                 if self.current_frame % 100 == 0:
@@ -732,17 +842,9 @@ class ReplayActionProvider(ActionProvider):
                     print(f"  raw_action range: [{raw_action.min():.4f}, {raw_action.max():.4f}]")
                     print(f"  target_29 range: [{target_29.min():.4f}, {target_29.max():.4f}]")
             else:
-                # Direct mode: use recorded ACTUAL positions (qpos_before_decimation)
-                # These are the actual joint positions after physics simulation, not target positions
-                # This ensures consistency with the recorded observations
+                # Direct mode: use the recorded TWIST2 target positions that were sent to PD.
                 target_29 = torch.from_numpy(self.replay_data_qpos[self.current_frame]).unsqueeze(0).to(
                     self.env.device, dtype=torch.float32)  # [1, 29]
-
-                # Debug logging: log direct mode action to file
-                if self.current_frame <= 2:
-                    self._debug_log_file.write(f'  Direct mode:\n')
-                    self._debug_log_file.write(f'    target_29 (first 5): {target_29[0, :5]}\n')
-                    self._debug_log_file.flush()
 
             # Progress reporting with detailed debug info
             if self.current_frame % 100 == 0:
@@ -766,6 +868,7 @@ class ReplayActionProvider(ActionProvider):
             # Overwrite the 29 controlled joints
             full_action.index_copy_(0, torch.tensor(self.twist2_action_indices, device=self.env.device,
                                                     dtype=torch.long), target_29.squeeze(0))
+            self._apply_recorded_hand_action(full_action, self.current_frame)
 
             # Note: We don't set root state for frames > 0
             # The initial state (frame 0) is set correctly, and physics evolves naturally
@@ -792,14 +895,6 @@ class ReplayActionProvider(ActionProvider):
 
             self._render_counter += 1
 
-            # Debug logging: log state after decimation to file
-            if self.current_frame <= 2:
-                self._debug_log_file.write(f'  After decimation:\n')
-                self._debug_log_file.write(f'    joint_pos (first 5): {robot.data.joint_pos[0, self.twist2_action_indices[:5]]}\n')
-                self._debug_log_file.write(f'    joint_vel (first 5): {robot.data.joint_vel[0, self.twist2_action_indices[:5]]}\n')
-                self._debug_log_file.write(f'=== Replay Frame {self.current_frame} END ===\n\n')
-                self._debug_log_file.flush()
-
             # 5. Physics state analysis (compare recording vs replay)
             self._analyze_physics_state(self.current_frame)
 
@@ -818,187 +913,6 @@ class ReplayActionProvider(ActionProvider):
             import traceback
             traceback.print_exc()
             return None
-
-    def _log_state_comparison(self, frame_idx: int):
-        """记录录制数据与仿真状态的对比
-
-        Args:
-            frame_idx: 当前帧索引
-        """
-        if frame_idx >= self.total_frames:
-            return
-
-        robot = self.env.scene["robot"]
-
-        # 获取仿真状态
-        sim_root_state = robot.data.root_state_w[0]  # [13]: pos(3) + quat(4) + lin_vel(3) + ang_vel(3)
-        sim_joint_pos = robot.data.joint_pos[0, self.twist2_action_indices]  # [29]
-        sim_joint_vel = robot.data.joint_vel[0, self.twist2_action_indices]  # [29]
-        sim_applied_torque = robot.data.applied_torque[0, self.twist2_action_indices]  # [29]
-
-        # 准备仿真数据字典
-        simulated = {
-            'root_pos': sim_root_state[:3],
-            'root_quat': sim_root_state[3:7],  # (w,x,y,z)
-            'root_lin_vel': sim_root_state[7:10],
-            'root_ang_vel': sim_root_state[10:13],
-            'joint_pos': sim_joint_pos,
-            'joint_vel': sim_joint_vel,
-            'applied_torque': sim_applied_torque
-        }
-
-        # 准备录制数据字典
-        # CRITICAL: Use actual positions (qpos_actual) for comparison, not target positions (qpos)
-        recorded = {
-            'root_pos': torch.from_numpy(self.replay_data_root_pos[frame_idx]).to(self.env.device),
-            'root_quat': torch.from_numpy(self.replay_data_root_quat[frame_idx]).to(self.env.device),
-        }
-
-        # Use actual joint positions for comparison (not target positions)
-        if self.replay_data_qpos_actual is not None:
-            recorded['joint_pos'] = torch.from_numpy(self.replay_data_qpos_actual[frame_idx]).to(self.env.device)
-        elif self.replay_data_qpos is not None:
-            # Fallback to target positions if actual not available (will show larger errors)
-            recorded['joint_pos'] = torch.from_numpy(self.replay_data_qpos[frame_idx]).to(self.env.device)
-            if frame_idx == 1:  # Warn only once
-                print(f"[{self.name}] ⚠️  WARNING: Using target positions (qpos) for comparison - actual positions not available")
-
-        # 添加速度数据（如果有）
-        if self.replay_data_root_lin_vel is not None:
-            recorded['root_lin_vel'] = torch.from_numpy(self.replay_data_root_lin_vel[frame_idx]).to(self.env.device)
-        else:
-            recorded['root_lin_vel'] = torch.zeros(3, device=self.env.device)
-
-        if self.replay_data_root_ang_vel is not None:
-            recorded['root_ang_vel'] = torch.from_numpy(self.replay_data_root_ang_vel[frame_idx]).to(self.env.device)
-        else:
-            recorded['root_ang_vel'] = torch.zeros(3, device=self.env.device)
-
-        if self.replay_data_qvel is not None:
-            recorded['joint_vel'] = torch.from_numpy(self.replay_data_qvel[frame_idx]).to(self.env.device)
-        else:
-            recorded['joint_vel'] = torch.zeros(29, device=self.env.device)
-
-        # 添加力矩数据（如果有）
-        if self.replay_data_applied_torque is not None:
-            recorded['applied_torque'] = torch.from_numpy(self.replay_data_applied_torque[frame_idx]).to(self.env.device)
-        else:
-            recorded['applied_torque'] = torch.zeros(29, device=self.env.device)
-
-        # 记录到日志
-        self.debug_logger.log_frame(frame_idx, recorded, simulated)
-
-    def _log_initial_state_verification(self):
-        """读取并记录初始化后的实际状态，用于验证初始化是否正确"""
-        import os
-        from datetime import datetime
-
-        robot = self.env.scene["robot"]
-
-        # 读取实际状态
-        actual_root_state = robot.data.root_state_w[0]  # [13]
-        actual_joint_pos = robot.data.joint_pos[0, self.twist2_action_indices]  # [29]
-        actual_joint_vel = robot.data.joint_vel[0, self.twist2_action_indices]  # [29]
-
-        # 转换为numpy
-        actual_root_pos = actual_root_state[:3].cpu().numpy()
-        actual_root_quat = actual_root_state[3:7].cpu().numpy()
-        actual_root_lin_vel = actual_root_state[7:10].cpu().numpy()
-        actual_root_ang_vel = actual_root_state[10:13].cpu().numpy()
-        actual_joint_pos_np = actual_joint_pos.cpu().numpy()
-        actual_joint_vel_np = actual_joint_vel.cpu().numpy()
-
-        # 创建日志目录
-        log_dir = './replay_debug_logs'
-        os.makedirs(log_dir, exist_ok=True)
-
-        # 生成日志文件名
-        log_name = os.path.splitext(os.path.basename(self.replay_file))[0]
-        log_file = os.path.join(log_dir, f"{log_name}_initial_state_verification.txt")
-
-        # 写入日志
-        with open(log_file, 'w') as f:
-            f.write("=" * 80 + "\n")
-            f.write("Initial State Verification - 初始化后的实际状态\n")
-            f.write(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write("=" * 80 + "\n\n")
-
-            # 预期状态（Frame 0录制数据）
-            f.write("【预期状态 - Frame 0录制数据】\n")
-            f.write("-" * 80 + "\n")
-            if self.replay_data_root_pos is not None:
-                f.write(f"Root Position:    {self.replay_data_root_pos[0]}\n")
-            if self.replay_data_root_quat is not None:
-                f.write(f"Root Quaternion:  {self.replay_data_root_quat[0]}\n")
-            if self.replay_data_root_lin_vel is not None:
-                f.write(f"Root Lin Vel:     {self.replay_data_root_lin_vel[0]}\n")
-            if self.replay_data_root_ang_vel is not None:
-                f.write(f"Root Ang Vel:     {self.replay_data_root_ang_vel[0]}\n")
-            if self.replay_data_qpos_actual is not None:
-                f.write(f"Joint Pos (前5个): {self.replay_data_qpos_actual[0][:5]}\n")
-                f.write(f"Joint Pos (全部):  {self.replay_data_qpos_actual[0]}\n")
-            if self.replay_data_qvel is not None:
-                f.write(f"Joint Vel (前5个): {self.replay_data_qvel[0][:5]}\n")
-                f.write(f"Joint Vel (全部):  {self.replay_data_qvel[0]}\n")
-
-            # 实际状态（初始化后读取）
-            f.write("\n【实际状态 - 初始化后读取】\n")
-            f.write("-" * 80 + "\n")
-            f.write(f"Root Position:    {actual_root_pos}\n")
-            f.write(f"Root Quaternion:  {actual_root_quat}\n")
-            f.write(f"Root Lin Vel:     {actual_root_lin_vel}\n")
-            f.write(f"Root Ang Vel:     {actual_root_ang_vel}\n")
-            f.write(f"Joint Pos (前5个): {actual_joint_pos_np[:5]}\n")
-            f.write(f"Joint Pos (全部):  {actual_joint_pos_np}\n")
-            f.write(f"Joint Vel (前5个): {actual_joint_vel_np[:5]}\n")
-            f.write(f"Joint Vel (全部):  {actual_joint_vel_np}\n")
-
-            # 误差分析
-            f.write("\n【误差分析】\n")
-            f.write("-" * 80 + "\n")
-            if self.replay_data_root_pos is not None:
-                pos_error = np.linalg.norm(actual_root_pos - self.replay_data_root_pos[0])
-                f.write(f"Root Position Error (L2):    {pos_error:.6f} m\n")
-
-            if self.replay_data_root_quat is not None:
-                quat_error = np.linalg.norm(actual_root_quat - self.replay_data_root_quat[0])
-                f.write(f"Root Quaternion Error (L2):  {quat_error:.6f}\n")
-
-            if self.replay_data_root_lin_vel is not None:
-                lin_vel_error = np.linalg.norm(actual_root_lin_vel - self.replay_data_root_lin_vel[0])
-                f.write(f"Root Lin Vel Error (L2):     {lin_vel_error:.6f} m/s\n")
-
-            if self.replay_data_root_ang_vel is not None:
-                ang_vel_error = np.linalg.norm(actual_root_ang_vel - self.replay_data_root_ang_vel[0])
-                f.write(f"Root Ang Vel Error (L2):     {ang_vel_error:.6f} rad/s\n")
-
-            if self.replay_data_qpos_actual is not None:
-                joint_pos_error = np.linalg.norm(actual_joint_pos_np - self.replay_data_qpos_actual[0])
-                joint_pos_max_error = np.max(np.abs(actual_joint_pos_np - self.replay_data_qpos_actual[0]))
-                max_error_idx = np.argmax(np.abs(actual_joint_pos_np - self.replay_data_qpos_actual[0]))
-                f.write(f"Joint Position Error (L2):   {joint_pos_error:.6f} rad\n")
-                f.write(f"Joint Position Error (Max):  {joint_pos_max_error:.6f} rad (joint {max_error_idx})\n")
-
-            if self.replay_data_qvel is not None:
-                joint_vel_error = np.linalg.norm(actual_joint_vel_np - self.replay_data_qvel[0])
-                joint_vel_max_error = np.max(np.abs(actual_joint_vel_np - self.replay_data_qvel[0]))
-                max_vel_error_idx = np.argmax(np.abs(actual_joint_vel_np - self.replay_data_qvel[0]))
-                f.write(f"Joint Velocity Error (L2):   {joint_vel_error:.6f} rad/s\n")
-                f.write(f"Joint Velocity Error (Max):  {joint_vel_max_error:.6f} rad/s (joint {max_vel_error_idx})\n")
-
-            # 逐关节对比（前5个）
-            f.write("\n【逐关节对比 (前5个关节)】\n")
-            f.write("-" * 80 + "\n")
-            if self.replay_data_qpos_actual is not None:
-                for i in range(min(5, len(actual_joint_pos_np))):
-                    expected = self.replay_data_qpos_actual[0][i]
-                    actual = actual_joint_pos_np[i]
-                    error = actual - expected
-                    f.write(f"Joint {i}: 预期={expected:8.5f}, 实际={actual:8.5f}, 误差={error:8.5f} rad\n")
-
-            f.write("\n" + "=" * 80 + "\n")
-
-        print(f"[{self.name}]   📝 Initial state verification saved to: {log_file}")
 
     def _analyze_physics_state(self, frame_idx: int):
         """Analyze physics state differences between recording and replay
@@ -1093,17 +1007,5 @@ class ReplayActionProvider(ActionProvider):
     def cleanup(self):
         """Cleanup resources"""
         print(f"[{self.name}] Cleaning up replay action provider")
-
-        # Close debug log file
-        if hasattr(self, '_debug_log_file') and self._debug_log_file is not None:
-            print(f"[{self.name}] Closing debug log file...")
-            self._debug_log_file.close()
-            self._debug_log_file = None
-
-        # Close debug logger (if not already closed)
-        if self.debug_logger is not None:
-            print(f"[{self.name}] Saving debug logs in cleanup...")
-            self.debug_logger.close()
-            self.debug_logger = None
 
         super().cleanup()

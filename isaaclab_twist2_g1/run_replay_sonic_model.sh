@@ -17,10 +17,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RECORDING_DIR="${SCRIPT_DIR}/recording_data_for_debug"
-
+SONIC_ENCODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_encoder.onnx"
+SONIC_DECODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_decoder.onnx"
 # 选择 npz（默认使用固定的调试 npz 文件，也可通过参数覆盖）
 # DEFAULT_NPZ="/home/dreams/Users/Alyssa/HumanoidArena/isaaclab_twist2_g1/recording_data_for_debug/Isaac-Move-Football-G129-Dex3-Wholebody_smpl_Left_Shoulder_global_0_to_-3_to_0_aggressive.npz"
-DEFAULT_NPZ="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/former/Isaac-Move-Football-G129-Dex3-Wholebody_1773495310633878.npz"
+DEFAULT_NPZ="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1774938918568189.npz"
 NPZ="${1:-$DEFAULT_NPZ}"
 if [ -z "$NPZ" ]; then
   echo "Error: NPZ path is empty"
@@ -146,10 +147,10 @@ ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/sonic_default.yaml}"
 } | tee -a "$SIM_LOG"
 
 "$PYTHON_BIN" sim_main.py \
-  --device cuda \
+  --device cpu \
   --enable_cameras \
   --env_config_yaml "$ENV_CONFIG_YAML" \
-  --task Isaac-Move-Football-G129-Dex3-Wholebody \
+  --task Isaac-Move-Football-Single-G129-Dex3-Wholebody \
   --robot_type g129 \
   --enable_dex3_dds \
   --action_source sonic_wholebody \
