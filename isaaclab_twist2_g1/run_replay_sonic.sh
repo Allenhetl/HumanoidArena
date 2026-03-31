@@ -1,112 +1,86 @@
 #!/usr/bin/env bash
-# run_replay_sonic_model.sh - 在 IsaacLab 中直接用 SONIC 录制数据回放
-#
-# 说明：
-# - direct_replay：直接执行录制里保存的 SONIC 29DOF target
-# - inference_replay：从录制的 SONIC pose 数据重跑 encoder+decoder，再执行新推理结果
-# - 整个 replay 流程都在对应 action provider 内部完成，不再启动外部 ZMQ/Redis replay server
-#
-# 用法：
-#   bash run_replay_sonic_model.sh [npz_path] [direct_replay|inference_replay] [--loop]
-#
-# 示例：
-#   bash run_replay_sonic_model.sh
-#   bash run_replay_sonic_model.sh ./recording_data/sonic/tw/foo.npz direct_replay
-#   bash run_replay_sonic_model.sh ./recording_data/sonic/tw/foo.npz inference_replay --loop
-
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}" || exit 1
+
+# ------------------------------------------------------------------
+# User config: edit here
+# ------------------------------------------------------------------
+PYTHON_BIN="python"
+DEFAULT_ISAACLAB_PY="/home/dreams/miniconda3/envs/env_isaaclab_510_yb/bin/python"
+REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1774962608663017.npz"
+REPLAY_MODE="inference_replay"   # inference_replay | direct_replay
+REPLAY_LOOP=0                    # 1 | 0
+TASK_NAME=""                     # 留空则从 replay 文件读取
+ENV_CONFIG_YAML="tasks/common_env_config/sonic_default.yaml"
+RUN_DEVICE="cpu"
+ROBOT_TYPE="g129"
+ROBOT_COLLIDER_MODE="box"        # box | fourpoints
+ENABLE_CAMERAS=1
+ENABLE_DEX3_DDS=1
+HEADLESS=1
 SONIC_ENCODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_encoder.onnx"
 SONIC_DECODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_decoder.onnx"
-# 选择 npz（默认使用固定的调试 npz 文件，也可通过参数覆盖）
-# DEFAULT_NPZ="/home/dreams/Users/Alyssa/HumanoidArena/isaaclab_twist2_g1/recording_data_for_debug/Isaac-Move-Football-G129-Dex3-Wholebody_smpl_Left_Shoulder_global_0_to_-3_to_0_aggressive.npz"
-DEFAULT_NPZ="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1774962608663017.npz"
-NPZ="${1:-$DEFAULT_NPZ}"
-REPLAY_MODE="${2:-${SONIC_REPLAY_MODE:-inference_replay}}"
-LOOP_FLAG=""
-if [ -z "$NPZ" ]; then
-  echo "Error: NPZ path is empty"
-  exit 1
-fi
-if [ ! -f "$NPZ" ]; then
-  echo "Error: NPZ not found: $NPZ"
-  exit 1
-fi
-if [ "$REPLAY_MODE" != "direct_replay" ] && [ "$REPLAY_MODE" != "inference_replay" ]; then
-  echo "Error: replay mode must be direct_replay or inference_replay, got: $REPLAY_MODE"
-  exit 1
-fi
-if [ "${3:-}" = "--loop" ] || [ "${SONIC_REPLAY_LOOP:-}" = "1" ]; then
-  LOOP_FLAG="--replay_loop"
-fi
+IMAGE_TRANSPORT="zmq"
+IMAGE_ZMQ_PORT="5555"
+IMAGE_FPS="30"
+LOG_DIR="${SCRIPT_DIR}/logs/sonic_replay"
 
-# 先把输入路径固化为绝对路径，避免工作目录变化带来路径歧义。
-NPZ="$(realpath "$NPZ")"
+export PROJECT_ROOT="${SCRIPT_DIR}"
+export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
 
-ENCODER_PATH="${SONIC_ENCODER_PATH}"
-DECODER_PATH="${SONIC_DECODER_PATH}"
-
-if [ ! -f "$ENCODER_PATH" ]; then
-  echo "Error: SONIC encoder not found: $ENCODER_PATH"
-  echo "Or set: SONIC_ENCODER_PATH=/path/to/model_encoder.onnx"
+if [ ! -f "${REPLAY_FILE}" ]; then
+  echo "Error: replay file not found: ${REPLAY_FILE}"
   exit 1
 fi
-if [ ! -f "$DECODER_PATH" ]; then
-  echo "Error: SONIC decoder not found: $DECODER_PATH"
-  echo "Or set: SONIC_DECODER_PATH=/path/to/model_decoder.onnx"
+if [ "${REPLAY_MODE}" != "direct_replay" ] && [ "${REPLAY_MODE}" != "inference_replay" ]; then
+  echo "Error: replay mode must be direct_replay or inference_replay, got: ${REPLAY_MODE}"
+  exit 1
+fi
+if [ ! -f "${SONIC_ENCODER_PATH}" ]; then
+  echo "Error: SONIC encoder not found: ${SONIC_ENCODER_PATH}"
+  exit 1
+fi
+if [ ! -f "${SONIC_DECODER_PATH}" ]; then
+  echo "Error: SONIC decoder not found: ${SONIC_DECODER_PATH}"
   exit 1
 fi
 
-# 选择能够运行 IsaacLab + onnxruntime 的 Python
-# 优先级：
-# 1. 用户显式指定的 SONIC_PYTHON_BIN
-# 2. 当前环境里的 python
-# 3. 常用 IsaacLab conda 环境
-PYTHON_BIN="${SONIC_PYTHON_BIN:-python}"
-DEFAULT_ISAACLAB_PY="/home/dreams/miniconda3/envs/env_isaaclab_510_yb/bin/python"
-
-if ! "$PYTHON_BIN" -c "import onnxruntime" >/dev/null 2>&1; then
-  if [ -x "$DEFAULT_ISAACLAB_PY" ] && "$DEFAULT_ISAACLAB_PY" -c "import onnxruntime" >/dev/null 2>&1; then
-    PYTHON_BIN="$DEFAULT_ISAACLAB_PY"
+if ! "${PYTHON_BIN}" -c "import onnxruntime" >/dev/null 2>&1; then
+  if [ -x "${DEFAULT_ISAACLAB_PY}" ] && "${DEFAULT_ISAACLAB_PY}" -c "import onnxruntime" >/dev/null 2>&1; then
+    PYTHON_BIN="${DEFAULT_ISAACLAB_PY}"
   fi
 fi
-
-if ! "$PYTHON_BIN" -c "import onnxruntime" >/dev/null 2>&1; then
-  echo "Error: usable python not found for SONIC replay"
-  echo "Tried: ${PYTHON_BIN}"
-  echo "Need a python with 'onnxruntime' installed."
-  echo "You can set: SONIC_PYTHON_BIN=/path/to/python"
+if ! "${PYTHON_BIN}" -c "import onnxruntime" >/dev/null 2>&1; then
+  echo "Error: usable python with onnxruntime not found"
   exit 1
 fi
 
-ROBOT_COLLIDER_MODE="${ROBOT_COLLIDER_MODE:-box}"
+REPLAY_FILE="$(realpath "${REPLAY_FILE}")"
+if [ -z "${TASK_NAME}" ]; then
+  TASK_NAME="$("${PYTHON_BIN}" - "${REPLAY_FILE}" <<'PY'
+import sys
+import numpy as np
+
+replay_file = sys.argv[1]
+with np.load(replay_file, allow_pickle=True) as data:
+    task = data.get("task")
+    if task is None:
+        raise SystemExit("Replay file missing 'task' metadata")
+    if hasattr(task, "item"):
+        task = task.item()
+    print(task)
+PY
+)"
+fi
+
 if [ "${ROBOT_COLLIDER_MODE}" = "fourpoints" ]; then
   export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/temp/g1_29dof_with_dex3_rev_1_0_fourpoints.usd"
 else
   export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2.usd"
 fi
 
-export PROJECT_ROOT="$SCRIPT_DIR"
-export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
-
-LOG_DIR="${SCRIPT_DIR}/logs/sonic_replay"
-mkdir -p "$LOG_DIR"
-RUN_TS="$(date +%Y%m%d_%H%M%S)"
-SIM_LOG="${LOG_DIR}/sim_main_${RUN_TS}.log"
-
-echo "=========================================="
-echo "SONIC model replay from NPZ"
-echo "NPZ: $NPZ"
-echo "Replay mode: $REPLAY_MODE"
-echo "Encoder: $ENCODER_PATH"
-echo "Decoder: $DECODER_PATH"
-echo "Loop: ${LOOP_FLAG:-disabled}"
-echo "Python: $PYTHON_BIN"
-echo "Sim log: $SIM_LOG"
-echo "=========================================="
-
-# 清理 Redis 缓存（twist2 惯例）
 redis-cli DEL \
   action_body_unitree_g1_with_hands \
   action_hand_left_unitree_g1_with_hands \
@@ -114,35 +88,58 @@ redis-cli DEL \
   action_neck_unitree_g1_with_hands \
   isaac_input_ready_sonic_unitree_g1_with_hands \
   controller_data \
-  t_action || true
+  t_action >/dev/null 2>&1 || true
 
-# 启动 Isaac Lab（通过统一 replay 入口路由到 sonic_wholebody）
-cd "$SCRIPT_DIR"
-ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/sonic_default.yaml}"
+mkdir -p "${LOG_DIR}"
+RUN_TS="$(date +%Y%m%d_%H%M%S)"
+SIM_LOG="${LOG_DIR}/sim_main_${RUN_TS}.log"
+
+echo "[robot_usd] mode=${ROBOT_COLLIDER_MODE}"
+echo "[robot_usd] path=${ROBOT_USD_OVERRIDE}"
+echo "[sonic replay] file=${REPLAY_FILE}"
+echo "[sonic replay] mode=${REPLAY_MODE}"
+echo "[sonic replay] task=${TASK_NAME}"
+echo "[sonic replay] encoder=${SONIC_ENCODER_PATH}"
+echo "[sonic replay] decoder=${SONIC_DECODER_PATH}"
+echo "[sonic replay] python=${PYTHON_BIN}"
+echo "[sonic replay] log=${SIM_LOG}"
+
+cmd=(
+  "${PYTHON_BIN}" "${SCRIPT_DIR}/sim_main.py"
+  --device "${RUN_DEVICE}"
+  --env_config_yaml "${ENV_CONFIG_YAML}"
+  --task "${TASK_NAME}"
+  --robot_type "${ROBOT_TYPE}"
+  --input_source replay
+  --gmt_backend sonic
+  --sonic_encoder_path "${SONIC_ENCODER_PATH}"
+  --sonic_decoder_path "${SONIC_DECODER_PATH}"
+  --replay_file "${REPLAY_FILE}"
+  --replay_mode "${REPLAY_MODE}"
+  --image_transport "${IMAGE_TRANSPORT}"
+  --image_fps "${IMAGE_FPS}"
+  --image_zmq_port "${IMAGE_ZMQ_PORT}"
+)
+
+if [ "${ENABLE_CAMERAS}" = "1" ]; then
+  cmd+=(--enable_cameras)
+fi
+if [ "${ENABLE_DEX3_DDS}" = "1" ]; then
+  cmd+=(--enable_dex3_dds)
+fi
+if [ "${HEADLESS}" = "1" ]; then
+  cmd+=(--headless)
+fi
+if [ "${REPLAY_LOOP}" = "1" ]; then
+  cmd+=(--replay_loop)
+fi
 
 {
-  echo "[$(date '+%F %T')] Starting sim_main.py"
-  echo "[$(date '+%F %T')] Working directory: $SCRIPT_DIR"
-  echo "[$(date '+%F %T')] NPZ: $NPZ"
-  echo "[$(date '+%F %T')] Replay mode: $REPLAY_MODE"
-  echo "[$(date '+%F %T')] Loop: ${LOOP_FLAG:-disabled}"
-  echo "[$(date '+%F %T')] Python: $PYTHON_BIN"
-} | tee -a "$SIM_LOG"
+  echo "[$(date '+%F %T')] Starting SONIC replay"
+  echo "[$(date '+%F %T')] file=${REPLAY_FILE}"
+  echo "[$(date '+%F %T')] mode=${REPLAY_MODE}"
+  echo "[$(date '+%F %T')] task=${TASK_NAME}"
+  echo "[$(date '+%F %T')] python=${PYTHON_BIN}"
+} | tee -a "${SIM_LOG}"
 
-"$PYTHON_BIN" sim_main.py \
-  --device cpu \
-  --enable_cameras \
-  --env_config_yaml "$ENV_CONFIG_YAML" \
-  --task Isaac-Move-Football-Single-G129-Dex3-Wholebody \
-  --robot_type g129 \
-  --enable_dex3_dds \
-  --input_source replay \
-  --gmt_backend sonic \
-  --sonic_encoder_path "$ENCODER_PATH" \
-  --sonic_decoder_path "$DECODER_PATH" \
-  --replay_file "$NPZ" \
-  --replay_mode "$REPLAY_MODE" \
-  ${LOOP_FLAG} \
-  --image_transport zmq \
-  --image_fps 30 \
-  --image_zmq_port 5555 2>&1 | tee -a "$SIM_LOG"
+"${cmd[@]}" 2>&1 | tee -a "${SIM_LOG}"

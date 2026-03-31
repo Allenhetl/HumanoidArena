@@ -1,61 +1,45 @@
 #!/usr/bin/env bash
-# run_sonic.sh – SONIC POSE 模式全身遥操作（Isaac Lab 仿真）
-#
-# POSE 模式：Pico 头显 + 手腕控制器 + 脚踝 tracker → 完整 SMPL 全身姿态
-#           → GEAR-SONIC encoder+decoder → G1 机器人 29 DOF（含腿部跟踪）
-#
-# 前置条件（需在独立终端运行）：
-#   Terminal 1: Pico VR 数据采集 / Redis 发布
-#     cd isaaclab_twist2_g1/pico_server
-#     bash run_sonic_pose_server.sh
-#
-#   Terminal 2: 本脚本（Isaac Lab 仿真）
-#     cd isaaclab_twist2_g1
-#     bash run_sonic.sh
-#
-# 硬件要求：
-#   - Pico 头显（支持 POSE 模式）
-#   - 2 个手腕控制器
-#   - 2 个脚踝 tracker（必须，用于下半身跟踪）
-#   - 穿紧身裤以保证脚踝 tracker 视线
-#
-# 使用方法：
-#   bash run_sonic.sh [--encoder /path/to/encoder.onnx] [--decoder /path/to/decoder.onnx]
-
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}" || exit 1
 
-# ── GEAR-SONIC 模型路径 ────────────────────────────────────────────────
-# 默认路径（根据实际部署修改）
+# ------------------------------------------------------------------
+# User config: edit here
+# ------------------------------------------------------------------
+PYTHON_BIN="python"
+TASK_NAME="Isaac-Move-Football-Single-G129-Dex3-Wholebody"
+ENV_CONFIG_YAML="tasks/common_env_config/sonic_default.yaml"
+RUN_DEVICE="cpu"
+ROBOT_TYPE="g129"
+ROBOT_COLLIDER_MODE="box"   # box | fourpoints
+ENABLE_CAMERAS=1
+ENABLE_DEX3_DDS=1
+HEADLESS=1
+SONIC_REDIS_HOST="localhost"
+SONIC_REDIS_PORT="6379"
+SONIC_ENCODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_encoder.onnx"
+SONIC_DECODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_decoder.onnx"
+IMAGE_TRANSPORT="xrobot"
+IMAGE_XROBOT_HOST="10.42.0.35"
+IMAGE_XROBOT_PORT="12345"
+IMAGE_XROBOT_BITRATE="2097152"
+IMAGE_FPS="30"
+IMAGE_XROBOT_FFMPEG="/usr/bin/ffmpeg"
+RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/sonic/tw"
 
-ENCODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_encoder.onnx"
-DECODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_decoder.onnx"
+export PROJECT_ROOT="${SCRIPT_DIR}"
+export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
 
-# 命令行参数覆盖
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --encoder)
-            ENCODER_PATH="$2"
-            shift 2
-            ;;
-        --decoder)
-            DECODER_PATH="$2"
-            shift 2
-            ;;
-        *)
-            echo "Unknown option: $1"
-            exit 1
-            ;;
-    esac
-done
+if [ ! -f "${SONIC_ENCODER_PATH}" ]; then
+  echo "Error: SONIC encoder not found: ${SONIC_ENCODER_PATH}"
+  exit 1
+fi
+if [ ! -f "${SONIC_DECODER_PATH}" ]; then
+  echo "Error: SONIC decoder not found: ${SONIC_DECODER_PATH}"
+  exit 1
+fi
 
-SONIC_REDIS_HOST="${SONIC_REDIS_HOST:-localhost}"
-SONIC_REDIS_PORT="${SONIC_REDIS_PORT:-6379}"
-ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/sonic_default.yaml}"
-RECORDING_SAVE_DIR="${RECORDING_SAVE_DIR:-${SCRIPT_DIR}/recording_data/sonic/tw}"
-
-# ── 清理 Redis 缓存（twist2 惯例）─────────────────────────────────────
 redis-cli DEL \
   action_body_unitree_g1_with_hands \
   action_hand_left_unitree_g1_with_hands \
@@ -67,76 +51,71 @@ redis-cli DEL \
   isaac_reset_complete_unitree_g1_with_hands \
   isaac_input_ready_sonic_unitree_g1_with_hands \
   controller_data \
-  t_action
+  t_action >/dev/null 2>&1 || true
 
-# ── 启动 Isaac Lab 仿真 ───────────────────────────────────────────────
-cd "$SCRIPT_DIR"
-#Isaac-Move-ArtVIP-Livingroom-NoSofa-G129-Dex3-Wholebody
-#Isaac-Move-Cylinder-G129-Dex3-Wholebody
-#Isaac-Move-Football-G129-Dex3-Wholebody
-#Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody
-
-# 可切换：
-#   一般沙袋: Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody
-#   吊挂沙袋: Isaac-Move-Boxing-Bag-Hanging-G129-Dex3-Wholebody
-#   足球: Isaac-Move-Football-G129-Dex3-Wholebody
-#   双桌面拾放: Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody
-#   Push-T: Isaac-Push-T-G129-Dex3-Wholebody
-#   客厅交互：Isaac-Move-ArtVIP-Livingroom-G129-Dex3-Wholebody
-#   客厅抓杯：Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody
-#   三级台阶平台：Isaac-Move-Three-Step-Platform-G129-Dex3-Wholebody
-# ready
-# TASK_NAME="${TASK_NAME:-Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody}"
-# TASK_NAME="${TASK_NAME:-Isaac-Move-Football-G129-Dex3-Wholebody}"
-# TASK_NAME="${TASK_NAME:-Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody}"
-#  TASK_NAME="${TASK_NAME:-Isaac-Move-Three-Step-Platform-G129-Dex3-Wholebody}"
-#  TASK_NAME="${TASK_NAME:-Isaac-Move-ArtVIP-Livingroom-G129-Dex3-Wholebody}"
-#TASK_NAME="${TASK_NAME:-Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody}"
-# TASK_NAME="${TASK_NAME:-Isaac-Move-Football-G129-Dex3-Wholebody}"
- TASK_NAME="${TASK_NAME:-Isaac-Move-Football-Single-G129-Dex3-Wholebody}"
-
-# 机器人脚部碰撞版本切换：
-#   fourpoints  -> temp/g1_29dof_with_dex3_rev_1_0_fourpoints.usd（四球脚部碰撞）
-#   box         -> g1_29dof_with_dex3_rev_1_0.usd（长方体脚部碰撞）
-ROBOT_COLLIDER_MODE="${ROBOT_COLLIDER_MODE:-box}"
 if [ "${ROBOT_COLLIDER_MODE}" = "fourpoints" ]; then
-    export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/temp/g1_29dof_with_dex3_rev_1_0_fourpoints.usd"
+  export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/temp/g1_29dof_with_dex3_rev_1_0_fourpoints.usd"
 else
-    export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2.usd"
+  export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2.usd"
 fi
+
 echo "[robot_usd] mode=${ROBOT_COLLIDER_MODE}"
 echo "[robot_usd] path=${ROBOT_USD_OVERRIDE}"
+echo "[sonic] task=${TASK_NAME}"
+echo "[sonic] env_config=${ENV_CONFIG_YAML}"
+echo "[sonic] encoder=${SONIC_ENCODER_PATH}"
+echo "[sonic] decoder=${SONIC_DECODER_PATH}"
 echo "[recording] save_dir=${RECORDING_SAVE_DIR}"
 
-python sim_main.py \
-    --device cpu \
-    --enable_cameras \
-    --env_config_yaml "${ENV_CONFIG_YAML}" \
-    --task "${TASK_NAME}" \
-    --robot_type g129 \
-    --enable_dex3_dds \
-    --input_source pico_sonic \
-    --gmt_backend sonic \
-    --sonic_pose_source redis \
-    --sonic_redis_host "$SONIC_REDIS_HOST" \
-    --sonic_redis_port "$SONIC_REDIS_PORT" \
-    --sonic_encoder_path "$ENCODER_PATH" \
-    --sonic_decoder_path "$DECODER_PATH" \
-    --image_transport xrobot \
-    --image_xrobot_host 10.42.0.35 \
-    --image_xrobot_port 12345 \
-    --image_xrobot_bitrate 2097152 \
-    --image_fps 30 \
-    --image_xrobot_ffmpeg /usr/bin/ffmpeg \
-    --recording_save_dir "${RECORDING_SAVE_DIR}" \
-     --headless \
-#     --enable_rtf_monitor \
-#    --headless \
-#    --enable_world_camera \
-#    --headless \
+cmd=(
+  "${PYTHON_BIN}" "${SCRIPT_DIR}/sim_main.py"
+  --device "${RUN_DEVICE}"
+  --env_config_yaml "${ENV_CONFIG_YAML}"
+  --task "${TASK_NAME}"
+  --robot_type "${ROBOT_TYPE}"
+  --input_source pico_sonic
+  --gmt_backend sonic
+  --sonic_pose_source redis
+  --sonic_redis_host "${SONIC_REDIS_HOST}"
+  --sonic_redis_port "${SONIC_REDIS_PORT}"
+  --sonic_encoder_path "${SONIC_ENCODER_PATH}"
+  --sonic_decoder_path "${SONIC_DECODER_PATH}"
+  --image_transport "${IMAGE_TRANSPORT}"
+  --image_xrobot_host "${IMAGE_XROBOT_HOST}"
+  --image_xrobot_port "${IMAGE_XROBOT_PORT}"
+  --image_xrobot_bitrate "${IMAGE_XROBOT_BITRATE}"
+  --image_fps "${IMAGE_FPS}"
+  --image_xrobot_ffmpeg "${IMAGE_XROBOT_FFMPEG}"
+  --recording_save_dir "${RECORDING_SAVE_DIR}"
+)
 
-# 注意：
-# 1. POSE 模式需要 Pico 脚踝 tracker，否则腿部跟踪不可用
-# 2. Pico pose server 默认走 Redis，不再混用 ZMQ
-# 3. encoder/decoder 模型路径需根据实际部署调整
-# 4. 若要使用 VR_3PT 模式（仅上半身 IK + 下半身 RL），请使用 gear_sonic 原始部署脚本
+if [ "${ENABLE_CAMERAS}" = "1" ]; then
+  cmd+=(--enable_cameras)
+fi
+if [ "${ENABLE_DEX3_DDS}" = "1" ]; then
+  cmd+=(--enable_dex3_dds)
+fi
+if [ "${HEADLESS}" = "1" ]; then
+  cmd+=(--headless)
+fi
+
+exec "${cmd[@]}"
+
+# 可切换：
+#一般沙袋: Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody
+#吊挂沙袋: Isaac-Move-Boxing-Bag-Hanging-G129-Dex3-Wholebody
+#足球: Isaac-Move-Football-G129-Dex3-Wholebody
+#双桌面拾放: Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody
+#Push-T: Isaac-Push-T-G129-Dex3-Wholebody
+#客厅交互：Isaac-Move-ArtVIP-Livingroom-G129-Dex3-Wholebody
+#客厅抓杯：Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody
+#三级台阶平台：Isaac-Move-Three-Step-Platform-G129-Dex3-Wholebody
+#ready
+#TASK_NAME="${TASK_NAME:-Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody}"
+#TASK_NAME="${TASK_NAME:-Isaac-Move-Football-G129-Dex3-Wholebody}"
+#TASK_NAME="${TASK_NAME:-Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody}"
+#TASK_NAME="${TASK_NAME:-Isaac-Move-Three-Step-Platform-G129-Dex3-Wholebody}"
+#TASK_NAME="${TASK_NAME:-Isaac-Move-ArtVIP-Livingroom-G129-Dex3-Wholebody}"
+#TASK_NAME="${TASK_NAME:-Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody}"
+#TASK_NAME="${TASK_NAME:-Isaac-Move-Football-G129-Dex3-Wholebody}"
+#TASK_NAME="${TASK_NAME:-Isaac-Move-Football-Single-G129-Dex3-Wholebody}"
