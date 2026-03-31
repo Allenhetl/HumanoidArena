@@ -70,7 +70,7 @@ Responsibilities:
 
 Current routes:
 
-- `pico_twist2 -> twist2 GMT -> DDSRLActionProvider`
+- `pico_twist2 -> twist2 GMT -> TWIST2ActionProvider`
 - `pico_sonic -> sonic GMT -> SonicActionProvider`
 - `vla -> twist2 GMT -> OpenPIActionProvider`
 - `replay -> replay provider`

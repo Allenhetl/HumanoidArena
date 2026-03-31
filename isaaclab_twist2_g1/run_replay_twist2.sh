@@ -1,5 +1,5 @@
 #!/bin/bash
-# run_replay.sh - Launch replay simulation
+# run_replay.sh - Launch TWIST2 replay simulation through sim_main.py
 # Usage:
 #   ./run_replay.sh <replay_file> [inference|direct] [--loop]
 #
@@ -28,8 +28,6 @@ REPLAY_MODE="${2:-inference}"  # Default to inference mode
 LOOP_FLAG=""
 ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/twist2_default.yaml}"
 REPLAY_DEVICE="${REPLAY_DEVICE:-cpu}"
-REPLAY_VIDEO_SAVE_DIR="${REPLAY_VIDEO_SAVE_DIR:-/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/replay_videos}"
-
 # Check for --loop flag
 if [ "$3" == "--loop" ] || [ "$2" == "--loop" ]; then
     LOOP_FLAG="--loop"
@@ -56,7 +54,6 @@ echo "Replay mode: $REPLAY_MODE"
 echo "Loop: ${LOOP_FLAG:-disabled}"
 echo "Env config YAML: $ENV_CONFIG_YAML"
 echo "Device: $REPLAY_DEVICE"
-echo "Replay video dir: $REPLAY_VIDEO_SAVE_DIR"
 echo "=========================================="
 
 # Random seed for reproducibility (set to fixed value for deterministic behavior)
@@ -111,13 +108,15 @@ else
     echo "Warning: Isaac Lab path not found at $ISAACLAB_PATH"
 fi
 
-# Launch replay simulation
-python "${SCRIPT_DIR}/sim_main_replay.py" \
+# Launch replay simulation through the normal sim_main entry.
+python "${SCRIPT_DIR}/sim_main.py" \
     --device "${REPLAY_DEVICE}" \
     --enable_cameras \
     --task "${TASK_NAME}" \
     --env_config_yaml "${ENV_CONFIG_YAML}" \
     --robot_type g129 \
+    --input_source replay \
+    --gmt_backend twist2 \
     --replay_file "$REPLAY_FILE" \
     --replay_mode "$REPLAY_MODE" \
     ${LOOP_FLAG:+--replay_loop} \
@@ -127,7 +126,6 @@ python "${SCRIPT_DIR}/sim_main_replay.py" \
     --image_zmq_port 5555 \
     --stats_interval 10.0 \
     --step_hz 50 \
-    --replay_video_save_dir "${REPLAY_VIDEO_SAVE_DIR}" \
     --video_fps 30 \
     --seed "${SEED}"
 

@@ -38,7 +38,7 @@ parser.add_argument(
 )
 parser.add_argument("--action_source", type=str, default="dds",
                    choices=["dds", "file", "trajectory", "policy", "replay",
-                            "dds_wholebody", "sonic_wholebody", "openpi"],
+                            "twist2_wholebody", "sonic_wholebody", "openpi"],
                    help="Action source")
 parser.add_argument(
     "--input_source",
@@ -53,6 +53,25 @@ parser.add_argument(
     default="",
     choices=["", "twist2", "sonic"],
     help="Optional GMT backend alias",
+)
+parser.add_argument(
+    "--replay_file",
+    type=str,
+    default="",
+    help="Path to local replay npz. When set, the selected backend provider replays frames locally.",
+)
+parser.add_argument(
+    "--replay_mode",
+    type=str,
+    default="inference_replay",
+    choices=["direct", "inference", "direct_replay", "inference_replay"],
+    help="Replay mode: direct_replay/direct uses recorded targets, inference_replay/inference reruns the backend model.",
+)
+parser.add_argument(
+    "--replay_loop",
+    action="store_true",
+    default=False,
+    help="Loop local replay frames when reaching the end of the npz.",
 )
 
 # SONIC-specific arguments (used when action_source=sonic_wholebody)
@@ -203,11 +222,11 @@ def _normalize_control_routing(args_cli):
     """Normalize input_source/gmt_backend aliases back to the legacy action_source."""
     if args_cli.input_source and args_cli.gmt_backend:
         route_map = {
-            ("pico_twist2", "twist2"): "dds_wholebody",
+            ("pico_twist2", "twist2"): "twist2_wholebody",
             ("pico_sonic", "sonic"): "sonic_wholebody",
             ("vla", "twist2"): "openpi",
-            ("replay", "twist2"): "replay",
-            ("replay", "sonic"): "replay",
+            ("replay", "twist2"): "twist2_wholebody",
+            ("replay", "sonic"): "sonic_wholebody",
         }
         mapped = route_map.get((args_cli.input_source, args_cli.gmt_backend))
         if mapped is None:
@@ -219,7 +238,7 @@ def _normalize_control_routing(args_cli):
     elif args_cli.action_source == "sonic_wholebody":
         args_cli.input_source = args_cli.input_source or "pico_sonic"
         args_cli.gmt_backend = args_cli.gmt_backend or "sonic"
-    elif args_cli.action_source == "dds_wholebody":
+    elif args_cli.action_source == "twist2_wholebody":
         args_cli.input_source = args_cli.input_source or "pico_twist2"
         args_cli.gmt_backend = args_cli.gmt_backend or "twist2"
     elif args_cli.action_source == "openpi":
@@ -227,6 +246,10 @@ def _normalize_control_routing(args_cli):
         args_cli.gmt_backend = args_cli.gmt_backend or "twist2"
     elif args_cli.action_source == "replay":
         args_cli.input_source = args_cli.input_source or "replay"
+        if args_cli.gmt_backend == "twist2":
+            args_cli.action_source = "twist2_wholebody"
+        elif args_cli.gmt_backend == "sonic":
+            args_cli.action_source = "sonic_wholebody"
 
 
 def _initialize_task_scene(env, env_cfg, args_cli):
@@ -542,7 +565,7 @@ def main():
 
     # create simplified control configuration
     try:
-        wholebody_sources = {"dds_wholebody", "sonic_wholebody", "openpi"}
+        wholebody_sources = {"twist2_wholebody", "sonic_wholebody", "openpi"}
         if args_cli.action_source == "sonic_wholebody":
             use_wholebody = True
             physics_dt = getattr(env, "physics_dt", None) or env_cfg.sim.dt
@@ -552,7 +575,7 @@ def main():
             step_hz = policy_hz
         elif args_cli.action_source in wholebody_sources:
             use_wholebody = True
-            if args_cli.action_source == "dds_wholebody":
+            if args_cli.action_source == "twist2_wholebody":
                 args_cli.enable_wholebody_dds = True
             physics_dt = getattr(env, "physics_dt", None) or env_cfg.sim.dt
             policy_hz = int(round(1.0 / (physics_dt * env_cfg.decimation)))
@@ -563,7 +586,7 @@ def main():
             )
         elif "Wholebody" in args_cli.task or args_cli.enable_wholebody_dds:
             use_wholebody = True
-            args_cli.action_source = "dds_wholebody"
+            args_cli.action_source = "twist2_wholebody"
             args_cli.enable_wholebody_dds = True
             # Match step_hz with physics frequency for TWIST2
             physics_dt = getattr(env, "physics_dt", None) or env_cfg.sim.dt

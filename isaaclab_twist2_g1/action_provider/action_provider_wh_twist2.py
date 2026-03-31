@@ -17,6 +17,7 @@ import ast
 import queue
 import copy
 import numpy as np
+from pathlib import Path
 
 project_root = os.environ.get("PROJECT_ROOT")
 
@@ -447,11 +448,11 @@ class RecordingManager:
         print(f"[RecordingManager] Shutdown complete")
 
 
-class DDSRLActionProvider(ActionProvider):
+class TWIST2ActionProvider(ActionProvider):
     """Action provider based on DDS"""
 
     def __init__(self, env, args_cli):
-        super().__init__("DDSActionProvider")
+        super().__init__("TWIST2ActionProvider")
 
         # Set random seed for reproducibility
         if hasattr(args_cli, 'seed') and args_cli.seed is not None:
@@ -477,8 +478,12 @@ class DDSRLActionProvider(ActionProvider):
         self.enable_dex3 = args_cli.enable_dex3_dds
         self.enable_inspire = args_cli.enable_inspire_dds
         self.wh = args_cli.enable_wholebody_dds
+        self._replay_file = getattr(args_cli, "replay_file", "")
+        self._replay_mode = self._normalize_replay_mode(getattr(args_cli, "replay_mode", "inference_replay"))
+        self._replay_loop = bool(getattr(args_cli, "replay_loop", False))
+        self._replay_enabled = bool(self._replay_file)
         self.policy_path = self._resolve_policy_path(args_cli.model_path)
-        if not os.path.exists(self.policy_path):
+        if (not self._replay_enabled or self._replay_mode != "direct_replay") and not os.path.exists(self.policy_path):
             raise FileNotFoundError(f"[{self.name}] Policy file not found: {self.policy_path}")
         self.env = env
         self.task_name = args_cli.task  # Store task name for recording
@@ -492,10 +497,13 @@ class DDSRLActionProvider(ActionProvider):
 
         # Recording will start on first get_action() call (after env.reset())
         # This ensures Frame 0 captures real physics state, not default values
-        self._should_start_recording_on_first_call = True
-        print(f"[{self.name}] 🔴 AUTO-START RECORDING ENABLED")
-        print(f"[{self.name}] Recording will start on first get_action() call")
-        print(f"[{self.name}] This ensures Frame 0 captures real physics state")
+        self._should_start_recording_on_first_call = not self._replay_enabled
+        if self._replay_enabled:
+            print(f"[{self.name}] 🎬 Recording auto-start disabled during replay")
+        else:
+            print(f"[{self.name}] 🔴 AUTO-START RECORDING ENABLED")
+            print(f"[{self.name}] Recording will start on first get_action() call")
+            print(f"[{self.name}] This ensures Frame 0 captures real physics state")
 
         # Debug: Fix root in air for PID tuning
         # Set to True to fix robot root at a fixed height, preventing falls during teleop debugging
@@ -509,34 +517,6 @@ class DDSRLActionProvider(ActionProvider):
             print(f"[{self.name}] 🔧 DEBUG MODE: Root fixed in air at z={self._debug_fixed_root_position[2]:.2f}m")
             print(f"[{self.name}] 🔧 This prevents falling during PID tuning and teleop debugging")
             print(f"[{self.name}] 🔧 Set self._debug_fix_root_in_air = False to disable")
-
-        # Simple replay mode (hardcoded for testing)
-        self._simple_replay_mode = False
-        self._simple_replay_data = None
-        self._simple_replay_frame = 0
-
-        # Check if replay file exists (hardcoded path)
-        simple_replay_path = "/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/Isaac-Move-Football-G129-Dex3-Wholebody_1773495310633878.npz"
-        if os.path.exists(simple_replay_path):
-            print(f"[{self.name}] 🎬 SIMPLE REPLAY MODE ENABLED")
-            print(f"[{self.name}] Loading replay data from: {simple_replay_path}")
-            try:
-                self._simple_replay_data = np.load(simple_replay_path, allow_pickle=True)
-                # Print available keys
-                print(f"[{self.name}] Available keys in npz: {list(self._simple_replay_data.keys())}")
-
-                # Check if robot_twist2_inference_qpos exists
-                if 'robot_twist2_inference_qpos' in self._simple_replay_data:
-                    self._simple_replay_mode = True
-                    num_frames = self._simple_replay_data['robot_twist2_inference_qpos'].shape[0]
-                    print(f"[{self.name}] ✅ Loaded {num_frames} frames for replay")
-                    print(f"[{self.name}] Action shape: {self._simple_replay_data['robot_twist2_inference_qpos'].shape}")
-                else:
-                    print(f"[{self.name}] ❌ 'robot_twist2_inference_qpos' not found in npz file")
-                    self._simple_replay_mode = False
-            except Exception as e:
-                print(f"[{self.name}] ❌ Failed to load replay data: {e}")
-                self._simple_replay_mode = False
 
         # Initialize DDS communication
         self.robot_dds = None
@@ -597,6 +577,21 @@ class DDSRLActionProvider(ActionProvider):
         # Thread-safe flag for save completion (set by background thread, read by main thread)
         self._save_completion_state = None  # None, "success", or "failure"
 
+        self._replay_data_qpos = None
+        self._replay_data_obs = None
+        self._replay_data_hand_left = None
+        self._replay_data_hand_right = None
+        self._replay_data_neck = None
+        self._replay_num_frames = 0
+        self._replay_cursor = 0
+
+        if self._replay_enabled:
+            self._setup_local_replay()
+            print(
+                f"[{self.name}] 🎬 Local replay enabled  "
+                f"file={self._replay_file}  mode={self._replay_mode}  loop={self._replay_loop}"
+            )
+
         # Reset control state
         self._reset_requested = False  # Flag to indicate reset is requested
         self._waiting_for_reset_complete = False  # Flag to indicate waiting for reset completion
@@ -627,7 +622,9 @@ class DDSRLActionProvider(ActionProvider):
         # Indices used in TWIST2
         self._twist2_ankle_idx = [4, 5, 10, 11]
 
-        self.policy = self.load_policy(self.policy_path)
+        self.policy = None
+        if not self._replay_enabled or self._replay_mode != "direct_replay":
+            self.policy = self.load_policy(self.policy_path)
 
         # 预计算索引张量与复用缓冲
         device = self.env.device
@@ -1032,6 +1029,121 @@ class DDSRLActionProvider(ActionProvider):
         print(f"[{self.name}] ONNX policy loaded with providers: {model.get_providers()}")
         return run_inference
 
+    def _normalize_replay_mode(self, replay_mode: str) -> str:
+        if replay_mode in ("direct", "direct_replay"):
+            return "direct_replay"
+        if replay_mode in ("inference", "inference_replay"):
+            return "inference_replay"
+        raise ValueError(f"[{self.name}] Unsupported replay_mode: {replay_mode}")
+
+    def _load_replay_array(self, replay_data, *keys, required=False):
+        for key in keys:
+            if key in replay_data:
+                return np.asarray(replay_data[key]).copy()
+        if required:
+            raise KeyError(f"[{self.name}] replay npz missing keys: {keys}")
+        return None
+
+    def _setup_local_replay(self):
+        replay_path = Path(self._replay_file).expanduser().resolve()
+        if not replay_path.is_file():
+            raise FileNotFoundError(f"[{self.name}] replay file not found: {replay_path}")
+
+        with np.load(replay_path, allow_pickle=True) as replay_data:
+            self._replay_data_qpos = self._load_replay_array(
+                replay_data,
+                "robot_twist2_inference_qpos",
+                required=True,
+            )
+            self._replay_data_obs = self._load_replay_array(
+                replay_data,
+                "robot_obs_buf",
+                required=self._replay_mode == "inference_replay",
+            )
+            self._replay_data_hand_left = self._load_replay_array(replay_data, "human_hand_left")
+            self._replay_data_hand_right = self._load_replay_array(replay_data, "human_hand_right")
+            self._replay_data_neck = self._load_replay_array(replay_data, "human_neck")
+
+        candidate_arrays = [
+            self._replay_data_qpos,
+            self._replay_data_obs,
+            self._replay_data_hand_left,
+            self._replay_data_hand_right,
+        ]
+        candidate_arrays = [arr for arr in candidate_arrays if arr is not None]
+        if not candidate_arrays:
+            raise ValueError(f"[{self.name}] replay npz contains no usable frame arrays")
+
+        self._replay_num_frames = int(candidate_arrays[0].shape[0])
+        self._replay_file = str(replay_path)
+        self._replay_cursor = 0
+
+    def _next_replay_frame_idx(self) -> int | None:
+        if not self._replay_enabled or self._replay_num_frames <= 0:
+            return None
+        if self._replay_cursor >= self._replay_num_frames:
+            if not self._replay_loop:
+                return None
+            self._replay_cursor = 0
+        frame_idx = int(self._replay_cursor)
+        self._replay_cursor += 1
+        return frame_idx
+
+    def _set_replay_hand_targets(self, frame_idx: int) -> None:
+        self._twist2_hand_valid = False
+        self._twist2_action_hand_left.zero_()
+        self._twist2_action_hand_right.zero_()
+        self._twist2_action_neck.zero_()
+
+        left = None
+        right = None
+        if self._replay_data_hand_left is not None and frame_idx < len(self._replay_data_hand_left):
+            left = np.asarray(self._replay_data_hand_left[frame_idx], dtype=np.float32).reshape(-1)
+            self._twist2_action_hand_left[0, : min(self._twist2_hand_dim, left.shape[0])] = torch.as_tensor(
+                left[: self._twist2_hand_dim], device=self.env.device, dtype=torch.float32
+            )
+        if self._replay_data_hand_right is not None and frame_idx < len(self._replay_data_hand_right):
+            right = np.asarray(self._replay_data_hand_right[frame_idx], dtype=np.float32).reshape(-1)
+            self._twist2_action_hand_right[0, : min(self._twist2_hand_dim, right.shape[0])] = torch.as_tensor(
+                right[: self._twist2_hand_dim], device=self.env.device, dtype=torch.float32
+            )
+        if self._replay_data_neck is not None and frame_idx < len(self._replay_data_neck):
+            neck = np.asarray(self._replay_data_neck[frame_idx], dtype=np.float32).reshape(-1)
+            self._twist2_action_neck[0, : min(self._twist2_neck_dim, neck.shape[0])] = torch.as_tensor(
+                neck[: self._twist2_neck_dim], device=self.env.device, dtype=torch.float32
+            )
+        self._twist2_hand_valid = left is not None and right is not None
+
+    def _run_replay_policy(self, frame_idx: int):
+        self._set_replay_hand_targets(frame_idx)
+
+        if self._replay_mode == "inference_replay":
+            obs_buf = torch.from_numpy(self._replay_data_obs[frame_idx]).unsqueeze(0).to(
+                self.env.device, dtype=torch.float32
+            )
+            with torch.no_grad():
+                action = self.policy(obs_buf)
+            if isinstance(action, torch.Tensor) and action.dim() == 1:
+                action = action.unsqueeze(0)
+            if isinstance(action, torch.Tensor) and action.shape[-1] == 29:
+                self._twist2_last_action.copy_(action.to(self.env.device, dtype=torch.float32))
+            raw_action = torch.clip(action.to(self.env.device, dtype=torch.float32), -10.0, 10.0)
+            target_29 = raw_action * 0.5 + self.twist2_default_pos
+            return target_29, obs_buf
+
+        target_29 = torch.from_numpy(self._replay_data_qpos[frame_idx]).unsqueeze(0).to(
+            self.env.device, dtype=torch.float32
+        )
+        if self._replay_data_obs is not None and frame_idx < len(self._replay_data_obs):
+            obs_buf = torch.from_numpy(self._replay_data_obs[frame_idx]).unsqueeze(0).to(
+                self.env.device, dtype=torch.float32
+            )
+        else:
+            obs_buf = torch.zeros((1, self.total_obs_size), device=self.env.device, dtype=torch.float32)
+        raw_action = (target_29 - self.twist2_default_pos) / 0.5
+        self._twist2_last_action.copy_(raw_action.to(self.env.device, dtype=torch.float32))
+        return target_29, obs_buf
+
     def _twist2_parse_list(self, value, expected_len: int) -> list:
         if value is None:
             return [0.0] * expected_len
@@ -1429,19 +1541,34 @@ class DDSRLActionProvider(ActionProvider):
         try:
             full_action = self._full_action_buf
             full_action.zero_()
+            replay_frame_idx = None
 
             # 1. Policy inference
             policy_start = time.perf_counter()
-            action_data, obs_buf = self.run_policy()  # Get both action and observation
+            if self._replay_enabled:
+                replay_frame_idx = self._next_replay_frame_idx()
+                if replay_frame_idx is None:
+                    print(f"[{self.name}] Replay finished")
+                    return None
+                target_29, obs_buf = self._run_replay_policy(replay_frame_idx)
+            else:
+                action_data, obs_buf = self.run_policy()  # Get both action and observation
             policy_time = time.perf_counter() - policy_start
 
             # 2. Action preparation
             action_prep_start = time.perf_counter()
-            # --- TWIST2 full-body action (29-dof, MuJoCo actuator order) ---
-            raw_action = torch.clip(action_data.to(self.env.device, dtype=torch.float32), -10.0, 10.0)
+            if self._replay_enabled:
+                if replay_frame_idx % 100 == 0:
+                    print(
+                        f"[{self.name}] Replay progress: {replay_frame_idx}/{self._replay_num_frames} "
+                        f"mode={self._replay_mode}"
+                    )
+            else:
+                # --- TWIST2 full-body action (29-dof, MuJoCo actuator order) ---
+                raw_action = torch.clip(action_data.to(self.env.device, dtype=torch.float32), -10.0, 10.0)
 
-            # Server uses per-joint action_scale=0.5; keep it simple for quick dev
-            target_29 = raw_action * 0.5 + self.twist2_default_pos  # [1,29]
+                # Server uses per-joint action_scale=0.5; keep it simple for quick dev
+                target_29 = raw_action * 0.5 + self.twist2_default_pos  # [1,29]
 
             # Fill defaults first
             full_action.copy_(self.env.scene["robot"].data.default_joint_pos.squeeze(0))

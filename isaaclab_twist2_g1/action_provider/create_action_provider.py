@@ -1,19 +1,12 @@
-from action_provider.action_provider_dds import DDSActionProvider
 from action_provider.action_provider_replay import FileActionProviderReplay
-from action_provider.action_provider_wh_twist2 import DDSRLActionProvider
+from action_provider.action_provider_wh_twist2 import TWIST2ActionProvider
 from action_provider.action_provider_openpi import OpenPIActionProvider
-from pathlib import Path
 
 
 def create_action_provider(env,args):
     """create action provider based on parameters"""
-    if args.action_source == "dds":
-        return DDSActionProvider(
-            env=env,
-            args_cli=args
-        )
-    elif args.action_source == "dds_wholebody":
-        return DDSRLActionProvider(
+    if args.action_source == "twist2_wholebody":
+        return TWIST2ActionProvider(
             env=env,
             args_cli=args
         )
@@ -26,6 +19,11 @@ def create_action_provider(env,args):
             args_cli=args
         )
     elif args.action_source == "replay":
+        if args.gmt_backend == "twist2":
+            return TWIST2ActionProvider(env=env, args_cli=args)
+        elif args.gmt_backend == "sonic":
+            from action_provider.action_provider_sonic import SonicActionProvider
+            return SonicActionProvider(env=env, args_cli=args)
         return FileActionProviderReplay(env=env,args_cli=args)
     else:
         print(f"unknown action source: {args.action_source}")

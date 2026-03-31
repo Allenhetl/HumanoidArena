@@ -38,6 +38,7 @@ import json
 import os
 import time
 from bisect import bisect_left, bisect_right
+from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
@@ -1125,13 +1126,19 @@ class SonicActionProvider(ActionProvider):
         self.redis_port     = getattr(args_cli, "sonic_redis_port",  6379)
         self.encoder_path   = getattr(args_cli, "sonic_encoder_path", "")
         self.decoder_path   = getattr(args_cli, "sonic_decoder_path", "")
+        self._replay_file   = getattr(args_cli, "replay_file", "")
+        self._replay_mode   = self._normalize_replay_mode(getattr(args_cli, "replay_mode", "inference_replay"))
+        self._replay_loop   = bool(getattr(args_cli, "replay_loop", False))
+        self._replay_enabled = bool(self._replay_file)
+        if self._replay_enabled:
+            self._pose_source = "replay"
         self.recording_manager = AsyncEpisodeRecorder(
             save_dir=getattr(args_cli, "recording_save_dir", "./recording_data"),
             task_name=f"{self.task_name}_sonic",
             organize_fn=_organize_sonic_episode,
             max_frames=10000,
         )
-        self._should_start_recording_on_first_call = True
+        self._should_start_recording_on_first_call = not self._replay_enabled
         self._recording_command = "none"
         self._recording_active = False
         self._recording_display_state = "idle"
@@ -1168,7 +1175,9 @@ class SonicActionProvider(ActionProvider):
 
         self._setup_joint_mapping()
         self._setup_pd_controller()
-        if self._pose_source == "redis":
+        if self._replay_enabled:
+            self._setup_local_replay()
+        elif self._pose_source == "redis":
             self._setup_redis()
         else:
             self._setup_zmq()
@@ -1181,6 +1190,11 @@ class SonicActionProvider(ActionProvider):
               f"pose_source={self._pose_source}  "
               f"(zmq={self.zmq_host}:{self.zmq_port}  redis={self.redis_host}:{self.redis_port})  "
               f"encoder={self.encoder_path}  decoder={self.decoder_path}")
+        if self._replay_enabled:
+            print(
+                f"[SonicActionProvider] replay enabled  "
+                f"file={self._replay_file}  mode={self._replay_mode}  loop={self._replay_loop}"
+            )
 
     # ------------------------------------------------------------------
     # Setup
@@ -1316,6 +1330,75 @@ class SonicActionProvider(ActionProvider):
                   f"{self.redis_host}:{self.redis_port} key=human_smplx_data_unitree_g1_with_hands")
         except Exception as e:
             print(f"[SonicActionProvider] Redis init failed: {e}")
+
+    def _setup_local_replay(self):
+        replay_path = Path(self._replay_file).expanduser().resolve()
+        if not replay_path.is_file():
+            raise FileNotFoundError(f"[SonicActionProvider] replay file not found: {replay_path}")
+
+        def _load_array(data, *keys, required=False):
+            for key in keys:
+                if key in data:
+                    return np.asarray(data[key]).copy()
+            if required:
+                raise KeyError(f"[SonicActionProvider] replay npz missing keys: {keys}")
+            return None
+
+        with np.load(replay_path, allow_pickle=True) as replay_data:
+            self._replay_body_targets = _load_array(
+                replay_data,
+                "final_body_action_29dof",
+                "decoder_target_action",
+                required=self._replay_mode == "direct_replay",
+            )
+            self._replay_hand_left = _load_array(replay_data, "hand_action_left", "human_left_hand")
+            self._replay_hand_right = _load_array(replay_data, "hand_action_right", "human_right_hand")
+            self._replay_smpl_joints = _load_array(replay_data, "human_smpl_joints")
+            self._replay_smpl_pose = _load_array(replay_data, "human_smpl_pose")
+            self._replay_body_quat_w = _load_array(replay_data, "human_body_quat_w")
+            self._replay_joint_pos = _load_array(replay_data, "robot_qpos_before_decimation")
+            self._replay_joint_vel = _load_array(replay_data, "robot_qvel_before_decimation")
+            self._replay_frame_indices = _load_array(replay_data, "frame_index")
+            self._replay_heading_increment = _load_array(replay_data, "human_heading_increment")
+            if "num_frames" in replay_data:
+                self._replay_num_frames = int(np.asarray(replay_data["num_frames"]).item())
+            else:
+                candidate_arrays = [
+                    self._replay_body_targets,
+                    self._replay_smpl_joints,
+                    self._replay_joint_pos,
+                    self._replay_hand_left,
+                    self._replay_hand_right,
+                ]
+                candidate_arrays = [arr for arr in candidate_arrays if arr is not None]
+                if not candidate_arrays:
+                    raise ValueError("[SonicActionProvider] replay npz contains no usable frame arrays")
+                self._replay_num_frames = int(candidate_arrays[0].shape[0])
+
+        if self._replay_mode == "inference_replay":
+            required_arrays = {
+                "human_smpl_joints": self._replay_smpl_joints,
+                "human_smpl_pose": self._replay_smpl_pose,
+                "human_body_quat_w": self._replay_body_quat_w,
+                "robot_qpos_before_decimation": self._replay_joint_pos,
+            }
+            missing = [name for name, value in required_arrays.items() if value is None]
+            if missing:
+                raise KeyError(f"[SonicActionProvider] inference_replay missing arrays: {missing}")
+
+        self._replay_file = str(replay_path)
+        self._replay_cursor = 0
+        print(
+            f"[SonicActionProvider] loaded replay npz: {replay_path}  "
+            f"frames={self._replay_num_frames}"
+        )
+
+    def _normalize_replay_mode(self, replay_mode: str) -> str:
+        if replay_mode in ("direct", "direct_replay"):
+            return "direct_replay"
+        if replay_mode in ("inference", "inference_replay"):
+            return "inference_replay"
+        raise ValueError(f"[SonicActionProvider] Unsupported replay_mode: {replay_mode}")
 
     def _make_session(self, path: str):
         """创建 ONNX InferenceSession，优先使用 CUDA。"""
@@ -1454,6 +1537,68 @@ class SonicActionProvider(ActionProvider):
         self._perf_buffer_size = 50  # Keep last N frames for statistics
         self._perf_report_interval = 50  # Print performance report every N frames
 
+    def _next_replay_frame_idx(self) -> int | None:
+        if not self._replay_enabled or self._replay_num_frames <= 0:
+            return None
+        if self._replay_cursor >= self._replay_num_frames:
+            if not self._replay_loop:
+                return None
+            self._replay_cursor = 0
+        frame_idx = int(self._replay_cursor)
+        self._replay_cursor += 1
+        return frame_idx
+
+    def _set_replay_hand_targets(self, frame_idx: int) -> None:
+        self._left_hand_target.fill(0.0)
+        self._right_hand_target.fill(0.0)
+        if self._replay_hand_left is not None and frame_idx < len(self._replay_hand_left):
+            left = np.asarray(self._replay_hand_left[frame_idx], dtype=np.float32).reshape(-1)
+            self._left_hand_target[: min(7, left.shape[0])] = left[:7]
+        if self._replay_hand_right is not None and frame_idx < len(self._replay_hand_right):
+            right = np.asarray(self._replay_hand_right[frame_idx], dtype=np.float32).reshape(-1)
+            self._right_hand_target[: min(7, right.shape[0])] = right[:7]
+
+    def _prepare_replay_frame(self, frame_idx: int) -> np.ndarray | None:
+        self._set_replay_hand_targets(frame_idx)
+        if self._replay_frame_indices is not None and frame_idx < len(self._replay_frame_indices):
+            self._latest_frame_index = int(np.asarray(self._replay_frame_indices[frame_idx]).reshape(-1)[-1])
+        else:
+            self._latest_frame_index = frame_idx
+        if self._replay_heading_increment is not None and frame_idx < len(self._replay_heading_increment):
+            self._latest_heading_increment = float(np.asarray(self._replay_heading_increment[frame_idx]).reshape(-1)[-1])
+
+        if self._replay_mode == "direct_replay":
+            if self._replay_body_targets is None or frame_idx >= len(self._replay_body_targets):
+                return None
+            sonic_targets = np.asarray(self._replay_body_targets[frame_idx], dtype=np.float32).reshape(-1)
+            if sonic_targets.shape[0] != 29:
+                raise ValueError(
+                    f"[SonicActionProvider] direct_replay target must have 29 dims, got {sonic_targets.shape}"
+                )
+            self._latest_decoder_target = sonic_targets.copy()
+            return sonic_targets
+
+        data = {
+            "smpl_joints": np.asarray(self._replay_smpl_joints[frame_idx:frame_idx + 1], dtype=np.float32),
+            "smpl_pose": np.asarray(self._replay_smpl_pose[frame_idx:frame_idx + 1], dtype=np.float32),
+            "body_quat_w": np.asarray(self._replay_body_quat_w[frame_idx:frame_idx + 1], dtype=np.float32),
+            "joint_pos": np.asarray(self._replay_joint_pos[frame_idx:frame_idx + 1], dtype=np.float32),
+            "joint_vel": (
+                np.asarray(self._replay_joint_vel[frame_idx:frame_idx + 1], dtype=np.float32)
+                if self._replay_joint_vel is not None
+                else np.zeros((1, 29), dtype=np.float32)
+            ),
+            "frame_index": np.array([self._latest_frame_index], dtype=np.int64),
+        }
+        if self._replay_heading_increment is not None and frame_idx < len(self._replay_heading_increment):
+            data["heading_increment"] = np.array([self._latest_heading_increment], dtype=np.float32)
+        if self._replay_hand_left is not None and frame_idx < len(self._replay_hand_left):
+            data["left_hand_joints"] = np.asarray(self._replay_hand_left[frame_idx], dtype=np.float32).reshape(-1)
+        if self._replay_hand_right is not None and frame_idx < len(self._replay_hand_right):
+            data["right_hand_joints"] = np.asarray(self._replay_hand_right[frame_idx], dtype=np.float32).reshape(-1)
+        self._apply_pose_data(data, "replay")
+        return None
+
     def on_env_reset(self):
         try:
             robot = self.env.scene["robot"].data
@@ -1500,6 +1645,8 @@ class SonicActionProvider(ActionProvider):
         self._stream_window_start = 0
         self._stream_current_frame = 0
         self._stream_frame_step = 1
+        if self._replay_enabled:
+            self._replay_cursor = 0
         # print(f"[SONIC] on_env_reset: frame_count reset, warmup={self._sonic_warmup_steps}")  # warmup 已注释
         print(f"[SONIC] on_env_reset: frame_count and history reset")
 
@@ -2848,7 +2995,8 @@ class SonicActionProvider(ActionProvider):
                 else:
                     return self._default_pos.clone().squeeze(0)
             if (
-                not self.recording_manager.is_recording
+                not self._replay_enabled
+                and not self.recording_manager.is_recording
                 and not self._waiting_for_reset_complete
                 and not self._save_in_progress
                 and self._recording_display_state not in {"saving", "saved", "discard"}
@@ -2863,7 +3011,14 @@ class SonicActionProvider(ActionProvider):
             # 1. 读取 POSE（ZMQ 或 Redis）
             t_step0 = time.perf_counter()
             t_fetch0 = time.perf_counter()
-            if self._pose_source == "redis":
+            if self._replay_enabled:
+                replay_frame_idx = self._next_replay_frame_idx()
+                if replay_frame_idx is None:
+                    return self._default_pos.clone().squeeze(0)
+                replay_direct_targets = self._prepare_replay_frame(replay_frame_idx)
+                if debug_log:
+                    print(f"replay pose frame={replay_frame_idx} mode={self._replay_mode}")
+            elif self._pose_source == "redis":
                 self._fetch_redis_pose()
                 if debug_log:
                     print("redis pose")
@@ -2877,7 +3032,12 @@ class SonicActionProvider(ActionProvider):
             if len(self._perf_fetch_pose_ms) > self._perf_buffer_size:
                 self._perf_fetch_pose_ms.pop(0)
 
-            sonic_targets = self._run_gear_sonic()
+            if self._replay_enabled and self._replay_mode == "direct_replay":
+                if replay_direct_targets is None:
+                    return self._default_pos.clone().squeeze(0)
+                sonic_targets = replay_direct_targets
+            else:
+                sonic_targets = self._run_gear_sonic()
 
             if debug_log:
                 sonic_targets_str = np.array2string(
@@ -2916,7 +3076,7 @@ class SonicActionProvider(ActionProvider):
                 self._ensure_position_mode_runtime_config(env)
 
             self._latest_decoder_body_effort = body_effort_preview.copy()
-            if self.recording_manager.is_recording:
+            if not self._replay_enabled and self.recording_manager.is_recording:
                 self.recording_manager.add_frame(
                     self._collect_recording_data(
                         full_action=full_action,
@@ -2926,11 +3086,12 @@ class SonicActionProvider(ActionProvider):
                 )
                 if self._reset_complete_received:
                     self._reset_complete_received = False
-            if self._recording_command != "none":
+            if not self._replay_enabled and self._recording_command != "none":
                 self._handle_recording_command()
                 if self._waiting_for_reset_complete:
                     return self._default_pos.clone().squeeze(0)
-            self._update_recording_display_state()
+            if not self._replay_enabled:
+                self._update_recording_display_state()
 
             # 5. 步进仿真（decimation）
             t_sim0 = time.perf_counter()
