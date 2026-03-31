@@ -47,7 +47,7 @@ from scipy.spatial.transform import Rotation as R
 
 from action_provider.action_base import ActionProvider
 from action_provider.recording_common import AsyncEpisodeRecorder
-from action_provider.reset_control import consume_reset_complete, publish_reset_command
+from action_provider.reset_control import consume_reset_complete, get_input_ready_key, publish_reset_command
 
 # Isaac Sim imports for RTF monitoring
 try:
@@ -1132,6 +1132,28 @@ class SonicActionProvider(ActionProvider):
         self._replay_enabled = bool(self._replay_file)
         if self._replay_enabled:
             self._pose_source = "replay"
+        self._replay_anchor_heading_initialized = None
+        self._replay_anchor_use_heading_align = None
+        self._replay_anchor_init_base_quat_wxyz = None
+        self._replay_anchor_init_ref_quat_wxyz = None
+        self._replay_anchor_heading_align_quat_wxyz = None
+        self._replay_encoder_input = None
+        self._replay_encoder_smpl_joint_window = None
+        self._replay_encoder_anchor_window = None
+        self._replay_encoder_wrist_window = None
+        self._replay_encoder_motion_joint_pos_hist = None
+        self._replay_encoder_motion_joint_vel_hist = None
+        self._replay_encoder_motion_root_z_hist = None
+        self._replay_encoder_motion_anchor_rot6d_hist = None
+        self._replay_encoder_robot_joint_pos_hist = None
+        self._replay_encoder_robot_joint_vel_hist = None
+        self._replay_decoder_obs = None
+        self._replay_decoder_ang_vel_hist = None
+        self._replay_decoder_gravity_dir_hist = None
+        self._replay_decoder_last_action_hist = None
+        self._replay_joint_mae_sum = 0.0
+        self._replay_joint_mae_count = 0
+        self._replay_joint_err_log_interval = 10
         self.recording_manager = AsyncEpisodeRecorder(
             save_dir=getattr(args_cli, "recording_save_dir", "./recording_data"),
             task_name=f"{self.task_name}_sonic",
@@ -1148,6 +1170,11 @@ class SonicActionProvider(ActionProvider):
         self._save_completion_state = None
         self._waiting_for_reset_complete = False
         self._reset_complete_received = False
+        self._input_ready_key = get_input_ready_key("sonic")
+        self._input_ready_epoch_id = -1
+        self._input_ready_timestamp_realtime = 0.0
+        self._input_ready_timestamp_monotonic = 0.0
+        self._stale_input_drop_logged_epoch = -1
         self._episode_id = 0
         self._latest_human_smplx_frame = None
         self._latest_controller_data = None
@@ -1360,6 +1387,52 @@ class SonicActionProvider(ActionProvider):
             self._replay_joint_vel = _load_array(replay_data, "robot_qvel_before_decimation")
             self._replay_frame_indices = _load_array(replay_data, "frame_index")
             self._replay_heading_increment = _load_array(replay_data, "human_heading_increment")
+            self._replay_anchor_heading_initialized = _load_array(replay_data, "anchor_heading_initialized")
+            self._replay_anchor_use_heading_align = _load_array(replay_data, "anchor_use_heading_align")
+            self._replay_anchor_init_base_quat_wxyz = _load_array(
+                replay_data,
+                "anchor_init_base_quat_wxyz",
+            )
+            self._replay_anchor_init_ref_quat_wxyz = _load_array(
+                replay_data,
+                "anchor_init_ref_quat_wxyz",
+            )
+            self._replay_anchor_heading_align_quat_wxyz = _load_array(
+                replay_data,
+                "anchor_heading_align_quat_wxyz",
+            )
+            self._replay_encoder_input = _load_array(replay_data, "encoder_input")
+            self._replay_encoder_smpl_joint_window = _load_array(replay_data, "encoder_smpl_joint_window")
+            self._replay_encoder_anchor_window = _load_array(replay_data, "encoder_anchor_window")
+            self._replay_encoder_wrist_window = _load_array(replay_data, "encoder_wrist_window")
+            self._replay_encoder_motion_joint_pos_hist = _load_array(
+                replay_data,
+                "encoder_motion_joint_pos_hist",
+            )
+            self._replay_encoder_motion_joint_vel_hist = _load_array(
+                replay_data,
+                "encoder_motion_joint_vel_hist",
+            )
+            self._replay_encoder_motion_root_z_hist = _load_array(
+                replay_data,
+                "encoder_motion_root_z_hist",
+            )
+            self._replay_encoder_motion_anchor_rot6d_hist = _load_array(
+                replay_data,
+                "encoder_motion_anchor_rot6d_hist",
+            )
+            self._replay_encoder_robot_joint_pos_hist = _load_array(
+                replay_data,
+                "encoder_robot_joint_pos_hist",
+            )
+            self._replay_encoder_robot_joint_vel_hist = _load_array(
+                replay_data,
+                "encoder_robot_joint_vel_hist",
+            )
+            self._replay_decoder_obs = _load_array(replay_data, "decoder_obs")
+            self._replay_decoder_ang_vel_hist = _load_array(replay_data, "decoder_ang_vel_hist")
+            self._replay_decoder_gravity_dir_hist = _load_array(replay_data, "decoder_gravity_dir_hist")
+            self._replay_decoder_last_action_hist = _load_array(replay_data, "decoder_last_action_hist")
             if "num_frames" in replay_data:
                 self._replay_num_frames = int(np.asarray(replay_data["num_frames"]).item())
             else:
@@ -1558,8 +1631,47 @@ class SonicActionProvider(ActionProvider):
             right = np.asarray(self._replay_hand_right[frame_idx], dtype=np.float32).reshape(-1)
             self._right_hand_target[: min(7, right.shape[0])] = right[:7]
 
+    def _apply_replay_anchor_state(self, frame_idx: int) -> None:
+        if (
+            self._replay_anchor_heading_initialized is None
+            or frame_idx >= len(self._replay_anchor_heading_initialized)
+        ):
+            return
+        self._anchor_heading_initialized = bool(
+            np.asarray(self._replay_anchor_heading_initialized[frame_idx]).reshape(-1)[-1]
+        )
+        if (
+            self._replay_anchor_use_heading_align is not None
+            and frame_idx < len(self._replay_anchor_use_heading_align)
+        ):
+            self._anchor_use_heading_align = bool(
+                np.asarray(self._replay_anchor_use_heading_align[frame_idx]).reshape(-1)[-1]
+            )
+        if (
+            self._replay_anchor_init_base_quat_wxyz is not None
+            and frame_idx < len(self._replay_anchor_init_base_quat_wxyz)
+        ):
+            self._anchor_init_base_quat_wxyz[:] = np.asarray(
+                self._replay_anchor_init_base_quat_wxyz[frame_idx], dtype=np.float32
+            ).reshape(-1)[:4]
+        if (
+            self._replay_anchor_init_ref_quat_wxyz is not None
+            and frame_idx < len(self._replay_anchor_init_ref_quat_wxyz)
+        ):
+            self._anchor_init_ref_quat_wxyz[:] = np.asarray(
+                self._replay_anchor_init_ref_quat_wxyz[frame_idx], dtype=np.float32
+            ).reshape(-1)[:4]
+        if (
+            self._replay_anchor_heading_align_quat_wxyz is not None
+            and frame_idx < len(self._replay_anchor_heading_align_quat_wxyz)
+        ):
+            self._anchor_heading_align_quat_wxyz[:] = np.asarray(
+                self._replay_anchor_heading_align_quat_wxyz[frame_idx], dtype=np.float32
+            ).reshape(-1)[:4]
+
     def _prepare_replay_frame(self, frame_idx: int) -> np.ndarray | None:
         self._set_replay_hand_targets(frame_idx)
+        self._apply_replay_anchor_state(frame_idx)
         if self._replay_frame_indices is not None and frame_idx < len(self._replay_frame_indices):
             self._latest_frame_index = int(np.asarray(self._replay_frame_indices[frame_idx]).reshape(-1)[-1])
         else:
@@ -1578,26 +1690,215 @@ class SonicActionProvider(ActionProvider):
             self._latest_decoder_target = sonic_targets.copy()
             return sonic_targets
 
-        data = {
-            "smpl_joints": np.asarray(self._replay_smpl_joints[frame_idx:frame_idx + 1], dtype=np.float32),
-            "smpl_pose": np.asarray(self._replay_smpl_pose[frame_idx:frame_idx + 1], dtype=np.float32),
-            "body_quat_w": np.asarray(self._replay_body_quat_w[frame_idx:frame_idx + 1], dtype=np.float32),
-            "joint_pos": np.asarray(self._replay_joint_pos[frame_idx:frame_idx + 1], dtype=np.float32),
-            "joint_vel": (
-                np.asarray(self._replay_joint_vel[frame_idx:frame_idx + 1], dtype=np.float32)
-                if self._replay_joint_vel is not None
-                else np.zeros((1, 29), dtype=np.float32)
-            ),
-            "frame_index": np.array([self._latest_frame_index], dtype=np.int64),
-        }
-        if self._replay_heading_increment is not None and frame_idx < len(self._replay_heading_increment):
-            data["heading_increment"] = np.array([self._latest_heading_increment], dtype=np.float32)
-        if self._replay_hand_left is not None and frame_idx < len(self._replay_hand_left):
-            data["left_hand_joints"] = np.asarray(self._replay_hand_left[frame_idx], dtype=np.float32).reshape(-1)
-        if self._replay_hand_right is not None and frame_idx < len(self._replay_hand_right):
-            data["right_hand_joints"] = np.asarray(self._replay_hand_right[frame_idx], dtype=np.float32).reshape(-1)
-        self._apply_pose_data(data, "replay")
+        # For inference replay, restore the exact recorded model inputs and history
+        # buffers. Do not call _apply_pose_data() here: that path rolls temporal
+        # windows forward once more and turns replay into a reconstructed history
+        # instead of an exact restore of the recorded model state.
+        restored_current_frame = False
+        if self._replay_encoder_smpl_joint_window is not None and frame_idx < len(self._replay_encoder_smpl_joint_window):
+            self._latest_smpl_joint_window = np.asarray(
+                self._replay_encoder_smpl_joint_window[frame_idx], dtype=np.float32
+            ).copy()
+            if self._latest_smpl_joint_window.shape == self._smpl_joints_buf.shape:
+                self._smpl_joints_buf[:] = self._latest_smpl_joint_window
+                self._ref_smpl_joints_window[:] = self._latest_smpl_joint_window
+                self._smpl_data_valid = bool(np.abs(self._latest_smpl_joint_window[-1]).sum() > 0.01)
+                self._smpl_history_fill = _STEP1_FRAMES if self._smpl_data_valid else 0
+                restored_current_frame = True
+        if self._replay_encoder_anchor_window is not None and frame_idx < len(self._replay_encoder_anchor_window):
+            self._latest_anchor_window = np.asarray(
+                self._replay_encoder_anchor_window[frame_idx], dtype=np.float32
+            ).copy()
+            if self._latest_anchor_window.shape == self._body_rot6d_buf.shape:
+                self._body_rot6d_buf[:] = self._latest_anchor_window
+                restored_current_frame = True
+        if self._replay_encoder_wrist_window is not None and frame_idx < len(self._replay_encoder_wrist_window):
+            self._latest_wrist_window = np.asarray(
+                self._replay_encoder_wrist_window[frame_idx], dtype=np.float32
+            ).copy()
+        if (
+            self._replay_encoder_motion_joint_pos_hist is not None
+            and frame_idx < len(self._replay_encoder_motion_joint_pos_hist)
+        ):
+            hist = np.asarray(self._replay_encoder_motion_joint_pos_hist[frame_idx], dtype=np.float32)
+            if hist.shape == self._motion_joint_pos_hist.shape:
+                self._motion_joint_pos_hist[:] = hist
+        if (
+            self._replay_encoder_motion_joint_vel_hist is not None
+            and frame_idx < len(self._replay_encoder_motion_joint_vel_hist)
+        ):
+            hist = np.asarray(self._replay_encoder_motion_joint_vel_hist[frame_idx], dtype=np.float32)
+            if hist.shape == self._motion_joint_vel_hist.shape:
+                self._motion_joint_vel_hist[:] = hist
+        if (
+            self._replay_encoder_motion_root_z_hist is not None
+            and frame_idx < len(self._replay_encoder_motion_root_z_hist)
+        ):
+            hist = np.asarray(self._replay_encoder_motion_root_z_hist[frame_idx], dtype=np.float32).reshape(-1)
+            if hist.shape == self._motion_root_z_hist.shape:
+                self._motion_root_z_hist[:] = hist
+        if (
+            self._replay_encoder_motion_anchor_rot6d_hist is not None
+            and frame_idx < len(self._replay_encoder_motion_anchor_rot6d_hist)
+        ):
+            hist = np.asarray(self._replay_encoder_motion_anchor_rot6d_hist[frame_idx], dtype=np.float32)
+            if hist.shape == self._motion_anchor_rot6d_hist.shape:
+                self._motion_anchor_rot6d_hist[:] = hist
+        if (
+            self._replay_encoder_robot_joint_pos_hist is not None
+            and frame_idx < len(self._replay_encoder_robot_joint_pos_hist)
+        ):
+            hist = np.asarray(self._replay_encoder_robot_joint_pos_hist[frame_idx], dtype=np.float32)
+            if hist.shape == self._robot_joint_pos_hist.shape:
+                self._robot_joint_pos_hist[:] = hist
+        if (
+            self._replay_encoder_robot_joint_vel_hist is not None
+            and frame_idx < len(self._replay_encoder_robot_joint_vel_hist)
+        ):
+            hist = np.asarray(self._replay_encoder_robot_joint_vel_hist[frame_idx], dtype=np.float32)
+            if hist.shape == self._robot_joint_vel_hist.shape:
+                self._robot_joint_vel_hist[:] = hist
+        if self._replay_decoder_ang_vel_hist is not None and frame_idx < len(self._replay_decoder_ang_vel_hist):
+            hist = np.asarray(self._replay_decoder_ang_vel_hist[frame_idx], dtype=np.float32)
+            if hist.shape == self._ang_vel_hist.shape:
+                self._ang_vel_hist[:] = hist
+        if (
+            self._replay_decoder_gravity_dir_hist is not None
+            and frame_idx < len(self._replay_decoder_gravity_dir_hist)
+        ):
+            hist = np.asarray(self._replay_decoder_gravity_dir_hist[frame_idx], dtype=np.float32)
+            if hist.shape == self._grav_dir_hist.shape:
+                self._grav_dir_hist[:] = hist
+        if (
+            self._replay_decoder_last_action_hist is not None
+            and frame_idx < len(self._replay_decoder_last_action_hist)
+        ):
+            hist = np.asarray(self._replay_decoder_last_action_hist[frame_idx], dtype=np.float32)
+            if hist.shape == self._last_action_hist.shape:
+                self._last_action_hist[:] = hist
+        if self._replay_encoder_input is not None and frame_idx < len(self._replay_encoder_input):
+            self._latest_encoder_input = np.asarray(self._replay_encoder_input[frame_idx], dtype=np.float32).reshape(-1).copy()
+        if self._replay_decoder_obs is not None and frame_idx < len(self._replay_decoder_obs):
+            self._latest_decoder_obs = np.asarray(self._replay_decoder_obs[frame_idx], dtype=np.float32).reshape(-1).copy()
+        if self._replay_smpl_joints is not None and frame_idx < len(self._replay_smpl_joints):
+            current = np.asarray(self._replay_smpl_joints[frame_idx], dtype=np.float32)
+            if current.shape == self._smpl_joints_buf[-1].shape:
+                self._smpl_joints_buf[-1] = current
+                self._ref_smpl_joints_window[-1] = current
+                self._smpl_data_valid = bool(np.abs(current).sum() > 0.01)
+                if self._smpl_data_valid and self._smpl_history_fill == 0:
+                    self._smpl_history_fill = 1
+                restored_current_frame = True
+        if self._replay_smpl_pose is not None and frame_idx < len(self._replay_smpl_pose):
+            current = np.asarray(self._replay_smpl_pose[frame_idx], dtype=np.float32)
+            if current.shape == self._smpl_pose_buf[-1].shape:
+                self._smpl_pose_buf[-1] = current
+        if self._replay_body_quat_w is not None and frame_idx < len(self._replay_body_quat_w):
+            current = np.asarray(self._replay_body_quat_w[frame_idx], dtype=np.float32).reshape(-1)
+            if current.shape[0] >= 4:
+                self._ref_body_quat_window[-1] = current[:4]
+                restored_current_frame = True
+        if self._replay_joint_pos is not None and frame_idx < len(self._replay_joint_pos):
+            current = np.asarray(self._replay_joint_pos[frame_idx], dtype=np.float32).reshape(-1)
+            if current.shape == self._robot_joint_pos_hist[-1].shape:
+                self._robot_joint_pos = current.copy()
+                if self._replay_encoder_robot_joint_pos_hist is None:
+                    self._robot_joint_pos_hist[-1] = current
+                if self._replay_encoder_motion_joint_pos_hist is None:
+                    self._motion_joint_pos_hist[-1] = current
+        if self._replay_joint_vel is not None and frame_idx < len(self._replay_joint_vel):
+            current = np.asarray(self._replay_joint_vel[frame_idx], dtype=np.float32).reshape(-1)
+            if current.shape == self._robot_joint_vel_hist[-1].shape:
+                self._robot_joint_vel = current.copy()
+                if self._replay_encoder_robot_joint_vel_hist is None:
+                    self._robot_joint_vel_hist[-1] = current
+                if self._replay_encoder_motion_joint_vel_hist is None:
+                    self._motion_joint_vel_hist[-1] = current
+        if restored_current_frame:
+            self._ref_window_valid = True
         return None
+
+    def _run_gear_sonic_replay_inference(self, frame_idx: int) -> np.ndarray:
+        if (
+            self._replay_encoder_input is None
+            or self._replay_decoder_obs is None
+            or frame_idx >= len(self._replay_encoder_input)
+            or frame_idx >= len(self._replay_decoder_obs)
+        ):
+            return self._run_gear_sonic()
+
+        # If the recorded frame contains no valid SMPL input, mimic the live provider
+        # behavior and return the default standing target instead of forcing ONNX.
+        if (
+            self._replay_smpl_joints is not None
+            and frame_idx < len(self._replay_smpl_joints)
+            and float(np.abs(np.asarray(self._replay_smpl_joints[frame_idx], dtype=np.float32)).sum()) <= 0.01
+        ):
+            self._latest_decoder_raw_action = np.zeros((29,), dtype=np.float32)
+            self._latest_decoder_target = self._sonic_default_np.copy()
+            return self._sonic_default_np.copy()
+
+        try:
+            enc_input = np.asarray(self._replay_encoder_input[frame_idx], dtype=np.float32).reshape(1, -1)
+            self._latest_encoder_input = enc_input[0].copy()
+            t_enc0 = time.perf_counter()
+            latent = self._encoder.run(None, {self._encoder.get_inputs()[0].name: enc_input})[0]
+            t_enc1 = time.perf_counter()
+            self._latent = latent
+
+            dec_obs = np.asarray(self._replay_decoder_obs[frame_idx], dtype=np.float32).reshape(1, -1).copy()
+            latent_flat = latent.reshape(-1).astype(np.float32, copy=False)
+            if dec_obs.shape[1] >= latent_flat.shape[0]:
+                dec_obs[0, :latent_flat.shape[0]] = latent_flat
+            self._latest_decoder_obs = dec_obs[0].copy()
+
+            t_dec0 = time.perf_counter()
+            action_sonic = self._decoder.run(None, {self._decoder.get_inputs()[0].name: dec_obs})[0]
+            t_dec1 = time.perf_counter()
+
+            raw_sonic_unclipped = action_sonic.flatten()[:29].astype(np.float32, copy=False)
+            self._latest_decoder_raw_action = raw_sonic_unclipped.astype(np.float32, copy=True)
+            target_sonic = raw_sonic_unclipped * G1_ACTION_SCALE_ISAACLAB + self._sonic_default_np
+            self._latest_decoder_target = target_sonic.astype(np.float32, copy=True)
+
+            enc_ms = (t_enc1 - t_enc0) * 1000.0
+            dec_ms = (t_dec1 - t_dec0) * 1000.0
+            self._perf_encoder_ms.append(enc_ms)
+            self._perf_decoder_ms.append(dec_ms)
+            if len(self._perf_encoder_ms) > self._perf_buffer_size:
+                self._perf_encoder_ms.pop(0)
+            if len(self._perf_decoder_ms) > self._perf_buffer_size:
+                self._perf_decoder_ms.pop(0)
+
+            return target_sonic.astype(np.float32)
+        except Exception as e:
+            print(f"[SonicActionProvider] replay inference error at frame {frame_idx}: {e}")
+            import traceback
+            traceback.print_exc()
+            return self._run_gear_sonic()
+
+    def _log_replay_joint_position_error(self, current_pos: np.ndarray, frame_idx: int) -> None:
+        if self._replay_joint_pos is None or len(self._replay_joint_pos) == 0:
+            return
+        compare_idx = min(frame_idx + 1, len(self._replay_joint_pos) - 1)
+        recorded = np.asarray(self._replay_joint_pos[compare_idx], dtype=np.float32).reshape(-1)
+        current = np.asarray(current_pos, dtype=np.float32).reshape(-1)
+        dims = min(current.shape[0], recorded.shape[0])
+        if dims <= 0:
+            return
+        err = np.abs(current[:dims] - recorded[:dims])
+        mae = float(err.mean())
+        max_err = float(err.max())
+        self._replay_joint_mae_sum += mae
+        self._replay_joint_mae_count += 1
+        running_mae = self._replay_joint_mae_sum / max(1, self._replay_joint_mae_count)
+        if frame_idx < 3 or frame_idx % self._replay_joint_err_log_interval == 0:
+            print(
+                f"[SonicActionProvider] Replay joint err: frame={frame_idx} "
+                f"compare_to_recorded_frame={compare_idx} "
+                f"mae={mae:.6f} rad max={max_err:.6f} rad "
+                f"running_mae={running_mae:.6f} rad"
+            )
 
     def on_env_reset(self):
         try:
@@ -1647,6 +1948,12 @@ class SonicActionProvider(ActionProvider):
         self._stream_frame_step = 1
         if self._replay_enabled:
             self._replay_cursor = 0
+            self._replay_joint_mae_sum = 0.0
+            self._replay_joint_mae_count = 0
+        self._latest_controller_data = None
+        self._latest_recording_control = None
+        self._latest_timestamp_realtime = 0.0
+        self._latest_timestamp_monotonic = 0.0
         # print(f"[SONIC] on_env_reset: frame_count reset, warmup={self._sonic_warmup_steps}")  # warmup 已注释
         print(f"[SONIC] on_env_reset: frame_count and history reset")
 
@@ -1663,6 +1970,51 @@ class SonicActionProvider(ActionProvider):
 
     def get_recording_command(self):
         return self._recording_command
+
+    def _update_input_ready_guard(self, raw_guard) -> None:
+        guard = None
+        if raw_guard is not None:
+            try:
+                if isinstance(raw_guard, (bytes, bytearray)):
+                    raw_guard = raw_guard.decode("utf-8")
+                parsed = json.loads(raw_guard)
+                if isinstance(parsed, dict):
+                    guard = parsed
+            except Exception:
+                guard = None
+        new_epoch = int(guard.get("epoch_id", -1)) if guard is not None else -1
+        new_realtime = float(guard.get("ready_timestamp_realtime", 0.0)) if guard is not None else 0.0
+        new_monotonic = float(guard.get("ready_timestamp_monotonic", 0.0)) if guard is not None else 0.0
+        if (
+            new_epoch != self._input_ready_epoch_id
+            or new_realtime != self._input_ready_timestamp_realtime
+            or new_monotonic != self._input_ready_timestamp_monotonic
+        ):
+            self._stale_input_drop_logged_epoch = -1
+        self._input_ready_epoch_id = new_epoch
+        self._input_ready_timestamp_realtime = new_realtime
+        self._input_ready_timestamp_monotonic = new_monotonic
+
+    def _is_stale_controller_payload(self, controller_data: dict | None) -> bool:
+        if self._input_ready_timestamp_monotonic <= 0.0 and self._input_ready_timestamp_realtime <= 0.0:
+            return False
+        if not isinstance(controller_data, dict):
+            return True
+        monotonic_ts = controller_data.get("timestamp_monotonic")
+        realtime_ts = controller_data.get("timestamp_realtime")
+        try:
+            monotonic_ts = float(monotonic_ts) if monotonic_ts is not None else None
+        except Exception:
+            monotonic_ts = None
+        try:
+            realtime_ts = float(realtime_ts) if realtime_ts is not None else None
+        except Exception:
+            realtime_ts = None
+        if self._input_ready_timestamp_monotonic > 0.0 and monotonic_ts is not None:
+            return monotonic_ts <= self._input_ready_timestamp_monotonic
+        if self._input_ready_timestamp_realtime > 0.0 and realtime_ts is not None:
+            return realtime_ts <= self._input_ready_timestamp_realtime
+        return True
 
     def _update_recording_display_state(self) -> None:
         if self._save_completion_state is not None:
@@ -1722,14 +2074,16 @@ class SonicActionProvider(ActionProvider):
 
         elif command == "save":
             if self.recording_manager.is_recording:
-                def _on_save_complete(success: bool) -> None:
-                    self._save_completion_state = "success" if success else "failure"
-                    self._save_in_progress = False
-
-                self.recording_manager.save_recording(completion_callback=_on_save_complete)
-                self._save_in_progress = True
-                self._recording_active = False
+                print("[SONIC] saving recording...")
                 self._recording_display_state = "saving"
+                self._recording_display_counter = 0
+                self._save_in_progress = True
+                self.recording_manager.save_recording(completion_callback=None)
+                self.recording_manager.save_queue.join()
+                print("[SONIC] save completed")
+                self._save_in_progress = False
+                self._recording_active = False
+                self._recording_display_state = "saved"
                 self._recording_display_counter = 0
                 self._save_completion_state = None
                 self._episode_id += 1
@@ -1743,23 +2097,29 @@ class SonicActionProvider(ActionProvider):
 
         elif command == "save_and_reset":
             if self.recording_manager.is_recording:
+                print("[SONIC] save_and_reset command received")
                 self._recording_display_state = "saving"
                 self._recording_display_counter = 0
                 self._save_in_progress = True
+                print("[SONIC] saving recording...")
                 self.recording_manager.save_recording(completion_callback=None)
                 self.recording_manager.save_queue.join()
+                print("[SONIC] save completed")
                 self._save_in_progress = False
             self._recording_active = False
+            print("[SONIC] triggering complete reset...")
             self._trigger_complete_reset()
             self._waiting_for_reset_complete = True
             self._reset_complete_received = False
 
         elif command == "discard_and_reset":
+            print("[SONIC] discard_and_reset command received")
             self.recording_manager.cancel_recording()
             self._recording_active = False
             self._recording_display_state = "discard"
             self._recording_display_counter = 0
             self._save_in_progress = False
+            print("[SONIC] triggering complete reset...")
             self._trigger_complete_reset()
             self._waiting_for_reset_complete = True
             self._reset_complete_received = False
@@ -2193,6 +2553,7 @@ class SonicActionProvider(ActionProvider):
                 raw_right,
                 controller_raw,
                 recording_control_raw,
+                ready_guard_raw,
             ) = self._redis_client.mget(
                 [
                     "human_smplx_data_unitree_g1_with_hands",
@@ -2200,10 +2561,35 @@ class SonicActionProvider(ActionProvider):
                     "action_hand_right_unitree_g1_with_hands",
                     "controller_data",
                     "recording_control_unitree_g1_with_hands",
+                    self._input_ready_key,
                 ]
             )
         except Exception as e:
             print(f"[REDIS] Failed to read from Redis: {e}")
+            return
+        self._latest_controller_data = None
+        if controller_raw is not None:
+            try:
+                payload = controller_raw.decode("utf-8") if isinstance(controller_raw, bytes) else controller_raw
+                self._latest_controller_data = json.loads(payload)
+            except Exception:
+                self._latest_controller_data = None
+        self._update_input_ready_guard(ready_guard_raw)
+        if self._is_stale_controller_payload(self._latest_controller_data):
+            if self._input_ready_epoch_id != self._stale_input_drop_logged_epoch:
+                controller_ts = "n/a"
+                if isinstance(self._latest_controller_data, dict):
+                    controller_ts = self._latest_controller_data.get("timestamp_realtime", "n/a")
+                print(
+                    f"[SonicActionProvider] Ignoring stale SONIC input: "
+                    f"controller_ts={controller_ts}, "
+                    f"ready_realtime={self._input_ready_timestamp_realtime:.6f}, "
+                    f"ready_monotonic={self._input_ready_timestamp_monotonic:.6f}"
+                )
+                self._stale_input_drop_logged_epoch = self._input_ready_epoch_id
+            self._latest_human_smplx_frame = None
+            self._latest_recording_control = None
+            self._recording_command = "none"
             return
         if raw_smplx is None:
             return
@@ -2239,14 +2625,7 @@ class SonicActionProvider(ActionProvider):
             return
 
         self._latest_human_smplx_frame = frame
-        self._latest_controller_data = None
         self._latest_recording_control = None
-        if controller_raw is not None:
-            try:
-                payload = controller_raw.decode("utf-8") if isinstance(controller_raw, bytes) else controller_raw
-                self._latest_controller_data = json.loads(payload)
-            except Exception:
-                self._latest_controller_data = None
         if recording_control_raw is not None:
             try:
                 payload = (
@@ -2991,17 +3370,17 @@ class SonicActionProvider(ActionProvider):
                     self._reset_complete_received = True
                     self.on_env_reset()
                     self._episode_id += 1
-                    self._begin_episode_recording()
+                    if not self._replay_enabled:
+                        # Align post-reset episode boundaries with startup recording:
+                        # start the new segment immediately after reset, before any
+                        # fresh live pose frames can advance the provider state.
+                        self._begin_episode_recording()
+                    else:
+                        self._recording_active = False
+                        self._recording_display_state = "idle"
+                        self._recording_display_counter = 0
                 else:
                     return self._default_pos.clone().squeeze(0)
-            if (
-                not self._replay_enabled
-                and not self.recording_manager.is_recording
-                and not self._waiting_for_reset_complete
-                and not self._save_in_progress
-                and self._recording_display_state not in {"saving", "saved", "discard"}
-            ):
-                self._begin_episode_recording()
 
             # RTF monitoring initialization
             if self._enable_rtf_monitor and self._rtf_wall_time_start is None:
@@ -3036,6 +3415,8 @@ class SonicActionProvider(ActionProvider):
                 if replay_direct_targets is None:
                     return self._default_pos.clone().squeeze(0)
                 sonic_targets = replay_direct_targets
+            elif self._replay_enabled and self._replay_mode == "inference_replay":
+                sonic_targets = self._run_gear_sonic_replay_inference(replay_frame_idx)
             else:
                 sonic_targets = self._run_gear_sonic()
 
@@ -3075,6 +3456,10 @@ class SonicActionProvider(ActionProvider):
             else:
                 self._ensure_position_mode_runtime_config(env)
 
+            if not self._replay_enabled and self._recording_command != "none":
+                self._handle_recording_command()
+                if self._waiting_for_reset_complete:
+                    return self._default_pos.clone().squeeze(0)
             self._latest_decoder_body_effort = body_effort_preview.copy()
             if not self._replay_enabled and self.recording_manager.is_recording:
                 self.recording_manager.add_frame(
@@ -3086,10 +3471,6 @@ class SonicActionProvider(ActionProvider):
                 )
                 if self._reset_complete_received:
                     self._reset_complete_received = False
-            if not self._replay_enabled and self._recording_command != "none":
-                self._handle_recording_command()
-                if self._waiting_for_reset_complete:
-                    return self._default_pos.clone().squeeze(0)
             if not self._replay_enabled:
                 self._update_recording_display_state()
 
@@ -3128,6 +3509,8 @@ class SonicActionProvider(ActionProvider):
             current_pos = env.scene["robot"].data.joint_pos[0, self._sonic_idx].cpu().numpy()
             current_vel = env.scene["robot"].data.joint_vel[0, self._sonic_idx].cpu().numpy()
             pos_error = current_pos - sonic_targets
+            if self._replay_enabled and replay_frame_idx is not None:
+                self._log_replay_joint_position_error(current_pos, replay_frame_idx)
             support_joint_indices = [0, 1, 9, 10, 13, 14, 17, 18]
 
             if debug_log:

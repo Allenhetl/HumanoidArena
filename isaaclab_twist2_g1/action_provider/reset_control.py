@@ -14,12 +14,74 @@ except ImportError:  # pragma: no cover - runtime dependency
 
 RESET_TRIGGER_KEY = "isaac_reset_trigger"
 RESET_COMPLETE_KEY = "isaac_reset_complete_unitree_g1_with_hands"
+TWIST2_INPUT_READY_KEY = "isaac_input_ready_twist2_unitree_g1_with_hands"
+SONIC_INPUT_READY_KEY = "isaac_input_ready_sonic_unitree_g1_with_hands"
+
+_INPUT_READY_KEYS = {
+    "twist2": TWIST2_INPUT_READY_KEY,
+    "sonic": SONIC_INPUT_READY_KEY,
+}
+
+_INPUT_STREAM_KEYS = {
+    "twist2": (
+        "action_body_unitree_g1_with_hands",
+        "action_hand_left_unitree_g1_with_hands",
+        "action_hand_right_unitree_g1_with_hands",
+        "action_neck_unitree_g1_with_hands",
+        "human_smplx_data_unitree_g1_with_hands",
+        "human_info_unitree_g1_with_hands",
+        "recording_control_unitree_g1_with_hands",
+        "controller_data",
+        "t_action",
+    ),
+    "sonic": (
+        "human_smplx_data_unitree_g1_with_hands",
+        "action_hand_left_unitree_g1_with_hands",
+        "action_hand_right_unitree_g1_with_hands",
+        "controller_data",
+        "recording_control_unitree_g1_with_hands",
+    ),
+}
 
 
 def create_redis_client(host: str = "localhost", port: int = 6379, *, decode_responses: bool = False):
     if redis is None:
         raise RuntimeError("redis package is not installed")
     return redis.Redis(host=host, port=port, db=0, decode_responses=decode_responses)
+
+
+def get_input_ready_key(backend: str) -> str:
+    if backend not in _INPUT_READY_KEYS:
+        raise ValueError(f"Unsupported backend for input ready key: {backend}")
+    return _INPUT_READY_KEYS[backend]
+
+
+def publish_input_ready(
+    backend: str,
+    *,
+    source: str = "startup",
+    host: str = "localhost",
+    port: int = 6379,
+    redis_client: Any | None = None,
+) -> dict[str, Any]:
+    client = redis_client or create_redis_client(host=host, port=port)
+    ready_key = get_input_ready_key(backend)
+    now_realtime = time.time()
+    payload = {
+        "backend": backend,
+        "source": str(source),
+        "epoch_id": int(now_realtime * 1_000_000),
+        "ready_timestamp_ms": int(now_realtime * 1000),
+        "ready_timestamp_realtime": now_realtime,
+        "ready_timestamp_monotonic": time.monotonic(),
+    }
+    pipe = client.pipeline()
+    stream_keys = _INPUT_STREAM_KEYS.get(backend, ())
+    if stream_keys:
+        pipe.delete(*stream_keys)
+    pipe.set(ready_key, json.dumps(payload))
+    pipe.execute()
+    return payload
 
 
 def publish_reset_command(

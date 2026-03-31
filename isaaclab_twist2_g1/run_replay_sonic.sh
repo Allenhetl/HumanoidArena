@@ -21,7 +21,7 @@ SONIC_ENCODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_
 SONIC_DECODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_decoder.onnx"
 # 选择 npz（默认使用固定的调试 npz 文件，也可通过参数覆盖）
 # DEFAULT_NPZ="/home/dreams/Users/Alyssa/HumanoidArena/isaaclab_twist2_g1/recording_data_for_debug/Isaac-Move-Football-G129-Dex3-Wholebody_smpl_Left_Shoulder_global_0_to_-3_to_0_aggressive.npz"
-DEFAULT_NPZ="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1774946564919039.npz"
+DEFAULT_NPZ="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1774962608663017.npz"
 NPZ="${1:-$DEFAULT_NPZ}"
 REPLAY_MODE="${2:-${SONIC_REPLAY_MODE:-inference_replay}}"
 LOOP_FLAG=""
@@ -44,22 +44,16 @@ fi
 # 先把输入路径固化为绝对路径，避免工作目录变化带来路径歧义。
 NPZ="$(realpath "$NPZ")"
 
-# SONIC encoder/decoder：默认使用 GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/
-# 若未下载过，请到 GR00T-WholeBodyControl 下执行: python download_from_hf.py
-GROOT_ROOT="/home/dreams/Users/Alyssa/HumanoidArena_V1/GR00T-WholeBodyControl"
-SONIC_POLICY_DIR="${GROOT_ROOT}/gear_sonic_deploy/policy/release"
-ENCODER_PATH="${SONIC_ENCODER_PATH:-${SONIC_POLICY_DIR}/model_encoder.onnx}"
-DECODER_PATH="${SONIC_DECODER_PATH:-${SONIC_POLICY_DIR}/model_decoder.onnx}"
+ENCODER_PATH="${SONIC_ENCODER_PATH}"
+DECODER_PATH="${SONIC_DECODER_PATH}"
 
 if [ ! -f "$ENCODER_PATH" ]; then
   echo "Error: SONIC encoder not found: $ENCODER_PATH"
-  echo "Download: cd ${GROOT_ROOT} && python download_from_hf.py"
   echo "Or set: SONIC_ENCODER_PATH=/path/to/model_encoder.onnx"
   exit 1
 fi
 if [ ! -f "$DECODER_PATH" ]; then
   echo "Error: SONIC decoder not found: $DECODER_PATH"
-  echo "Download: cd ${GROOT_ROOT} && python download_from_hf.py"
   echo "Or set: SONIC_DECODER_PATH=/path/to/model_decoder.onnx"
   exit 1
 fi
@@ -84,6 +78,13 @@ if ! "$PYTHON_BIN" -c "import onnxruntime" >/dev/null 2>&1; then
   echo "Need a python with 'onnxruntime' installed."
   echo "You can set: SONIC_PYTHON_BIN=/path/to/python"
   exit 1
+fi
+
+ROBOT_COLLIDER_MODE="${ROBOT_COLLIDER_MODE:-box}"
+if [ "${ROBOT_COLLIDER_MODE}" = "fourpoints" ]; then
+  export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/temp/g1_29dof_with_dex3_rev_1_0_fourpoints.usd"
+else
+  export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2.usd"
 fi
 
 export PROJECT_ROOT="$SCRIPT_DIR"
@@ -111,6 +112,7 @@ redis-cli DEL \
   action_hand_left_unitree_g1_with_hands \
   action_hand_right_unitree_g1_with_hands \
   action_neck_unitree_g1_with_hands \
+  isaac_input_ready_sonic_unitree_g1_with_hands \
   controller_data \
   t_action || true
 
@@ -143,5 +145,4 @@ ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/sonic_default.yaml}"
   ${LOOP_FLAG} \
   --image_transport zmq \
   --image_fps 30 \
-  --image_zmq_port 5555 \
-  --enable_world_camera 2>&1 | tee -a "$SIM_LOG"
+  --image_zmq_port 5555 2>&1 | tee -a "$SIM_LOG"

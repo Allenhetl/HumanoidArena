@@ -65,6 +65,7 @@ redis-cli DEL \
   recording_control_unitree_g1_with_hands \
   isaac_reset_trigger \
   isaac_reset_complete_unitree_g1_with_hands \
+  isaac_input_ready_sonic_unitree_g1_with_hands \
   controller_data \
   t_action
 

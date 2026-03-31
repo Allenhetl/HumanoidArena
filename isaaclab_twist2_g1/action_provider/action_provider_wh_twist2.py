@@ -1,6 +1,7 @@
 # Copyright (c) 2025, Unitree Robotics Co., Ltd. All Rights Reserved.
 # License: Apache License, Version 2.0
 from action_provider.action_base import ActionProvider
+from action_provider.reset_control import get_input_ready_key
 from typing import Optional
 import torch
 import os
@@ -535,6 +536,10 @@ class TWIST2ActionProvider(ActionProvider):
             self.redis_pipeline = self.redis_client.pipeline()
         except Exception as e:
             print(f"[{self.name}] Redis init failed: {e}")
+        self._input_ready_key = get_input_ready_key("twist2")
+        self._input_ready_timestamp_ms = 0
+        self._input_ready_epoch_id = -1
+        self._stale_input_drop_logged_epoch = -1
 
         # TWIST2 observation sizes (from server_low_level_g1_sim.py)
         self.n_mimic_obs = 35
@@ -578,12 +583,16 @@ class TWIST2ActionProvider(ActionProvider):
         self._save_completion_state = None  # None, "success", or "failure"
 
         self._replay_data_qpos = None
+        self._replay_recorded_joint_pos = None
         self._replay_data_obs = None
         self._replay_data_hand_left = None
         self._replay_data_hand_right = None
         self._replay_data_neck = None
         self._replay_num_frames = 0
         self._replay_cursor = 0
+        self._replay_joint_mae_sum = 0.0
+        self._replay_joint_mae_count = 0
+        self._replay_joint_err_log_interval = 10
 
         if self._replay_enabled:
             self._setup_local_replay()
@@ -1055,6 +1064,10 @@ class TWIST2ActionProvider(ActionProvider):
                 "robot_twist2_inference_qpos",
                 required=True,
             )
+            self._replay_recorded_joint_pos = self._load_replay_array(
+                replay_data,
+                "robot_qpos_before_decimation",
+            )
             self._replay_data_obs = self._load_replay_array(
                 replay_data,
                 "robot_obs_buf",
@@ -1077,6 +1090,40 @@ class TWIST2ActionProvider(ActionProvider):
         self._replay_num_frames = int(candidate_arrays[0].shape[0])
         self._replay_file = str(replay_path)
         self._replay_cursor = 0
+
+    def _log_replay_joint_position_error(self, frame_idx: int) -> None:
+        if (
+            not self._replay_enabled
+            or self._replay_recorded_joint_pos is None
+            or len(self._replay_recorded_joint_pos) == 0
+        ):
+            return
+        compare_idx = min(frame_idx + 1, len(self._replay_recorded_joint_pos) - 1)
+        recorded = np.asarray(self._replay_recorded_joint_pos[compare_idx], dtype=np.float32).reshape(-1)
+        current = (
+            self.env.scene["robot"].data.joint_pos[0, self._twist2_action_idx_t]
+            .detach()
+            .cpu()
+            .numpy()
+            .astype(np.float32)
+            .reshape(-1)
+        )
+        dims = min(current.shape[0], recorded.shape[0])
+        if dims <= 0:
+            return
+        err = np.abs(current[:dims] - recorded[:dims])
+        mae = float(err.mean())
+        max_err = float(err.max())
+        self._replay_joint_mae_sum += mae
+        self._replay_joint_mae_count += 1
+        running_mae = self._replay_joint_mae_sum / max(1, self._replay_joint_mae_count)
+        if frame_idx < 3 or frame_idx % self._replay_joint_err_log_interval == 0:
+            print(
+                f"[{self.name}] Replay joint err: frame={frame_idx} "
+                f"compare_to_recorded_frame={compare_idx} "
+                f"mae={mae:.6f} rad max={max_err:.6f} rad "
+                f"running_mae={running_mae:.6f} rad"
+            )
 
     def _next_replay_frame_idx(self) -> int | None:
         if not self._replay_enabled or self._replay_num_frames <= 0:
@@ -1161,6 +1208,52 @@ class TWIST2ActionProvider(ActionProvider):
             data = data[:expected_len]
         return data
 
+    def _update_input_ready_guard(self, raw_guard) -> None:
+        guard = None
+        if raw_guard is not None:
+            try:
+                if isinstance(raw_guard, (bytes, bytearray)):
+                    raw_guard = raw_guard.decode("utf-8")
+                parsed = json.loads(raw_guard)
+                if isinstance(parsed, dict):
+                    guard = parsed
+            except Exception:
+                guard = None
+        new_epoch = int(guard.get("epoch_id", -1)) if guard is not None else -1
+        new_timestamp_ms = int(guard.get("ready_timestamp_ms", 0)) if guard is not None else 0
+        if new_epoch != self._input_ready_epoch_id or new_timestamp_ms != self._input_ready_timestamp_ms:
+            self._stale_input_drop_logged_epoch = -1
+        self._input_ready_epoch_id = new_epoch
+        self._input_ready_timestamp_ms = new_timestamp_ms
+
+    def _parse_action_timestamp_ms(self, raw_value) -> int | None:
+        if raw_value is None:
+            return None
+        try:
+            if isinstance(raw_value, (bytes, bytearray)):
+                raw_value = raw_value.decode("utf-8")
+            return int(float(raw_value))
+        except Exception:
+            return None
+
+    def _clear_stale_live_inputs(self) -> None:
+        self._twist2_action_hand_left.zero_()
+        self._twist2_action_hand_right.zero_()
+        self._twist2_action_neck.zero_()
+        self._twist2_hand_valid = False
+        self._twist2_human_smplx_data = None
+        self._twist2_human_smplx_valid = False
+        self._twist2_human_info = None
+        self._twist2_human_info_valid = False
+        self._recording_command = "none"
+
+    def _should_drop_stale_twist2_action(self, action_timestamp_ms: int | None) -> bool:
+        if self._input_ready_timestamp_ms <= 0:
+            return False
+        if action_timestamp_ms is None:
+            return True
+        return action_timestamp_ms <= self._input_ready_timestamp_ms
+
     def _twist2_fetch_actions(self) -> torch.Tensor:
         """Fetch TWIST2 actions (body + hand + neck) from Redis."""
         if self.redis_pipeline is None:
@@ -1179,6 +1272,8 @@ class TWIST2ActionProvider(ActionProvider):
                 "human_smplx_data_unitree_g1_with_hands",
                 "human_info_unitree_g1_with_hands",
                 "recording_control_unitree_g1_with_hands",
+                "t_action",
+                self._input_ready_key,
             ]
             for key in keys:
                 self.redis_pipeline.get(key)
@@ -1197,6 +1292,20 @@ class TWIST2ActionProvider(ActionProvider):
             human_smplx_data_raw = res[4] if len(res) > 4 else None
             human_info_raw = res[5] if len(res) > 5 else None
             recording_control_raw = res[6] if len(res) > 6 else None
+            action_timestamp_raw = res[7] if len(res) > 7 else None
+            input_ready_raw = res[8] if len(res) > 8 else None
+
+            self._update_input_ready_guard(input_ready_raw)
+            action_timestamp_ms = self._parse_action_timestamp_ms(action_timestamp_raw)
+            if self._should_drop_stale_twist2_action(action_timestamp_ms):
+                self._clear_stale_live_inputs()
+                if self._input_ready_epoch_id != self._stale_input_drop_logged_epoch:
+                    print(
+                        f"[{self.name}] Ignoring stale TWIST2 input: "
+                        f"t_action={action_timestamp_ms} ready_timestamp_ms={self._input_ready_timestamp_ms}"
+                    )
+                    self._stale_input_drop_logged_epoch = self._input_ready_epoch_id
+                return self._default_mimic_obs.clone()
 
             action_body = self._twist2_parse_list(action_body_raw, self.n_mimic_obs)
             action_left = self._twist2_parse_list(action_left_raw, self._twist2_hand_dim)
@@ -1238,6 +1347,7 @@ class TWIST2ActionProvider(ActionProvider):
             # 🔍 调试点3：检查全0判断逻辑
             will_reject = action_body_raw is None or all(x == 0.0 for x in action_body)
             if will_reject:
+                self._clear_stale_live_inputs()
                 # print("[XY_DEBUG] ⚠️ Data REJECTED by all-zero check! Returning default.")
                 # print(f"  - action_body_raw is None: {action_body_raw is None}")
                 # if action_body_raw is not None:
@@ -1843,6 +1953,9 @@ class TWIST2ActionProvider(ActionProvider):
             render_time = render_total
             self._render_counter += 1
 
+            if self._replay_enabled and replay_frame_idx is not None:
+                self._log_replay_joint_position_error(replay_frame_idx)
+
             # 4. Observation computation
             obs_start = time.perf_counter()
             self._obs_counter += 1
@@ -2339,6 +2452,12 @@ class TWIST2ActionProvider(ActionProvider):
 
             # Reset recording command state
             self._recording_command = "none"
+            self._recording_active = False
+            self._input_ready_timestamp_ms = 0
+            self._input_ready_epoch_id = -1
+            self._stale_input_drop_logged_epoch = -1
+            self._replay_joint_mae_sum = 0.0
+            self._replay_joint_mae_count = 0
 
             print(f"[{self.name}] ✅ Internal buffers reset successfully")
 

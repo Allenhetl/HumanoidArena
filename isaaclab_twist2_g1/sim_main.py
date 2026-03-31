@@ -207,6 +207,7 @@ from action_provider.create_action_provider import create_action_provider
 from action_provider.reset_control import (
     clear_reset_trigger,
     create_redis_client,
+    publish_input_ready,
     publish_reset_complete,
     read_reset_trigger,
 )
@@ -274,11 +275,45 @@ def _trigger_task_reset_event(env_cfg, event_name, env):
     return True
 
 
-def _perform_complete_reset(env, env_cfg, args_cli, redis_client=None):
+def _resolve_input_guard_backend(args_cli):
+    if getattr(args_cli, "input_source", "") == "replay" or getattr(args_cli, "replay_file", ""):
+        return None
+    if getattr(args_cli, "gmt_backend", "") == "twist2" or getattr(args_cli, "action_source", "") == "twist2_wholebody":
+        return "twist2"
+    if getattr(args_cli, "gmt_backend", "") == "sonic" or getattr(args_cli, "action_source", "") == "sonic_wholebody":
+        return "sonic"
+    return None
+
+
+def _notify_action_provider_env_reset(action_provider):
+    if action_provider is None:
+        return
+    for method_name in ("on_env_reset", "_reset_internal_buffers"):
+        method = getattr(action_provider, method_name, None)
+        if callable(method):
+            method()
+            return
+
+
+def _publish_backend_input_ready(args_cli, *, redis_client=None, source="startup"):
+    backend = _resolve_input_guard_backend(args_cli)
+    if backend is None:
+        return None
+    payload = publish_input_ready(backend=backend, redis_client=redis_client, source=source)
+    print(
+        f"[input_guard] backend={backend} source={source} "
+        f"ready_timestamp_ms={payload.get('ready_timestamp_ms')} epoch_id={payload.get('epoch_id')}"
+    )
+    return payload
+
+
+def _perform_complete_reset(env, env_cfg, args_cli, redis_client=None, action_provider=None):
     print("🔄 Complete reset (PhysX + all entities)...")
     env.sim.reset()
     env.reset()
     _trigger_task_reset_event(env_cfg, "reset_all_self", env)
+    _notify_action_provider_env_reset(action_provider)
+    _publish_backend_input_ready(args_cli, redis_client=redis_client, source="complete_reset")
     print("✅ Complete reset finished")
     try:
         publish_reset_complete(redis_client=redis_client)
@@ -783,6 +818,10 @@ def main():
                 )
             except Exception as exc:
                 print(f"[WARN] Failed to initialize reset Redis client: {exc}")
+        try:
+            _publish_backend_input_ready(args_cli, redis_client=redis_reset_client, source="startup")
+        except Exception as exc:
+            print(f"[WARN] Failed to publish startup input guard: {exc}")
 
         # main loop - execute in main thread to support rendering
         last_stats_time = time.time()
@@ -827,12 +866,19 @@ def main():
                                 elif reset_category == "2":
                                     print("🔄 Resetting all (robot + objects)...")
                                     _trigger_task_reset_event(env_cfg, "reset_all_self", env)
+                                    _notify_action_provider_env_reset(action_provider)
+                                    _publish_backend_input_ready(
+                                        args_cli,
+                                        redis_client=redis_reset_client,
+                                        source="reset_all",
+                                    )
                                 elif reset_category == "3":
                                     _perform_complete_reset(
                                         env,
                                         env_cfg,
                                         args_cli,
                                         redis_client=redis_reset_client,
+                                        action_provider=action_provider,
                                     )
                                 clear_reset_trigger(redis_client=redis_reset_client)
                                 print("[DEBUG] Reset trigger cleared from Redis")
@@ -874,6 +920,12 @@ def main():
                                     # Reset all (robot + objects)
                                     print("🔄 Resetting all (robot + objects)...")
                                     _trigger_task_reset_event(env_cfg, "reset_all_self", env)
+                                    _notify_action_provider_env_reset(action_provider)
+                                    _publish_backend_input_ready(
+                                        args_cli,
+                                        redis_client=redis_reset_client,
+                                        source="reset_all",
+                                    )
                                     reset_pose_dds.write_reset_pose_command(-1)
                             except Exception as e:
                                 print(f"Failed to write reset pose command: {e}")

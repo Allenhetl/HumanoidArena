@@ -42,6 +42,7 @@ from pico_server.data_utils.params import (
     HAND_MOVEMENT_STEP,
 )
 from pico_server.sonic_tools.utils.teleop.zmq.zmq_planner_sender import pack_pose_message
+from action_provider.reset_control import get_input_ready_key
 
 try:
     from pico_server.sonic_tools.isaac_utils.rotations import remove_smpl_base_rot, smpl_root_ytoz_up
@@ -1211,6 +1212,10 @@ class PoseStreamer:
         self.hand_left_position = 0.0
         self.hand_right_position = 0.0
         self.hand_movement_step = HAND_MOVEMENT_STEP
+        self._input_ready_key = get_input_ready_key("sonic")
+        self._input_ready_epoch_id = -1
+        self._ready_for_live_stream = False
+        self._streamer_start_realtime = time.time()
 
         self.buffer_cleared = (
             True  # Start with buffer cleared - wait for full buffer before first send
@@ -1231,6 +1236,51 @@ class PoseStreamer:
         self.next_target_ns = None
         self.buffer_cleared = True
         self.step = 0
+
+    def reset_for_ready_epoch(self) -> None:
+        self.frame_buffer.clear()
+        self.prev_stamp_ns = None
+        self.prev_smpl_pose_np = None
+        self.prev_smpl_joints_np = None
+        self.prev_body_quat_np = None
+        self.next_target_ns = None
+        self.buffer_cleared = True
+        self.step = 0
+        self.hand_left_position = 0.0
+        self.hand_right_position = 0.0
+        self.left_x_last = False
+        self.left_y_last = False
+        self.toggle_data_collection_last = False
+        self.toggle_data_abort_last = False
+        self._emit_recording_command("start", hold_frames=10)
+        self.yaw_accumulator.reset()
+
+    def _refresh_input_ready_epoch(self) -> bool:
+        if self.redis_client is None:
+            return True
+        try:
+            raw_guard = self.redis_client.get(self._input_ready_key)
+        except Exception:
+            return self._ready_for_live_stream
+        if not raw_guard:
+            return self._ready_for_live_stream
+        try:
+            guard = json.loads(raw_guard.decode("utf-8") if isinstance(raw_guard, bytes) else raw_guard)
+        except Exception:
+            return self._ready_for_live_stream
+        if not isinstance(guard, dict):
+            return self._ready_for_live_stream
+        ready_epoch = int(guard.get("epoch_id", -1))
+        ready_realtime = float(guard.get("ready_timestamp_realtime", 0.0))
+        if ready_realtime < self._streamer_start_realtime:
+            return self._ready_for_live_stream
+        if ready_epoch != self._input_ready_epoch_id:
+            self._input_ready_epoch_id = ready_epoch
+            self._ready_for_live_stream = True
+            self.reset_for_ready_epoch()
+            print(f"[{self.log_prefix}] accepted ready epoch={ready_epoch}, reset pose buffer")
+            return False
+        return self._ready_for_live_stream
 
     def _emit_recording_command(self, command: str, hold_frames: int = 6) -> None:
         self._recording_command = command
@@ -1412,6 +1462,9 @@ class PoseStreamer:
         if sample is None:
             time.sleep(0.005)
             return
+        ready_for_live_stream = self._refresh_input_ready_epoch()
+        if not ready_for_live_stream:
+            return
 
         latest_data = compute_from_body_poses(
             self.parent_indices, self.device, sample["body_poses_np"]
@@ -1440,7 +1493,7 @@ class PoseStreamer:
         self.left_x_last = x_pressed
         self.left_y_last = y_pressed
         if save_pressed:
-            self._emit_recording_command("save")
+            self._emit_recording_command("save_and_reset")
         elif reset_pressed:
             self._emit_recording_command("discard_and_reset")
 

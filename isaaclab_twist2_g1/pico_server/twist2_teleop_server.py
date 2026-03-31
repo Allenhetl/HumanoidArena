@@ -52,6 +52,10 @@ def _prefer_workspace_gmr():
 
 
 _prefer_workspace_gmr()
+project_root = pathlib.Path(__file__).resolve().parents[1]
+project_root_str = str(project_root)
+if project_root_str not in sys.path:
+    sys.path.insert(0, project_root_str)
 
 import mujoco as mj
 import mujoco.viewer as mjv
@@ -68,6 +72,7 @@ import cv2
 import redis
 from rich import print
 from general_motion_retargeting import XRobotStreamer
+from action_provider.reset_control import get_input_ready_key
 
 from data_utils.params import (
     DEFAULT_HAND_POSE,
@@ -176,6 +181,27 @@ class StateMachine:
         self.enable_smooth = enable_smooth
         self.smooth_window_size = smooth_window_size
         self.smooth_history = []  # Store recent observations for sliding window
+
+    def reset_for_ready_epoch(self):
+        """Reset teleop-side state when Isaac starts a new clean episode."""
+        self.state = "idle"
+        self.previous_state = "idle"
+        self.right_key_one_was_pressed = False
+        self.left_key_one_was_pressed = False
+        self.left_key_two_was_pressed = False
+        self.left_axis_click_was_pressed = False
+        self.is_interpolating = False
+        self.interpolation_start_time = None
+        self.interpolation_start_obs = None
+        self.interpolation_target_obs = None
+        self.current_mimic_obs = None
+        self.last_mimic_obs = None
+        self.current_neck_data = None
+        self.last_neck_data = None
+        self.hand_left_position = 0.0
+        self.hand_right_position = 0.0
+        self.velocity_commands[:] = 0.0
+        self.smooth_history.clear()
 
     def update(self, controller_data):
         """Update state machine with controller data"""
@@ -491,6 +517,9 @@ class XRobotTeleopToRobot:
         # Initialize components
         self.teleop_data_streamer = None
         self.redis_client = None
+        self._input_ready_key = get_input_ready_key("twist2")
+        self._input_ready_epoch_id = -1
+        self._ready_for_live_stream = False
         self.retarget = None
         self.model = None
         self.data = None
@@ -568,6 +597,31 @@ class XRobotTeleopToRobot:
         if self.teleop_data_streamer is not None:
             return self.teleop_data_streamer.get_current_frame()
         return None, None, None, None, None
+
+    def _refresh_input_ready_epoch(self) -> bool:
+        if self.redis_client is None:
+            return True
+        try:
+            raw_guard = self.redis_client.get(self._input_ready_key)
+        except Exception as exc:
+            print(f"[TWIST2_PICO] Failed to read input ready key: {exc}")
+            return self._ready_for_live_stream
+        if raw_guard is None:
+            return self._ready_for_live_stream
+        try:
+            if isinstance(raw_guard, (bytes, bytearray)):
+                raw_guard = raw_guard.decode("utf-8")
+            payload = json.loads(raw_guard)
+            epoch_id = int(payload.get("epoch_id", -1))
+        except Exception:
+            return self._ready_for_live_stream
+        if epoch_id != self._input_ready_epoch_id:
+            self._input_ready_epoch_id = epoch_id
+            self._ready_for_live_stream = True
+            self.state_machine.reset_for_ready_epoch()
+            print(f"[TWIST2_PICO] Input ready epoch updated: {epoch_id}")
+            return False
+        return self._ready_for_live_stream
 
     def process_retargeting(self, smplx_data):
         """Process motion retargeting and return observations"""
@@ -897,9 +951,10 @@ class XRobotTeleopToRobot:
             while viewer.is_running():
                 # Get current teleop data
                 smplx_data, left_hand_data, right_hand_data, controller_data, headset_data = self.get_teleop_data()
+                ready_for_live_stream = self._refresh_input_ready_epoch()
 
                 # Update state machine
-                if controller_data is not None:
+                if ready_for_live_stream and controller_data is not None:
                     self.state_machine.update(controller_data)
                     self.send_controller_data_to_redis(controller_data)
 
@@ -911,19 +966,25 @@ class XRobotTeleopToRobot:
 
                 # Process retargeting if we have data
                 qpos, current_retarget_obs = None, None
-                if smplx_data is not None:
+                if ready_for_live_stream and smplx_data is not None:
                     qpos, current_retarget_obs = self.process_retargeting(smplx_data)
                     self.update_visualization(qpos, smplx_data, viewer)
 
                 # Handle state transitions
-                self.handle_state_transitions(current_retarget_obs)
+                if ready_for_live_stream:
+                    self.handle_state_transitions(current_retarget_obs)
 
                 # Determine and send mimic observations
-                mimic_obs_to_send = self.determine_mimic_obs_to_send(current_retarget_obs)
-                neck_data_to_send = self.determine_neck_data_to_send(smplx_data)
+                if ready_for_live_stream:
+                    mimic_obs_to_send = self.determine_mimic_obs_to_send(current_retarget_obs)
+                    neck_data_to_send = self.determine_neck_data_to_send(smplx_data)
+                else:
+                    mimic_obs_to_send = DEFAULT_MIMIC_OBS[self.robot_name]
+                    neck_data_to_send = [0.0, 0.0]
+                    smplx_data = None
 
                 # Store current neck data in state machine for pause state handling
-                if neck_data_to_send is not None:
+                if ready_for_live_stream and neck_data_to_send is not None:
                     self.state_machine.set_current_neck_data(neck_data_to_send)
 
                 # Send data with recording state and command
@@ -931,8 +992,8 @@ class XRobotTeleopToRobot:
                     mimic_obs_to_send,
                     neck_data_to_send,
                     smplx_data,
-                    self.state_machine.recording_active,
-                    self.state_machine.recording_command
+                    self.state_machine.recording_active if ready_for_live_stream else False,
+                    self.state_machine.recording_command if ready_for_live_stream else "none"
                 )
 
                 # Manage recording command visibility
