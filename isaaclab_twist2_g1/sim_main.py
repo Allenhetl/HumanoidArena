@@ -214,7 +214,7 @@ from action_provider.reset_control import (
 from tasks.common_env_config import apply_env_config_yaml
 from tasks.common_runtime import apply_optional_runtime_augments
 from tools.get_stiffness import get_robot_stiffness_from_env
-from tools.get_reward import get_step_reward_value,get_current_rewards
+from tools.get_reward import get_reward_debug_string
 # Use text-based tracker instead of GUI visualizer to avoid matplotlib issues
 from tools.joint_position_tracker import JointPositionTracker
 
@@ -896,16 +896,6 @@ def main():
                         except Exception as e:
                             print(f"Failed to get reset pose command: {e}")
                             raise e
-                        # # print(f"reset_pose_cmd: {reset_pose_cmd}")
-                        # Compute current reward values manually if needed for debugging
-                        if loop_count % 10 == 0:  # Only compute reward every 10 loops
-                            try:
-                                current_reward = get_step_reward_value(env)
-                                print(f"reward: {current_reward}")
-                            except Exception as e:
-                                print(f"奖励计算失败: {e}")
-                                pass
-
                         if reset_pose_cmd is not None:
                             try:
                                 reset_category = reset_pose_cmd.get("reset_category")
@@ -963,6 +953,12 @@ def main():
 
                     # execute control step (in main thread, support rendering)
                     controller.step()
+
+                    if loop_count % 10 == 0:
+                        try:
+                            print(get_reward_debug_string(env))
+                        except Exception as e:
+                            print(f"奖励输出失败: {e}")
 
                     # Update joint tracker
                     if joint_tracker and loop_count % 2 == 0:  # Update every 2 steps

@@ -8,14 +8,14 @@ cd "${SCRIPT_DIR}" || exit 1
 # User config: edit here
 # ------------------------------------------------------------------
 PYTHON_BIN="python"
-TASK_NAME="Isaac-Move-Football-Single-G129-Dex3-Wholebody"
+TASK_NAME="Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody"
 ENV_CONFIG_YAML="tasks/common_env_config/sonic_default.yaml"
 RUN_DEVICE="cpu"
 ROBOT_TYPE="g129"
 ROBOT_COLLIDER_MODE="box"   # box | fourpoints
 ENABLE_CAMERAS=1
 ENABLE_DEX3_DDS=1
-HEADLESS=1
+HEADLESS=0
 SONIC_REDIS_HOST="localhost"
 SONIC_REDIS_PORT="6379"
 SONIC_ENCODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_encoder.onnx"

@@ -1151,9 +1151,12 @@ class SonicActionProvider(ActionProvider):
         self._replay_decoder_ang_vel_hist = None
         self._replay_decoder_gravity_dir_hist = None
         self._replay_decoder_last_action_hist = None
+        self._replay_object_states = {}
         self._replay_joint_mae_sum = 0.0
         self._replay_joint_mae_count = 0
         self._replay_joint_err_log_interval = 10
+        self._replay_object_err_sums = {}
+        self._replay_object_err_counts = {}
         self.recording_manager = AsyncEpisodeRecorder(
             save_dir=getattr(args_cli, "recording_save_dir", "./recording_data"),
             task_name=f"{self.task_name}_sonic",
@@ -1433,6 +1436,22 @@ class SonicActionProvider(ActionProvider):
             self._replay_decoder_ang_vel_hist = _load_array(replay_data, "decoder_ang_vel_hist")
             self._replay_decoder_gravity_dir_hist = _load_array(replay_data, "decoder_gravity_dir_hist")
             self._replay_decoder_last_action_hist = _load_array(replay_data, "decoder_last_action_hist")
+            self._replay_object_states = {}
+            replay_object_suffixes = {
+                "_position": "position",
+                "_linear_velocity": "linear_velocity",
+                "_angular_velocity": "angular_velocity",
+            }
+            for key in replay_data.files:
+                if not key.startswith("env_obj_"):
+                    continue
+                for suffix, field_name in replay_object_suffixes.items():
+                    if key.endswith(suffix):
+                        object_name = key[len("env_obj_") : -len(suffix)]
+                        self._replay_object_states.setdefault(object_name, {})[field_name] = np.asarray(
+                            replay_data[key]
+                        ).copy()
+                        break
             if "num_frames" in replay_data:
                 self._replay_num_frames = int(np.asarray(replay_data["num_frames"]).item())
             else:
@@ -1900,6 +1919,87 @@ class SonicActionProvider(ActionProvider):
                 f"running_mae={running_mae:.6f} rad"
             )
 
+    def _resolve_replay_object_scene_key(self, object_name: str) -> str | None:
+        alias_candidates = {
+            "football": ("object", "football"),
+            "table_drink": ("table_drink",),
+        }
+        for scene_key in alias_candidates.get(object_name, (object_name,)):
+            if scene_key in self.env.scene.keys():
+                return scene_key
+        return None
+
+    def _get_current_replay_object_state(self, object_name: str) -> dict | None:
+        scene_key = self._resolve_replay_object_scene_key(object_name)
+        if scene_key is None:
+            return None
+        try:
+            obj = self.env.scene[scene_key]
+            root_state = obj.data.root_state_w
+            return {
+                "position": root_state[0, 0:3].detach().cpu().numpy().astype(np.float32),
+                "linear_velocity": root_state[0, 7:10].detach().cpu().numpy().astype(np.float32),
+                "angular_velocity": root_state[0, 10:13].detach().cpu().numpy().astype(np.float32),
+            }
+        except Exception:
+            return None
+
+    def _log_replay_object_state_error(self, frame_idx: int) -> None:
+        if not self._replay_object_states:
+            return
+        if not (frame_idx < 3 or frame_idx % self._replay_joint_err_log_interval == 0):
+            return
+
+        field_units = {
+            "position": "m",
+            "linear_velocity": "m/s",
+            "angular_velocity": "rad/s",
+        }
+        field_labels = {
+            "position": "pos",
+            "linear_velocity": "lin_vel",
+            "angular_velocity": "ang_vel",
+        }
+
+        for object_name, recorded_fields in self._replay_object_states.items():
+            current_state = self._get_current_replay_object_state(object_name)
+            if current_state is None:
+                continue
+
+            parts = []
+            object_compare_idx = None
+            for field_name in ("position", "linear_velocity", "angular_velocity"):
+                recorded_series = recorded_fields.get(field_name)
+                if recorded_series is None or len(recorded_series) == 0:
+                    continue
+                compare_idx = min(frame_idx + 1, len(recorded_series) - 1)
+                object_compare_idx = compare_idx
+                recorded = np.asarray(recorded_series[compare_idx], dtype=np.float32).reshape(-1)
+                current = np.asarray(current_state[field_name], dtype=np.float32).reshape(-1)
+                dims = min(current.shape[0], recorded.shape[0])
+                if dims <= 0:
+                    continue
+                err = np.abs(current[:dims] - recorded[:dims])
+                mae = float(err.mean())
+                max_err = float(err.max())
+                stat_key = (object_name, field_name)
+                self._replay_object_err_sums[stat_key] = self._replay_object_err_sums.get(stat_key, 0.0) + mae
+                self._replay_object_err_counts[stat_key] = self._replay_object_err_counts.get(stat_key, 0) + 1
+                running_mae = self._replay_object_err_sums[stat_key] / self._replay_object_err_counts[stat_key]
+                unit = field_units[field_name]
+                parts.append(
+                    f"{field_labels[field_name]}_mae={mae:.6f} {unit} "
+                    f"max={max_err:.6f} {unit} running={running_mae:.6f} {unit}"
+                )
+
+            if parts:
+                print(
+                    f"[SonicActionProvider] Replay env err: frame={frame_idx} "
+                    f"compare_to_recorded_frame={object_compare_idx if object_compare_idx is not None else frame_idx} "
+                    f"object={object_name} "
+                    + " ".join(parts)
+                )
+
     def on_env_reset(self):
         try:
             robot = self.env.scene["robot"].data
@@ -1950,6 +2050,8 @@ class SonicActionProvider(ActionProvider):
             self._replay_cursor = 0
             self._replay_joint_mae_sum = 0.0
             self._replay_joint_mae_count = 0
+            self._replay_object_err_sums = {}
+            self._replay_object_err_counts = {}
         self._latest_controller_data = None
         self._latest_recording_control = None
         self._latest_timestamp_realtime = 0.0
@@ -3511,6 +3613,7 @@ class SonicActionProvider(ActionProvider):
             pos_error = current_pos - sonic_targets
             if self._replay_enabled and replay_frame_idx is not None:
                 self._log_replay_joint_position_error(current_pos, replay_frame_idx)
+                self._log_replay_object_state_error(replay_frame_idx)
             support_joint_indices = [0, 1, 9, 10, 13, 14, 17, 18]
 
             if debug_log:

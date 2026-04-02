@@ -111,8 +111,8 @@ class TableFootballSceneCfgWH(InteractiveSceneCfg):
             rot=[1.0, 0.0, 0.0, 0.0],
         ),
         spawn=UsdFileCfg(
-            usd_path=f"{project_root}/assets/football_net/football_goal_physics_convexhull2.usd",
-            scale=(0.01, 0.01, 0.01),
+            usd_path=f"{project_root}/assets/football_net/football_goal_physics.usd",
+            # scale=(0.01, 0.01, 0.01),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 rigid_body_enabled=True,
                 kinematic_enabled=True,
