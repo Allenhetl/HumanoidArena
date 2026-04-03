@@ -172,21 +172,21 @@ class RobotController:
             self._controller_step_count = 0
             self._controller_step_start_time = time.time()
 
-        if self.step_count % 30 == 0:
-            print(f"\n[PERF] controller.step() breakdown:")
-            print(f"  Action (get_action): {action_time * 1000:.2f}ms")
-            print(f"  Env step: {env_time * 1000:.2f}ms")
-            print(f"  Sleep: {sleep_time * 1000:.2f}ms")
-            print(f"  Total: {step_total_time * 1000:.2f}ms")
-            print(f"  Target interval: {self._step_interval * 1000:.2f}ms ({self.config.step_hz} Hz)")
-            if step_total_time > 0:
-                actual_hz = 1.0 / step_total_time
-                print(f"  Actual frequency: {actual_hz:.2f} Hz")
-                if actual_hz < self.config.step_hz * 0.8:
-                    print(f"  ⚠️  WARNING: Running {(1 - actual_hz/self.config.step_hz)*100:.1f}% slower than target!")
-                    # Debug: show what's taking time
-                    other_time = step_total_time - action_time - env_time - sleep_time
-                    print(f"  Debug: Action={action_time*1000:.2f}ms + Env={env_time*1000:.2f}ms + Sleep={sleep_time*1000:.2f}ms + Other={other_time*1000:.2f}ms")
+        # if self.step_count % 30 == 0:
+        #     print(f"\n[PERF] controller.step() breakdown:")
+        #     print(f"  Action (get_action): {action_time * 1000:.2f}ms")
+        #     print(f"  Env step: {env_time * 1000:.2f}ms")
+        #     print(f"  Sleep: {sleep_time * 1000:.2f}ms")
+        #     print(f"  Total: {step_total_time * 1000:.2f}ms")
+        #     print(f"  Target interval: {self._step_interval * 1000:.2f}ms ({self.config.step_hz} Hz)")
+        #     if step_total_time > 0:
+        #         actual_hz = 1.0 / step_total_time
+        #         print(f"  Actual frequency: {actual_hz:.2f} Hz")
+        #         if actual_hz < self.config.step_hz * 0.8:
+        #             print(f"  ⚠️  WARNING: Running {(1 - actual_hz/self.config.step_hz)*100:.1f}% slower than target!")
+        #             # Debug: show what's taking time
+        #             other_time = step_total_time - action_time - env_time - sleep_time
+        #             print(f"  Debug: Action={action_time*1000:.2f}ms + Env={env_time*1000:.2f}ms + Sleep={sleep_time*1000:.2f}ms + Other={other_time*1000:.2f}ms")
 
         # 4. minimal performance print
         self._profile_counter += 1

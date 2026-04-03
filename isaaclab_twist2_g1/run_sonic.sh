@@ -8,7 +8,7 @@ cd "${SCRIPT_DIR}" || exit 1
 # User config: edit here
 # ------------------------------------------------------------------
 PYTHON_BIN="python"
-TASK_NAME="Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody"
+TASK_NAME="Isaac-Move-Football-Single-G129-Dex3-Wholebody"
 ENV_CONFIG_YAML="tasks/common_env_config/sonic_default.yaml"
 RUN_DEVICE="cpu"
 ROBOT_TYPE="g129"

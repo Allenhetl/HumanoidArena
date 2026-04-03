@@ -902,6 +902,56 @@ def _json_string(value: Any) -> str:
     return json.dumps(value, default=_json_default, separators=(",", ":"))
 
 
+def _extract_controller_binary_signals(controller_data: dict | None) -> dict[str, bool]:
+    def _get_side_data(side_name: str) -> dict:
+        if not isinstance(controller_data, dict):
+            return {}
+        side_data = controller_data.get(side_name, {})
+        if not isinstance(side_data, dict):
+            return {}
+        return side_data
+
+    def _get_grip_binary(side_name: str) -> bool:
+        side_data = _get_side_data(side_name)
+        if "grip_binary" in side_data:
+            return bool(side_data.get("grip_binary"))
+        try:
+            if float(side_data.get("index_trig", 0.0)) > 0.5:
+                return True
+            if float(side_data.get("grip", 0.0)) > 0.5:
+                return False
+        except Exception:
+            pass
+        return False
+
+    def _get_close_trigger_binary(side_name: str) -> bool:
+        side_data = _get_side_data(side_name)
+        if "close_trigger_binary" in side_data:
+            return bool(side_data.get("close_trigger_binary"))
+        try:
+            return bool(float(side_data.get("index_trig", 0.0)) > 0.5)
+        except Exception:
+            return False
+
+    def _get_open_trigger_binary(side_name: str) -> bool:
+        side_data = _get_side_data(side_name)
+        if "open_trigger_binary" in side_data:
+            return bool(side_data.get("open_trigger_binary"))
+        try:
+            return bool(float(side_data.get("grip", 0.0)) > 0.5)
+        except Exception:
+            return False
+
+    return {
+        "left_grip_binary": _get_grip_binary("LeftController"),
+        "right_grip_binary": _get_grip_binary("RightController"),
+        "left_close_trigger_binary": _get_close_trigger_binary("LeftController"),
+        "right_close_trigger_binary": _get_close_trigger_binary("RightController"),
+        "left_open_trigger_binary": _get_open_trigger_binary("LeftController"),
+        "right_open_trigger_binary": _get_open_trigger_binary("RightController"),
+    }
+
+
 def _organize_sonic_episode(data_buffer: list[dict[str, Any]], timestamp_us: int) -> dict[str, Any]:
     if not data_buffer:
         raise ValueError("empty sonic recording buffer")
@@ -944,6 +994,24 @@ def _organize_sonic_episode(data_buffer: list[dict[str, Any]], timestamp_us: int
         "save_triggered": _stack(("markers", "save_triggered"), np.bool_),
         "human_left_hand": _stack(("human_raw", "left_hand"), np.float32),
         "human_right_hand": _stack(("human_raw", "right_hand"), np.float32),
+        "pico_left_grip_binary": _stack(
+            ("human_raw", "controller_binary", "left_grip_binary"), np.bool_
+        ),
+        "pico_right_grip_binary": _stack(
+            ("human_raw", "controller_binary", "right_grip_binary"), np.bool_
+        ),
+        "pico_left_close_trigger_binary": _stack(
+            ("human_raw", "controller_binary", "left_close_trigger_binary"), np.bool_
+        ),
+        "pico_right_close_trigger_binary": _stack(
+            ("human_raw", "controller_binary", "right_close_trigger_binary"), np.bool_
+        ),
+        "pico_left_open_trigger_binary": _stack(
+            ("human_raw", "controller_binary", "left_open_trigger_binary"), np.bool_
+        ),
+        "pico_right_open_trigger_binary": _stack(
+            ("human_raw", "controller_binary", "right_open_trigger_binary"), np.bool_
+        ),
         "human_smpl_joints": _stack(("human_processed", "smpl_joints"), np.float32),
         "human_smpl_pose": _stack(("human_processed", "smpl_pose"), np.float32),
         "human_body_quat_w": _stack(("human_processed", "body_quat_w"), np.float32),
@@ -2309,6 +2377,7 @@ class SonicActionProvider(ActionProvider):
                 "left_hand": self._left_hand_target.copy(),
                 "right_hand": self._right_hand_target.copy(),
                 "controller_data": self._latest_controller_data,
+                "controller_binary": _extract_controller_binary_signals(self._latest_controller_data),
                 "recording_control": self._latest_recording_control,
             },
             "human_processed": {

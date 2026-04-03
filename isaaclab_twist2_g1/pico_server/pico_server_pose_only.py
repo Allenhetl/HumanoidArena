@@ -1366,6 +1366,13 @@ class PoseStreamer:
         save_pressed: bool,
         reset_pressed: bool,
     ) -> dict:
+        def _compute_grip_binary(trigger_value: float, grip_value: float, current_hand_position: float) -> bool:
+            if float(trigger_value) > 0.5:
+                return True
+            if float(grip_value) > 0.5:
+                return False
+            return bool(current_hand_position > 0.0)
+
         return {
             "frame_index": int(frame_index),
             "timestamp_realtime": float(timestamp_realtime),
@@ -1376,7 +1383,10 @@ class PoseStreamer:
                 "axis_click": bool(left_axis_click),
                 "menu_button": bool(left_menu_button),
                 "grip": float(left_grip),
+                "open_trigger_binary": bool(left_grip > 0.5),
+                "grip_binary": _compute_grip_binary(left_trigger, left_grip, self.hand_left_position),
                 "index_trig": float(left_trigger),
+                "close_trigger_binary": bool(left_trigger > 0.5),
                 "key_one": bool(x_pressed),
                 "key_two": bool(y_pressed),
                 "x_button": bool(x_pressed),
@@ -1389,7 +1399,10 @@ class PoseStreamer:
                 "axis_click": bool(right_axis_click),
                 "menu_button": bool(right_menu_button),
                 "grip": float(right_grip),
+                "open_trigger_binary": bool(right_grip > 0.5),
+                "grip_binary": _compute_grip_binary(right_trigger, right_grip, self.hand_right_position),
                 "index_trig": float(right_trigger),
+                "close_trigger_binary": bool(right_trigger > 0.5),
                 "a_button": bool(a_pressed),
                 "b_button": bool(b_pressed),
             },

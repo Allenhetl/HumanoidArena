@@ -91,11 +91,23 @@ parser.add_argument("--sonic_encoder_path", type=str, default="",
 parser.add_argument("--sonic_decoder_path", type=str, default="",
                     help="Path to GEAR-SONIC decoder ONNX model")
 
-# VLA / OpenPI-specific arguments (used when action_source=openpi or input_source=vla)
+# OpenPI-specific arguments (legacy provider only)
 parser.add_argument("--openpi_checkpoint", type=str, default="",
                     help="Path to OpenPI checkpoint directory")
 parser.add_argument("--language_instruction", type=str, default="",
                     help="Language instruction for OpenPI/VLA")
+parser.add_argument("--lerobot_policy_path", type=str, default="",
+                    help="Path to a LeRobot pretrained_model directory")
+parser.add_argument("--lerobot_policy_device", type=str, default="",
+                    help="Inference device for LeRobot policy. Defaults to --device when empty.")
+parser.add_argument("--lerobot_gripper_threshold", type=float, default=0.5,
+                    help="Threshold for binarizing LeRobot grip outputs in vla mode")
+parser.add_argument("--lerobot_server_url", type=str, default="",
+                    help="HTTP(S) endpoint for remote LeRobot VLA inference")
+parser.add_argument("--lerobot_server_timeout", type=float, default=5.0,
+                    help="Timeout in seconds for LeRobot HTTP(S) inference requests")
+parser.add_argument("--lerobot_server_verify_ssl", action="store_true", default=False,
+                    help="Verify TLS certificates for LeRobot HTTPS connections")
 parser.add_argument("--smplx_model_path", type=str,
                     default="/home/hcl4070-1/Desktop/taowen/projects/smplx_models",
                     help="Path to SMPL-X model files")
@@ -225,7 +237,7 @@ def _normalize_control_routing(args_cli):
         route_map = {
             ("pico_twist2", "twist2"): "twist2_wholebody",
             ("pico_sonic", "sonic"): "sonic_wholebody",
-            ("vla", "twist2"): "openpi",
+            ("vla", "twist2"): "twist2_wholebody",
             ("replay", "twist2"): "twist2_wholebody",
             ("replay", "sonic"): "sonic_wholebody",
         }
@@ -243,7 +255,6 @@ def _normalize_control_routing(args_cli):
         args_cli.input_source = args_cli.input_source or "pico_twist2"
         args_cli.gmt_backend = args_cli.gmt_backend or "twist2"
     elif args_cli.action_source == "openpi":
-        args_cli.input_source = args_cli.input_source or "vla"
         args_cli.gmt_backend = args_cli.gmt_backend or "twist2"
     elif args_cli.action_source == "replay":
         args_cli.input_source = args_cli.input_source or "replay"
@@ -419,11 +430,16 @@ def main():
     if args_cli.input_source or args_cli.gmt_backend:
         print(f"Input source: {args_cli.input_source or 'legacy'}")
         print(f"GMT backend: {args_cli.gmt_backend or 'legacy'}")
+    if args_cli.input_source == "vla":
+        if args_cli.gmt_backend and args_cli.gmt_backend != "twist2":
+            raise ValueError("input_source=vla currently only supports --gmt_backend twist2")
+        if not args_cli.lerobot_server_url and not args_cli.lerobot_policy_path:
+            raise ValueError("--lerobot_server_url or --lerobot_policy_path is required when using input_source=vla")
     if args_cli.action_source == "openpi":
         if not args_cli.openpi_checkpoint:
-            raise ValueError("--openpi_checkpoint is required when using action_source=openpi / input_source=vla")
+            raise ValueError("--openpi_checkpoint is required when using action_source=openpi")
         if not args_cli.language_instruction:
-            raise ValueError("--language_instruction is required when using action_source=openpi / input_source=vla")
+            raise ValueError("--language_instruction is required when using action_source=openpi")
         if not args_cli.twist2_model_path:
             args_cli.twist2_model_path = args_cli.model_path
     print("=" * 60)
@@ -783,19 +799,19 @@ def main():
     print("Note: The DDS in Sim transmits messages on channel 1. Please ensure that other DDS instances use the same channel for message exchange by setting: ChannelFactoryInitialize(1).")
 
     # Initialize joint position tracker (text-based, no GUI)
-    joint_tracker = None
+    # joint_tracker = None
     try:
         print("\n" + "="*80)
         print("Initializing Joint Position Tracker (Text-based)")
         print("="*80)
         robot = env.scene["robot"]
-        joint_tracker = JointPositionTracker(
-            num_joints=robot.num_joints,
-            window_size=200
-        )
+        # joint_tracker = JointPositionTracker(
+        #     num_joints=robot.num_joints,
+        #     window_size=200
+        # )
         # Update joint names
-        if hasattr(robot.data, 'joint_names'):
-            joint_tracker.joint_names = robot.data.joint_names
+        # if hasattr(robot.data, 'joint_names'):
+        #     joint_tracker.joint_names = robot.data.joint_names
         print(f"Tracking {robot.num_joints} joints")
         print("Statistics will be printed every 10 seconds")
         print("="*80 + "\n")
@@ -961,18 +977,18 @@ def main():
                             print(f"奖励输出失败: {e}")
 
                     # Update joint tracker
-                    if joint_tracker and loop_count % 2 == 0:  # Update every 2 steps
-                        try:
-                            target_pos = env.scene["robot"].data.joint_pos_target[0].cpu().numpy()
-                            current_pos = env.scene["robot"].data.joint_pos[0].cpu().numpy()
-                            joint_tracker.update_data(target_pos, current_pos, timestamp=loop_count)
+                    # if joint_tracker and loop_count % 2 == 0:  # Update every 2 steps
+                        # try:
+                            # target_pos = env.scene["robot"].data.joint_pos_target[0].cpu().numpy()
+                            # current_pos = env.scene["robot"].data.joint_pos[0].cpu().numpy()
+                            # joint_tracker.update_data(target_pos, current_pos, timestamp=loop_count)
 
                             # Print compact summary every 100 steps
-                            if loop_count % 100 == 0:
-                                joint_tracker.print_compact_summary()
-                        except Exception as e:
-                            if loop_count % 500 == 0:  # Print error occasionally
-                                print(f"Warning: Joint tracker update failed: {e}")
+                            # if loop_count % 100 == 0:
+                            #     joint_tracker.print_compact_summary()
+                        # except Exception as e:
+                        #     if loop_count % 500 == 0:  # Print error occasionally
+                        #         print(f"Warning: Joint tracker update failed: {e}")
 
                     # print statistics and loop frequency periodically
                     if current_time - last_stats_time >= args_cli.stats_interval:
@@ -1006,11 +1022,11 @@ def main():
                         print(f"=============================")
 
                         # Print joint tracking statistics
-                        if joint_tracker:
-                            try:
-                                joint_tracker.print_statistics(top_n=joint_tracker.num_joints)  # Print all joints
-                            except Exception as e:
-                                print(f"Warning: Failed to print joint statistics: {e}")
+                        # if joint_tracker:
+                        #     try:
+                        #         joint_tracker.print_statistics(top_n=joint_tracker.num_joints)  # Print all joints
+                        #     except Exception as e:
+                        #         print(f"Warning: Failed to print joint statistics: {e}")
 
                         # print_stats(controller)
                         last_stats_time = current_time

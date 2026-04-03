@@ -866,9 +866,39 @@ class XRobotTeleopToRobot:
     def send_controller_data_to_redis(self, controller_data):
         """Send controller data to Redis"""
         if self.redis_client is not None and controller_data is not None:
+            controller_payload = dict(controller_data)
+            left_controller = dict(controller_payload.get("LeftController", {}))
+            right_controller = dict(controller_payload.get("RightController", {}))
+
+            def _compute_grip_binary(side_data: dict, current_hand_position: float) -> bool:
+                try:
+                    index_trig = float(side_data.get("index_trig", 0.0))
+                    grip = float(side_data.get("grip", 0.0))
+                except Exception:
+                    return bool(current_hand_position > 0.0)
+                if index_trig > 0.5:
+                    return True
+                if grip > 0.5:
+                    return False
+                return bool(current_hand_position > 0.0)
+
+            left_controller["close_trigger_binary"] = bool(float(left_controller.get("index_trig", 0.0)) > 0.5)
+            left_controller["open_trigger_binary"] = bool(float(left_controller.get("grip", 0.0)) > 0.5)
+            right_controller["close_trigger_binary"] = bool(float(right_controller.get("index_trig", 0.0)) > 0.5)
+            right_controller["open_trigger_binary"] = bool(float(right_controller.get("grip", 0.0)) > 0.5)
+            left_controller["grip_binary"] = _compute_grip_binary(
+                left_controller, self.state_machine.hand_left_position
+            )
+            right_controller["grip_binary"] = _compute_grip_binary(
+                right_controller, self.state_machine.hand_right_position
+            )
+            left_controller.pop("index_trig_binary", None)
+            right_controller.pop("index_trig_binary", None)
+            controller_payload["LeftController"] = left_controller
+            controller_payload["RightController"] = right_controller
             self.redis_client.set(
                 f"controller_data",
-                json.dumps(controller_data)
+                json.dumps(controller_payload)
             )
 
 

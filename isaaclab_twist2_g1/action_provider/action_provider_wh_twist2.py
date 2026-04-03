@@ -19,8 +19,59 @@ import queue
 import copy
 import numpy as np
 from pathlib import Path
+from action_provider.lerobot_vla_http_client import LeRobotVLAHttpClient
 
 project_root = os.environ.get("PROJECT_ROOT")
+
+
+def _extract_controller_binary_signals(controller_data: dict | None) -> dict[str, bool]:
+    def _get_side_data(side_name: str) -> dict:
+        if not isinstance(controller_data, dict):
+            return {}
+        side_data = controller_data.get(side_name, {})
+        if not isinstance(side_data, dict):
+            return {}
+        return side_data
+
+    def _get_grip_binary(side_name: str) -> bool:
+        side_data = _get_side_data(side_name)
+        if "grip_binary" in side_data:
+            return bool(side_data.get("grip_binary"))
+        try:
+            if float(side_data.get("index_trig", 0.0)) > 0.5:
+                return True
+            if float(side_data.get("grip", 0.0)) > 0.5:
+                return False
+        except Exception:
+            pass
+        return False
+
+    def _get_close_trigger_binary(side_name: str) -> bool:
+        side_data = _get_side_data(side_name)
+        if "close_trigger_binary" in side_data:
+            return bool(side_data.get("close_trigger_binary"))
+        try:
+            return bool(float(side_data.get("index_trig", 0.0)) > 0.5)
+        except Exception:
+            return False
+
+    def _get_open_trigger_binary(side_name: str) -> bool:
+        side_data = _get_side_data(side_name)
+        if "open_trigger_binary" in side_data:
+            return bool(side_data.get("open_trigger_binary"))
+        try:
+            return bool(float(side_data.get("grip", 0.0)) > 0.5)
+        except Exception:
+            return False
+
+    return {
+        "left_grip_binary": _get_grip_binary("LeftController"),
+        "right_grip_binary": _get_grip_binary("RightController"),
+        "left_close_trigger_binary": _get_close_trigger_binary("LeftController"),
+        "right_close_trigger_binary": _get_close_trigger_binary("RightController"),
+        "left_open_trigger_binary": _get_open_trigger_binary("LeftController"),
+        "right_open_trigger_binary": _get_open_trigger_binary("RightController"),
+    }
 
 
 class RecordingManager:
@@ -206,6 +257,12 @@ class RecordingManager:
             'human_hand_left': np.zeros((num_frames, 7), dtype=np.float32),
             'human_hand_right': np.zeros((num_frames, 7), dtype=np.float32),
             'human_neck': np.zeros((num_frames, 2), dtype=np.float32),
+            'pico_left_grip_binary': np.zeros(num_frames, dtype=np.bool_),
+            'pico_right_grip_binary': np.zeros(num_frames, dtype=np.bool_),
+            'pico_left_close_trigger_binary': np.zeros(num_frames, dtype=np.bool_),
+            'pico_right_close_trigger_binary': np.zeros(num_frames, dtype=np.bool_),
+            'pico_left_open_trigger_binary': np.zeros(num_frames, dtype=np.bool_),
+            'pico_right_open_trigger_binary': np.zeros(num_frames, dtype=np.bool_),
 
             # Robot data
             'robot_qpos_before_decimation': np.zeros((num_frames, 29), dtype=np.float32),
@@ -265,6 +322,13 @@ class RecordingManager:
             organized['human_hand_left'][i] = frame_data['human']['hand_control']['left']
             organized['human_hand_right'][i] = frame_data['human']['hand_control']['right']
             organized['human_neck'][i] = frame_data['human']['hand_control']['neck']
+            controller_binary = frame_data['human'].get('controller_binary', {})
+            organized['pico_left_grip_binary'][i] = bool(controller_binary.get('left_grip_binary', False))
+            organized['pico_right_grip_binary'][i] = bool(controller_binary.get('right_grip_binary', False))
+            organized['pico_left_close_trigger_binary'][i] = bool(controller_binary.get('left_close_trigger_binary', False))
+            organized['pico_right_close_trigger_binary'][i] = bool(controller_binary.get('right_close_trigger_binary', False))
+            organized['pico_left_open_trigger_binary'][i] = bool(controller_binary.get('left_open_trigger_binary', False))
+            organized['pico_right_open_trigger_binary'][i] = bool(controller_binary.get('right_open_trigger_binary', False))
 
             # Store SMPLX data (variable size, store as list)
             human_smplx_list.append(frame_data['human']['smplx_data_before_gmr'])
@@ -483,9 +547,23 @@ class TWIST2ActionProvider(ActionProvider):
         self._replay_mode = self._normalize_replay_mode(getattr(args_cli, "replay_mode", "inference_replay"))
         self._replay_loop = bool(getattr(args_cli, "replay_loop", False))
         self._replay_enabled = bool(self._replay_file)
+        self._input_source = getattr(args_cli, "input_source", "") or ""
+        self._use_lerobot_vla = self._input_source == "vla"
+        self._lerobot_server_url = getattr(args_cli, "lerobot_server_url", "") or ""
+        self._lerobot_server_timeout = float(getattr(args_cli, "lerobot_server_timeout", 5.0))
+        self._lerobot_server_verify_ssl = bool(getattr(args_cli, "lerobot_server_verify_ssl", False))
+        self._lerobot_policy = None
+        self._lerobot_preprocessor = None
+        self._lerobot_postprocessor = None
+        self._lerobot_predict_action = None
+        self._lerobot_device = None
+        self._lerobot_http_client = None
+        self._lerobot_gripper_threshold = float(getattr(args_cli, "lerobot_gripper_threshold", 0.5))
         self.policy_path = self._resolve_policy_path(args_cli.model_path)
         if (not self._replay_enabled or self._replay_mode != "direct_replay") and not os.path.exists(self.policy_path):
             raise FileNotFoundError(f"[{self.name}] Policy file not found: {self.policy_path}")
+        if self._use_lerobot_vla and self._replay_enabled:
+            raise ValueError(f"[{self.name}] input_source=vla and replay_file are mutually exclusive")
         self.env = env
         self.task_name = args_cli.task  # Store task name for recording
 
@@ -560,6 +638,7 @@ class TWIST2ActionProvider(ActionProvider):
                                                      dtype=torch.float32)
         self._twist2_action_neck = torch.zeros(1, self._twist2_neck_dim, device=self.env.device, dtype=torch.float32)
         self._twist2_hand_valid = False
+        self._vla_gripper_binary = torch.zeros(1, 2, device=self.env.device, dtype=torch.float32)
 
         # Human SMPLX data (before GMR retargeting) storage
         self._twist2_human_smplx_data = None
@@ -568,6 +647,7 @@ class TWIST2ActionProvider(ActionProvider):
         # Human info (height, etc.) storage
         self._twist2_human_info = None
         self._twist2_human_info_valid = False
+        self._twist2_controller_data = None
 
         # Recording control state
         self._recording_active = False
@@ -637,6 +717,8 @@ class TWIST2ActionProvider(ActionProvider):
         self.policy = None
         if not self._replay_enabled or self._replay_mode != "direct_replay":
             self.policy = self.load_policy(self.policy_path)
+        if self._use_lerobot_vla:
+            self._setup_lerobot_vla(args_cli)
 
         # 预计算索引张量与复用缓冲
         device = self.env.device
@@ -1048,6 +1130,148 @@ class TWIST2ActionProvider(ActionProvider):
             return "inference_replay"
         raise ValueError(f"[{self.name}] Unsupported replay_mode: {replay_mode}")
 
+    def _setup_lerobot_vla(self, args_cli) -> None:
+        if self._lerobot_server_url:
+            self._lerobot_http_client = LeRobotVLAHttpClient(
+                base_url=self._lerobot_server_url,
+                timeout_s=self._lerobot_server_timeout,
+                verify_ssl=self._lerobot_server_verify_ssl,
+            )
+            print(
+                f"[{self.name}] LeRobot VLA remote client enabled: "
+                f"url={self._lerobot_server_url} verify_ssl={self._lerobot_server_verify_ssl}"
+            )
+            return
+
+        lerobot_policy_path = Path(getattr(args_cli, "lerobot_policy_path", "")).expanduser().resolve()
+        if not lerobot_policy_path.is_dir():
+            raise FileNotFoundError(f"[{self.name}] LeRobot policy directory not found: {lerobot_policy_path}")
+
+        isaaclab_root = Path(project_root) if project_root else Path(__file__).resolve().parents[1]
+        lerobot_src = isaaclab_root.parent / "lerobot" / "src"
+        if not lerobot_src.is_dir():
+            raise FileNotFoundError(f"[{self.name}] LeRobot src directory not found: {lerobot_src}")
+
+        import sys
+
+        if str(lerobot_src) not in sys.path:
+            sys.path.insert(0, str(lerobot_src))
+
+        from lerobot.configs.policies import PreTrainedConfig
+        from lerobot.policies.factory import _reconnect_relative_absolute_steps, get_policy_class
+        from lerobot.processor import PolicyProcessorPipeline
+        from lerobot.processor.converters import policy_action_to_transition, transition_to_policy_action
+        from lerobot.utils.constants import (
+            POLICY_POSTPROCESSOR_DEFAULT_NAME,
+            POLICY_PREPROCESSOR_DEFAULT_NAME,
+        )
+        from lerobot.utils.control_utils import predict_action
+
+        device_name = getattr(args_cli, "lerobot_policy_device", "") or getattr(args_cli, "device", "cuda:0")
+        config = PreTrainedConfig.from_pretrained(lerobot_policy_path)
+        config.device = device_name
+        policy_cls = get_policy_class(config.type)
+
+        self._lerobot_policy = policy_cls.from_pretrained(lerobot_policy_path, config=config)
+        self._lerobot_preprocessor = PolicyProcessorPipeline.from_pretrained(
+            lerobot_policy_path,
+            config_filename=f"{POLICY_PREPROCESSOR_DEFAULT_NAME}.json",
+        )
+        self._lerobot_postprocessor = PolicyProcessorPipeline.from_pretrained(
+            lerobot_policy_path,
+            config_filename=f"{POLICY_POSTPROCESSOR_DEFAULT_NAME}.json",
+            to_transition=policy_action_to_transition,
+            to_output=transition_to_policy_action,
+        )
+        _reconnect_relative_absolute_steps(self._lerobot_preprocessor, self._lerobot_postprocessor)
+
+        self._lerobot_predict_action = predict_action
+        self._lerobot_device = torch.device(device_name)
+        self._lerobot_policy.reset()
+        self._lerobot_preprocessor.reset()
+        self._lerobot_postprocessor.reset()
+
+        print(
+            f"[{self.name}] LeRobot VLA enabled: "
+            f"path={lerobot_policy_path} type={config.type} device={self._lerobot_device}"
+        )
+
+    def _get_front_camera_rgb_for_vla(self) -> np.ndarray:
+        if "front_camera" not in self.env.scene.keys():
+            raise RuntimeError(f"[{self.name}] front_camera not found in scene for LeRobot VLA inference")
+
+        camera = self.env.scene["front_camera"]
+        if "rgb" not in camera.data.output:
+            raise RuntimeError(f"[{self.name}] front_camera has no rgb output for LeRobot VLA inference")
+
+        rgb = camera.data.output["rgb"][0].detach().cpu().numpy()
+        if rgb.ndim != 3:
+            raise RuntimeError(f"[{self.name}] Unexpected front_camera rgb shape: {rgb.shape}")
+        if rgb.shape[-1] == 4:
+            rgb = rgb[..., :3]
+        if rgb.dtype != np.uint8:
+            rgb = np.clip(rgb, 0, 255).astype(np.uint8)
+        return rgb
+
+    def _infer_lerobot_high_level_command(self, obs_proprio: torch.Tensor) -> torch.Tensor:
+        rgb = self._get_front_camera_rgb_for_vla()
+        proprio = obs_proprio.squeeze(0).detach().cpu().numpy().astype(np.float32)
+        if proprio.shape != (92,):
+            raise RuntimeError(f"[{self.name}] Expected obs_proprio shape (92,), got {proprio.shape}")
+
+        if self._lerobot_http_client is not None:
+            action = self._lerobot_http_client.infer(
+                front_rgb=rgb,
+                observation_state=proprio,
+                robot_type=self.enable_robot,
+            )
+        else:
+            if self._lerobot_policy is None or self._lerobot_predict_action is None:
+                raise RuntimeError(f"[{self.name}] LeRobot VLA requested before initialization")
+
+            observation = {
+                "observation.images.front": rgb,
+                "observation.state": proprio,
+            }
+
+            action = self._lerobot_predict_action(
+                observation=observation,
+                policy=self._lerobot_policy,
+                device=self._lerobot_device,
+                preprocessor=self._lerobot_preprocessor,
+                postprocessor=self._lerobot_postprocessor,
+                use_amp=self._lerobot_device.type == "cuda",
+                task=None,
+                robot_type=self.enable_robot,
+            )
+
+        if not isinstance(action, torch.Tensor):
+            action = torch.as_tensor(action)
+        action = action.to(self.env.device, dtype=torch.float32)
+        if action.dim() == 1:
+            action = action.unsqueeze(0)
+        if action.shape[-1] != 37:
+            raise ValueError(f"[{self.name}] Expected LeRobot action dim 37, got {tuple(action.shape)}")
+
+        self._vla_gripper_binary.copy_(torch.clamp(action[:, 35:37], 0.0, 1.0))
+        return action[:, :35]
+
+    def _apply_vla_gripper_command(self, full_action: torch.Tensor) -> bool:
+        if not self._use_lerobot_vla or not self.enable_gripper or not hasattr(self, "_gripper_source_idx_t"):
+            return False
+
+        left_closed = bool(self._vla_gripper_binary[0, 0].item() >= self._lerobot_gripper_threshold)
+        right_closed = bool(self._vla_gripper_binary[0, 1].item() >= self._lerobot_gripper_threshold)
+        left_position = 0.03 if left_closed else -0.02
+        right_position = 0.03 if right_closed else -0.02
+
+        self._gripper_buf.copy_(
+            torch.tensor([right_position, left_position], dtype=torch.float32, device=self.env.device)
+        )
+        gp_vals = self._gripper_buf.index_select(0, self._gripper_source_idx_t)
+        full_action.index_copy_(0, self._gripper_target_idx_t, gp_vals)
+        return True
+
     def _load_replay_array(self, replay_data, *keys, required=False):
         for key in keys:
             if key in replay_data:
@@ -1345,6 +1569,7 @@ class TWIST2ActionProvider(ActionProvider):
         self._twist2_human_smplx_valid = False
         self._twist2_human_info = None
         self._twist2_human_info_valid = False
+        self._twist2_controller_data = None
         self._recording_command = "none"
 
     def _should_drop_stale_twist2_action(self, action_timestamp_ms: int | None) -> bool:
@@ -1361,6 +1586,7 @@ class TWIST2ActionProvider(ActionProvider):
             self._twist2_hand_valid = False
             self._twist2_human_smplx_valid = False
             self._twist2_human_info_valid = False
+            self._twist2_controller_data = None
             # Return default 35D mimic_obs to maintain stable standing pose
             return self._default_mimic_obs.clone()
         try:
@@ -1371,6 +1597,7 @@ class TWIST2ActionProvider(ActionProvider):
                 "action_neck_unitree_g1_with_hands",
                 "human_smplx_data_unitree_g1_with_hands",
                 "human_info_unitree_g1_with_hands",
+                "controller_data",
                 "recording_control_unitree_g1_with_hands",
                 "t_action",
                 self._input_ready_key,
@@ -1391,9 +1618,10 @@ class TWIST2ActionProvider(ActionProvider):
             action_neck_raw = res[3] if len(res) > 3 else None
             human_smplx_data_raw = res[4] if len(res) > 4 else None
             human_info_raw = res[5] if len(res) > 5 else None
-            recording_control_raw = res[6] if len(res) > 6 else None
-            action_timestamp_raw = res[7] if len(res) > 7 else None
-            input_ready_raw = res[8] if len(res) > 8 else None
+            controller_data_raw = res[6] if len(res) > 6 else None
+            recording_control_raw = res[7] if len(res) > 7 else None
+            action_timestamp_raw = res[8] if len(res) > 8 else None
+            input_ready_raw = res[9] if len(res) > 9 else None
 
             self._update_input_ready_guard(input_ready_raw)
             action_timestamp_ms = self._parse_action_timestamp_ms(action_timestamp_raw)
@@ -1411,6 +1639,14 @@ class TWIST2ActionProvider(ActionProvider):
             action_left = self._twist2_parse_list(action_left_raw, self._twist2_hand_dim)
             action_right = self._twist2_parse_list(action_right_raw, self._twist2_hand_dim)
             action_neck = self._twist2_parse_list(action_neck_raw, self._twist2_neck_dim)
+            self._twist2_controller_data = None
+            if controller_data_raw:
+                try:
+                    if isinstance(controller_data_raw, (bytes, bytearray)):
+                        controller_data_raw = controller_data_raw.decode("utf-8")
+                    self._twist2_controller_data = json.loads(controller_data_raw)
+                except Exception:
+                    self._twist2_controller_data = None
 
 
             # action_body[0] = max(0, min(2, action_body[0]))
@@ -1537,6 +1773,7 @@ class TWIST2ActionProvider(ActionProvider):
             self._twist2_hand_valid = False
             self._twist2_human_smplx_valid = False
             self._twist2_human_info_valid = False
+            self._twist2_controller_data = None
             # Return default 35D mimic_obs on error to maintain stable standing pose
             return self._default_mimic_obs.clone()
 
@@ -1648,19 +1885,6 @@ class TWIST2ActionProvider(ActionProvider):
         state_neck = [0.0] * self._twist2_neck_dim
         self._twist2_publish_state(state_body.squeeze(0).tolist(), state_hand_left, state_hand_right, state_neck)
 
-        # TWIST2 mimic from Redis (and hand actions)
-        action_mimic = self._twist2_fetch_actions()  # [1,35]
-
-        # Amplify XY velocity to compensate for slower teleop movement
-        # Structure: [xy_vel(2), z_pos(1), roll_pitch(2), yaw_vel(1), joints(29)]
-        # Scale factor: 5.0x makes teleop movement more responsive
-        # Real robot gets ~0.5-0.6x operator speed, so 5x amplification gives ~2.5-3x final speed
-        velocity_amplification = 1.0
-        action_mimic[:, 0:2] = action_mimic[:, 0:2] * velocity_amplification  # Amplify XY velocity
-
-        # Also amplify yaw angular velocity for consistent turning
-        action_mimic[:, 5:6] = action_mimic[:, 5:6] * velocity_amplification  # Amplify yaw velocity
-
         # zero ankle velocities (TWIST2 convention)
         if len(self._twist2_ankle_idx) > 0:
             dof_vel = dof_vel.clone()
@@ -1676,6 +1900,15 @@ class TWIST2ActionProvider(ActionProvider):
             ],
             dim=-1,
         )  # [1,92]
+
+        if self._use_lerobot_vla:
+            action_mimic = self._infer_lerobot_high_level_command(obs_proprio)  # [1,35]
+        else:
+            action_mimic = self._twist2_fetch_actions()  # [1,35]
+
+        velocity_amplification = 1.0
+        action_mimic[:, 0:2] = action_mimic[:, 0:2] * velocity_amplification
+        action_mimic[:, 5:6] = action_mimic[:, 5:6] * velocity_amplification
 
         obs_full = torch.cat([action_mimic, obs_proprio], dim=-1)  # [1,127]
 
@@ -1790,17 +2023,19 @@ class TWIST2ActionProvider(ActionProvider):
                                                         dtype=torch.long), target_29.squeeze(0))
 
             # 夹爪/手指（若有）
-            hand_from_redis = False
-            if self.enable_dex3 and self._twist2_hand_valid and hasattr(self, "_left_hand_source_idx_t"):
+            hand_or_gripper_applied = False
+            if self._apply_vla_gripper_command(full_action):
+                hand_or_gripper_applied = True
+            elif self.enable_dex3 and self._twist2_hand_valid and hasattr(self, "_left_hand_source_idx_t"):
                 self._left_hand_buf.copy_(self._twist2_action_hand_left.squeeze(0))
                 self._right_hand_buf.copy_(self._twist2_action_hand_right.squeeze(0))
                 l_vals = self._left_hand_buf.index_select(0, self._left_hand_source_idx_t)
                 r_vals = self._right_hand_buf.index_select(0, self._right_hand_source_idx_t)
                 full_action.index_copy_(0, self._left_hand_target_idx_t, l_vals)
                 full_action.index_copy_(0, self._right_hand_target_idx_t, r_vals)
-                hand_from_redis = True
+                hand_or_gripper_applied = True
 
-            if not hand_from_redis:
+            if not hand_or_gripper_applied:
                 if self.gripper_dds and hasattr(self, "_gripper_source_idx_t"):
                     gripper_cmd = self.gripper_dds.get_gripper_command()
                     if gripper_cmd:
@@ -2325,6 +2560,8 @@ class TWIST2ActionProvider(ActionProvider):
         else:
             human_data["human_info"] = None
 
+        human_data["controller_binary"] = _extract_controller_binary_signals(self._twist2_controller_data)
+
         # Hand control data
         human_data["hand_control"] = {
             "left": self._twist2_action_hand_left.cpu().numpy().squeeze(0),  # [7]
@@ -2542,6 +2779,7 @@ class TWIST2ActionProvider(ActionProvider):
             self._twist2_action_hand_left.zero_()
             self._twist2_action_hand_right.zero_()
             self._twist2_action_neck.zero_()
+            self._vla_gripper_binary.zero_()
 
             # Reset hand validity flag
             self._twist2_hand_valid = False
@@ -2550,6 +2788,7 @@ class TWIST2ActionProvider(ActionProvider):
             self._twist2_smplx_valid = False
             self._twist2_human_smplx_valid = False
             self._twist2_human_info_valid = False
+            self._twist2_controller_data = None
 
             # Reset recording command state
             self._recording_command = "none"
@@ -2561,6 +2800,15 @@ class TWIST2ActionProvider(ActionProvider):
             self._replay_joint_mae_count = 0
             self._replay_object_err_sums = {}
             self._replay_object_err_counts = {}
+            if self._use_lerobot_vla:
+                if self._lerobot_http_client is not None:
+                    self._lerobot_http_client.reset()
+                if self._lerobot_policy is not None:
+                    self._lerobot_policy.reset()
+                if self._lerobot_preprocessor is not None:
+                    self._lerobot_preprocessor.reset()
+                if self._lerobot_postprocessor is not None:
+                    self._lerobot_postprocessor.reset()
 
             print(f"[{self.name}] ✅ Internal buffers reset successfully")
 
