@@ -123,7 +123,7 @@ def _capture_front_camera_rgb(env):
         return None
 
 
-def _extract_reward(env) -> float:
+def _extract_reward_info(env) -> dict:
     import torch
 
     reward_manager = getattr(env, "reward_manager", None)
@@ -133,16 +133,49 @@ def _extract_reward(env) -> float:
             dt = getattr(env, "physics_dt", None)
         if dt is None:
             raise RuntimeError("env.step_dt and env.physics_dt are both unavailable")
-        reward = reward_manager.compute(dt=dt)
-        if isinstance(reward, torch.Tensor):
-            return float(reward.detach().reshape(-1)[0].item())
-        return float(reward[0])
+        scaled_reward = reward_manager.compute(dt=dt)
+        if isinstance(scaled_reward, torch.Tensor):
+            scaled_value = float(scaled_reward.detach().reshape(-1)[0].item())
+        else:
+            scaled_value = float(scaled_reward[0])
+
+        raw_terms = []
+        raw_total = 0.0
+        get_terms = getattr(reward_manager, "get_active_iterable_terms", None)
+        if callable(get_terms):
+            for entry in get_terms(0):
+                if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+                    continue
+                term_name = str(entry[0])
+                term_values = entry[1]
+                if isinstance(term_values, (list, tuple)) and term_values:
+                    term_value = float(term_values[0])
+                else:
+                    term_value = float(term_values)
+                raw_terms.append((term_name, term_value))
+                raw_total += term_value
+        else:
+            raw_total = scaled_value / dt
+
+        return {
+            "scaled_total": scaled_value,
+            "raw_total": raw_total,
+            "dt": float(dt),
+            "raw_terms": raw_terms,
+        }
 
     reward_buf = getattr(env, "reward_buf", None)
     if reward_buf is not None:
         if isinstance(reward_buf, torch.Tensor):
-            return float(reward_buf.detach().reshape(-1)[0].item())
-        return float(reward_buf[0])
+            value = float(reward_buf.detach().reshape(-1)[0].item())
+        else:
+            value = float(reward_buf[0])
+        return {
+            "scaled_total": value,
+            "raw_total": value,
+            "dt": 1.0,
+            "raw_terms": [],
+        }
 
     raise RuntimeError("env.reward_manager and env.reward_buf are both unavailable")
 
@@ -191,7 +224,9 @@ def main() -> int:
     started_at = time.time()
     step_idx = 0
     max_reward = float("-inf")
+    max_reward_scaled = float("-inf")
     final_reward = 0.0
+    final_reward_scaled = 0.0
     success = False
     failure_reason = "unknown"
     video_path = ""
@@ -249,19 +284,36 @@ def main() -> int:
             if frame is not None:
                 recorder.add_frame(frame)
 
-            final_reward = _extract_reward(env)
+            reward_info = _extract_reward_info(env)
+            final_reward = reward_info["raw_total"]
+            final_reward_scaled = reward_info["scaled_total"]
             if final_reward > max_reward:
                 max_reward = final_reward
+            if final_reward_scaled > max_reward_scaled:
+                max_reward_scaled = final_reward_scaled
+
+            terms_str = ", ".join(f"{name}={value:.4f}" for name, value in reward_info["raw_terms"])
+            print(
+                f"[sim_eval_vla] reward step={step_idx} "
+                f"raw_total={final_reward:.4f} scaled_total={final_reward_scaled:.4f}"
+                + (f" | {terms_str}" if terms_str else "")
+            )
 
             if final_reward >= 1.0:
                 success = True
                 failure_reason = "success"
-                print(f"[sim_eval_vla] success at control_step={step_idx} reward={final_reward:.4f}")
+                print(
+                    f"[sim_eval_vla] success at control_step={step_idx} "
+                    f"raw_reward={final_reward:.4f} scaled_reward={final_reward_scaled:.4f}"
+                )
                 break
 
             if step_idx >= args_cli.max_steps:
                 failure_reason = "timeout"
-                print(f"[sim_eval_vla] timeout at control_step={step_idx} reward={final_reward:.4f}")
+                print(
+                    f"[sim_eval_vla] timeout at control_step={step_idx} "
+                    f"raw_reward={final_reward:.4f} scaled_reward={final_reward_scaled:.4f}"
+                )
                 break
 
             if env.sim.is_stopped():
@@ -288,7 +340,9 @@ def main() -> int:
             "episode_steps": step_idx,
             "max_steps": args_cli.max_steps,
             "final_reward": final_reward,
+            "final_reward_scaled": final_reward_scaled,
             "max_reward": max_reward if max_reward != float("-inf") else 0.0,
+            "max_reward_scaled": max_reward_scaled if max_reward_scaled != float("-inf") else 0.0,
             "video_path": video_path,
             "server_url": args_cli.lerobot_server_url,
             "started_at": started_at,
@@ -311,7 +365,9 @@ def main() -> int:
             "episode_steps": step_idx,
             "max_steps": args_cli.max_steps,
             "final_reward": final_reward,
+            "final_reward_scaled": final_reward_scaled,
             "max_reward": max_reward if max_reward != float("-inf") else 0.0,
+            "max_reward_scaled": max_reward_scaled if max_reward_scaled != float("-inf") else 0.0,
             "video_path": "",
             "server_url": args_cli.lerobot_server_url,
             "started_at": started_at,
