@@ -11,7 +11,8 @@ LEROBOT_POLICY_DEVICE="${LEROBOT_POLICY_DEVICE:-cuda:0}"
 TWIST2_MODEL_PATH="${TWIST2_MODEL_PATH:-${SCRIPT_DIR}/../TWIST2/assets/ckpts/twist2_1017_20k.onnx}"
 #TASK_NAME="${TASK_NAME:-Isaac-Move-Football-G129-Dex3-Wholebody}"
 TASK_NAME="${TASK_NAME:-Isaac-Move-Football-Single-G129-Dex3-Wholebody}"
-ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/twist2_default.yaml}"
+ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/football_single_twist2_vla.yaml}"
+SEED="${SEED:-42}"
 #export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2.usd"
 if [[ -z "${LEROBOT_SERVER_URL}" ]]; then
   echo "LEROBOT_SERVER_URL is required"
@@ -29,9 +30,11 @@ fi
 python sim_main.py \
   --input_source vla \
   --gmt_backend twist2 \
+  --headless \
   --env_config_yaml "${ENV_CONFIG_YAML}" \
   --task "${TASK_NAME}" \
   --robot_type g129 \
+  --seed "${SEED}" \
   --enable_cameras \
   --model_path "${TWIST2_MODEL_PATH}" \
   --lerobot_server_url "${LEROBOT_SERVER_URL}" \

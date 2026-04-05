@@ -9,13 +9,14 @@ cd "${SCRIPT_DIR}" || exit 1
 # ------------------------------------------------------------------
 PYTHON_BIN="python"
 TASK_NAME="Isaac-Move-Football-Single-G129-Dex3-Wholebody"
-ENV_CONFIG_YAML="tasks/common_env_config/sonic_default.yaml"
+ENV_CONFIG_YAML="tasks/common_env_config/football_single_sonic.yaml"
 RUN_DEVICE="cpu"
 ROBOT_TYPE="g129"
 ROBOT_COLLIDER_MODE="box"   # box | fourpoints
+SEED="42"
 ENABLE_CAMERAS=1
 ENABLE_DEX3_DDS=1
-HEADLESS=0
+HEADLESS=1
 SONIC_REDIS_HOST="localhost"
 SONIC_REDIS_PORT="6379"
 SONIC_ENCODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_encoder.onnx"
@@ -63,6 +64,7 @@ echo "[robot_usd] mode=${ROBOT_COLLIDER_MODE}"
 echo "[robot_usd] path=${ROBOT_USD_OVERRIDE}"
 echo "[sonic] task=${TASK_NAME}"
 echo "[sonic] env_config=${ENV_CONFIG_YAML}"
+echo "[sonic] seed=${SEED}"
 echo "[sonic] encoder=${SONIC_ENCODER_PATH}"
 echo "[sonic] decoder=${SONIC_DECODER_PATH}"
 echo "[recording] save_dir=${RECORDING_SAVE_DIR}"
@@ -87,6 +89,7 @@ cmd=(
   --image_fps "${IMAGE_FPS}"
   --image_xrobot_ffmpeg "${IMAGE_XROBOT_FFMPEG}"
   --recording_save_dir "${RECORDING_SAVE_DIR}"
+  --seed "${SEED}"
 )
 
 if [ "${ENABLE_CAMERAS}" = "1" ]; then

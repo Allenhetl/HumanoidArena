@@ -34,3 +34,31 @@ tasks:
 当前会自动同步的派生字段：
 - `scene.contact_forces.update_period <- sim.dt`
 - `sim.render_interval <- decimation`
+
+推荐做法：
+- 通用默认继续放在 `twist2_default.yaml` / `sonic_default.yaml`
+- 具体任务单独建文件，例如 `football_single_twist2.yaml` / `football_single_sonic.yaml` / `football_single_vla.yaml`
+- run 脚本直接指向对应任务 YAML，避免把 task 特例塞进 default
+
+如果任务里有需要 deterministic reset / recording / replay restore 的环境对象，建议在任务 YAML 中直接配置：
+
+```yaml
+overrides:
+  sim:
+    dt: 0.001
+  decimation: 10
+  object_reset_seed_source: time
+  deterministic_object_resets:
+    - record_name: football
+      scene_keys: [object, football]
+      pose_range:
+        x: [-0.05, 0.05]
+        y: [0.0, 0.05]
+      zero_velocity_on_reset: true
+```
+
+种子来源建议：
+- `object_reset_seed_source: time`
+  适合真人录制采数。每次 episode 会拿到新的局部伪随机对象初始状态，但不会污染全局 RNG。
+- `object_reset_seed_source: env_seed`
+  适合 VLA / policy 评测。同一个 `--seed` 下，每次冷启动和每一轮 reset 的对象出生点序列都一致，方便不同模型横向对比。

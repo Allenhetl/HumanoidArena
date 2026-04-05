@@ -9,7 +9,7 @@ cd "${SCRIPT_DIR}" || exit 1
 # ------------------------------------------------------------------
 PYTHON_BIN="python"
 TASK_NAME="Isaac-Move-Football-Single-G129-Dex3-Wholebody"
-ENV_CONFIG_YAML="tasks/common_env_config/twist2_default.yaml"
+ENV_CONFIG_YAML="tasks/common_env_config/football_single_twist2.yaml"
 RUN_DEVICE="cpu"
 ROBOT_TYPE="g129"
 ROBOT_COLLIDER_MODE="box"   # box | fourpoints
@@ -18,12 +18,13 @@ ENABLE_CAMERAS=1
 ENABLE_DEX3_DDS=1
 HEADLESS=1
 IMAGE_TRANSPORT="xrobot"
-IMAGE_XROBOT_HOST="10.42.0.35"
+IMAGE_XROBOT_HOST="10.42.0.35" # eth
+#IMAGE_XROBOT_HOST="192.168.101.69" ｜ wifi
 IMAGE_XROBOT_PORT="12345"
 IMAGE_XROBOT_BITRATE="16777216"
 IMAGE_FPS="30"
 IMAGE_XROBOT_FFMPEG="/usr/bin/ffmpeg"
-RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data//0401/twist2/zk"
+RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HOI_football/twist2/tw"
 
 export PROJECT_ROOT="${SCRIPT_DIR}"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"

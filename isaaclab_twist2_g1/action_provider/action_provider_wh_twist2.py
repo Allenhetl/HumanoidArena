@@ -20,6 +20,13 @@ import copy
 import numpy as np
 from pathlib import Path
 from action_provider.lerobot_vla_http_client import LeRobotVLAHttpClient
+from common_env_objects import (
+    add_env_object_frame_arrays,
+    add_episode_init_env_object_fields,
+    collect_recordable_env_object_states,
+    get_current_episode_object_seed_info,
+    resolve_env_object_scene_key,
+)
 
 project_root = os.environ.get("PROJECT_ROOT")
 
@@ -283,6 +290,14 @@ class RecordingManager:
             'system_physics_dt': np.zeros(num_frames, dtype=np.float32),
             'system_timestamp': np.zeros(num_frames, dtype=np.float64),
         }
+        episode_init_meta = first_frame.get("episode_init_meta", {})
+        if isinstance(episode_init_meta, dict):
+            seed_value = episode_init_meta.get("object_seed")
+            if seed_value is not None:
+                organized["episode_object_seed"] = np.array(int(seed_value), dtype=np.int64)
+            seed_source = episode_init_meta.get("object_seed_source")
+            if seed_source:
+                organized["episode_object_seed_source"] = np.array(str(seed_source))
 
         first_robot = first_frame.get('robot', {})
         first_torque = first_robot.get('applied_torque_before_decimation')
@@ -302,13 +317,6 @@ class RecordingManager:
         # Lists for variable-size data
         human_smplx_list = []
         human_info_list = []
-        env_obj_football_pos = []
-        env_obj_football_lin_vel = []
-        env_obj_football_ang_vel = []
-        env_obj_table_drink_pos = []
-        env_obj_table_drink_lin_vel = []
-        env_obj_table_drink_ang_vel = []
-
         # Collect vision data (store first and last frame only to save space)
         # vision_indices = [0, num_frames - 1] if num_frames > 1 else [0]
         vision_indices = list(range(num_frames))
@@ -333,24 +341,6 @@ class RecordingManager:
             # Store SMPLX data (variable size, store as list)
             human_smplx_list.append(frame_data['human']['smplx_data_before_gmr'])
             human_info_list.append(frame_data['human']['human_info'])
-
-            # Environment objects
-            if frame_data['env_obj']['football'] is not None:
-                env_obj_football_pos.append(frame_data['env_obj']['football']['position'])
-                env_obj_football_lin_vel.append(frame_data['env_obj']['football']['linear_velocity'])
-                env_obj_football_ang_vel.append(frame_data['env_obj']['football']['angular_velocity'])
-            else:
-                env_obj_football_pos.append(np.zeros(3, dtype=np.float32))
-                env_obj_football_lin_vel.append(np.zeros(3, dtype=np.float32))
-                env_obj_football_ang_vel.append(np.zeros(3, dtype=np.float32))
-            if frame_data['env_obj'].get('table_drink') is not None:
-                env_obj_table_drink_pos.append(frame_data['env_obj']['table_drink']['position'])
-                env_obj_table_drink_lin_vel.append(frame_data['env_obj']['table_drink']['linear_velocity'])
-                env_obj_table_drink_ang_vel.append(frame_data['env_obj']['table_drink']['angular_velocity'])
-            else:
-                env_obj_table_drink_pos.append(np.zeros(3, dtype=np.float32))
-                env_obj_table_drink_lin_vel.append(np.zeros(3, dtype=np.float32))
-                env_obj_table_drink_ang_vel.append(np.zeros(3, dtype=np.float32))
 
             # Robot data
             organized['robot_qpos_before_decimation'][i] = frame_data['robot']['qpos_before_decimation']
@@ -391,12 +381,8 @@ class RecordingManager:
         # Add variable-size data
         organized['human_smplx_data'] = json.dumps(human_smplx_list)
         organized['human_info_data'] = json.dumps(human_info_list)
-        organized['env_obj_football_position'] = np.array(env_obj_football_pos, dtype=np.float32)
-        organized['env_obj_football_linear_velocity'] = np.array(env_obj_football_lin_vel, dtype=np.float32)
-        organized['env_obj_football_angular_velocity'] = np.array(env_obj_football_ang_vel, dtype=np.float32)
-        organized['env_obj_table_drink_position'] = np.array(env_obj_table_drink_pos, dtype=np.float32)
-        organized['env_obj_table_drink_linear_velocity'] = np.array(env_obj_table_drink_lin_vel, dtype=np.float32)
-        organized['env_obj_table_drink_angular_velocity'] = np.array(env_obj_table_drink_ang_vel, dtype=np.float32)
+        add_env_object_frame_arrays(organized, data_buffer)
+        add_episode_init_env_object_fields(organized, first_frame.get("episode_init_env"))
 
         # Add vision data
         if vision_rgb_list:
@@ -676,6 +662,7 @@ class TWIST2ActionProvider(ActionProvider):
         self._replay_joint_err_log_interval = 10
         self._replay_object_err_sums = {}
         self._replay_object_err_counts = {}
+        self._episode_init_env_state = self._collect_env_state()
 
         if self._replay_enabled:
             self._setup_local_replay()
@@ -1369,14 +1356,7 @@ class TWIST2ActionProvider(ActionProvider):
             )
 
     def _resolve_replay_object_scene_key(self, object_name: str) -> str | None:
-        alias_candidates = {
-            "football": ("object", "football"),
-            "table_drink": ("table_drink",),
-        }
-        for scene_key in alias_candidates.get(object_name, (object_name,)):
-            if scene_key in self.env.scene.keys():
-                return scene_key
-        return None
+        return resolve_env_object_scene_key(self.env, self.env.cfg, object_name)
 
     def _get_current_replay_object_state(self, object_name: str) -> dict | None:
         scene_key = self._resolve_replay_object_scene_key(object_name)
@@ -1448,6 +1428,9 @@ class TWIST2ActionProvider(ActionProvider):
                     f"object={object_name} "
                     + " ".join(parts)
                 )
+
+    def _collect_env_state(self) -> dict:
+        return collect_recordable_env_object_states(self.env, self.env.cfg)
 
     def _next_replay_frame_idx(self) -> int | None:
         if not self._replay_enabled or self._replay_num_frames <= 0:
@@ -2572,42 +2555,14 @@ class TWIST2ActionProvider(ActionProvider):
         recording_data["human"] = human_data
 
         # ===== ENVIRONMENT OBJECTS =====
-        env_obj_data = {}
-
-        # Football object (extensible for other objects)
-        try:
-            if "object" in self.env.scene.keys():
-                football = self.env.scene["object"]
-                root_state = football.data.root_state_w  # [num_envs, 13]
-
-                # Extract position and velocity (world coordinates)
-                env_obj_data["football"] = {
-                    "position": root_state[0, 0:3].cpu().numpy(),  # [3] x, y, z
-                    "linear_velocity": root_state[0, 7:10].cpu().numpy(),  # [3] vx, vy, vz
-                    "angular_velocity": root_state[0, 10:13].cpu().numpy()  # [3] wx, wy, wz
-                }
-            else:
-                env_obj_data["football"] = None
-        except Exception as e:
-            print(f"[{self.name}] Failed to get football state: {e}")
-            env_obj_data["football"] = None
-
-        try:
-            if "table_drink" in self.env.scene.keys():
-                table_drink = self.env.scene["table_drink"]
-                root_state = table_drink.data.root_state_w
-                env_obj_data["table_drink"] = {
-                    "position": root_state[0, 0:3].cpu().numpy(),
-                    "linear_velocity": root_state[0, 7:10].cpu().numpy(),
-                    "angular_velocity": root_state[0, 10:13].cpu().numpy(),
-                }
-            else:
-                env_obj_data["table_drink"] = None
-        except Exception as e:
-            print(f"[{self.name}] Failed to get table_drink state: {e}")
-            env_obj_data["table_drink"] = None
-
+        env_obj_data = self._collect_env_state()
         recording_data["env_obj"] = env_obj_data
+        recording_data["episode_init_env"] = self._episode_init_env_state
+        object_seed_info = get_current_episode_object_seed_info(self.env.cfg)
+        recording_data["episode_init_meta"] = {
+            "object_seed": object_seed_info.get("seed"),
+            "object_seed_source": object_seed_info.get("source"),
+        }
 
         # ===== ROBOT DATA =====
         robot_data = {}
@@ -2766,6 +2721,8 @@ class TWIST2ActionProvider(ActionProvider):
     def _reset_internal_buffers(self):
         """Reset internal buffers after environment reset to ensure clean state."""
         try:
+            self._episode_init_env_state = self._collect_env_state()
+
             # Reset TWIST2 history buffer
             self._twist2_history.zero_()
 
@@ -2816,6 +2773,9 @@ class TWIST2ActionProvider(ActionProvider):
             print(f"[{self.name}] ❌ Failed to reset internal buffers: {e}")
             import traceback
             traceback.print_exc()
+
+    def on_env_objects_reset(self):
+        self._episode_init_env_state = self._collect_env_state()
 
     def _convert_to_joint_range(self, value):
         """Convert gripper control value to joint angle"""

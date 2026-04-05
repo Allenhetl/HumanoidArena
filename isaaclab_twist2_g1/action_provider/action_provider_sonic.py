@@ -48,6 +48,13 @@ from scipy.spatial.transform import Rotation as R
 from action_provider.action_base import ActionProvider
 from action_provider.recording_common import AsyncEpisodeRecorder
 from action_provider.reset_control import consume_reset_complete, get_input_ready_key, publish_reset_command
+from common_env_objects import (
+    add_env_object_frame_arrays,
+    add_episode_init_env_object_fields,
+    collect_recordable_env_object_states,
+    get_current_episode_object_seed_info,
+    resolve_env_object_scene_key,
+)
 
 # Isaac Sim imports for RTF monitoring
 try:
@@ -1091,54 +1098,12 @@ def _organize_sonic_episode(data_buffer: list[dict[str, Any]], timestamp_us: int
             _json_string([frame["human_raw"]["recording_control"] for frame in data_buffer])
         ),
     }
-
-    football_states = [frame["env"]["football"] for frame in data_buffer]
-    if any(state is not None for state in football_states):
-        organized["env_obj_football_position"] = np.array(
-            [
-                state["position"] if state is not None else np.zeros(3, dtype=np.float32)
-                for state in football_states
-            ],
-            dtype=np.float32,
-        )
-        organized["env_obj_football_linear_velocity"] = np.array(
-            [
-                state["linear_velocity"] if state is not None else np.zeros(3, dtype=np.float32)
-                for state in football_states
-            ],
-            dtype=np.float32,
-        )
-        organized["env_obj_football_angular_velocity"] = np.array(
-            [
-                state["angular_velocity"] if state is not None else np.zeros(3, dtype=np.float32)
-                for state in football_states
-            ],
-            dtype=np.float32,
-        )
-
-    table_states = [frame["env"]["table_drink"] for frame in data_buffer]
-    if any(state is not None for state in table_states):
-        organized["env_obj_table_drink_position"] = np.array(
-            [
-                state["position"] if state is not None else np.zeros(3, dtype=np.float32)
-                for state in table_states
-            ],
-            dtype=np.float32,
-        )
-        organized["env_obj_table_drink_linear_velocity"] = np.array(
-            [
-                state["linear_velocity"] if state is not None else np.zeros(3, dtype=np.float32)
-                for state in table_states
-            ],
-            dtype=np.float32,
-        )
-        organized["env_obj_table_drink_angular_velocity"] = np.array(
-            [
-                state["angular_velocity"] if state is not None else np.zeros(3, dtype=np.float32)
-                for state in table_states
-            ],
-            dtype=np.float32,
-        )
+    object_seed = meta.get("episode_object_seed")
+    if object_seed is not None:
+        organized["episode_object_seed"] = np.array(int(object_seed), dtype=np.int64)
+    object_seed_source = meta.get("episode_object_seed_source")
+    if object_seed_source:
+        organized["episode_object_seed_source"] = np.array(str(object_seed_source))
 
     rgb_frames = []
     depth_frames = []
@@ -1156,6 +1121,9 @@ def _organize_sonic_episode(data_buffer: list[dict[str, Any]], timestamp_us: int
         organized["vision_frame_indices"] = np.array(vision_indices, dtype=np.int32)
     if depth_frames:
         organized["vision_depth"] = np.array(depth_frames)
+
+    add_env_object_frame_arrays(organized, data_buffer)
+    add_episode_init_env_object_fields(organized, first.get("episode_init_env"))
 
     return organized
 
@@ -1225,6 +1193,7 @@ class SonicActionProvider(ActionProvider):
         self._replay_joint_err_log_interval = 10
         self._replay_object_err_sums = {}
         self._replay_object_err_counts = {}
+        self._episode_init_env_state = self._collect_env_state()
         self.recording_manager = AsyncEpisodeRecorder(
             save_dir=getattr(args_cli, "recording_save_dir", "./recording_data"),
             task_name=f"{self.task_name}_sonic",
@@ -1988,14 +1957,7 @@ class SonicActionProvider(ActionProvider):
             )
 
     def _resolve_replay_object_scene_key(self, object_name: str) -> str | None:
-        alias_candidates = {
-            "football": ("object", "football"),
-            "table_drink": ("table_drink",),
-        }
-        for scene_key in alias_candidates.get(object_name, (object_name,)):
-            if scene_key in self.env.scene.keys():
-                return scene_key
-        return None
+        return resolve_env_object_scene_key(self.env, self.env.cfg, object_name)
 
     def _get_current_replay_object_state(self, object_name: str) -> dict | None:
         scene_key = self._resolve_replay_object_scene_key(object_name)
@@ -2081,6 +2043,8 @@ class SonicActionProvider(ActionProvider):
             joint_pos_sonic = joint_pos_sonic - self._sonic_default_np
             root_z = float(robot.root_state_w[0, 2].cpu().numpy())
 
+        self._episode_init_env_state = self._collect_env_state()
+
         self._frame_count = 0
         self._smpl_data_valid = False
         self._smpl_history_fill = 0
@@ -2126,6 +2090,9 @@ class SonicActionProvider(ActionProvider):
         self._latest_timestamp_monotonic = 0.0
         # print(f"[SONIC] on_env_reset: frame_count reset, warmup={self._sonic_warmup_steps}")  # warmup 已注释
         print(f"[SONIC] on_env_reset: frame_count and history reset")
+
+    def on_env_objects_reset(self):
+        self._episode_init_env_state = self._collect_env_state()
 
     def _begin_episode_recording(self) -> None:
         if not self.recording_manager.is_recording:
@@ -2297,30 +2264,7 @@ class SonicActionProvider(ActionProvider):
         self._recording_command = "none"
 
     def _collect_env_state(self) -> dict[str, Any]:
-        env_state = {"football": None, "table_drink": None}
-        try:
-            if "object" in self.env.scene.keys():
-                obj = self.env.scene["object"]
-                root_state = obj.data.root_state_w
-                env_state["football"] = {
-                    "position": root_state[0, 0:3].cpu().numpy(),
-                    "linear_velocity": root_state[0, 7:10].cpu().numpy(),
-                    "angular_velocity": root_state[0, 10:13].cpu().numpy(),
-                }
-        except Exception:
-            env_state["football"] = None
-        try:
-            if "table_drink" in self.env.scene.keys():
-                obj = self.env.scene["table_drink"]
-                root_state = obj.data.root_state_w
-                env_state["table_drink"] = {
-                    "position": root_state[0, 0:3].cpu().numpy(),
-                    "linear_velocity": root_state[0, 7:10].cpu().numpy(),
-                    "angular_velocity": root_state[0, 10:13].cpu().numpy(),
-                }
-        except Exception:
-            env_state["table_drink"] = None
-        return env_state
+        return collect_recordable_env_object_states(self.env, self.env.cfg)
 
     def _collect_vision_state(self) -> dict[str, Any]:
         vision = {"rgb": None, "depth": None}
@@ -2357,7 +2301,10 @@ class SonicActionProvider(ActionProvider):
                 "pose_source": self._pose_source,
                 "encoder_path": self.encoder_path,
                 "decoder_path": self.decoder_path,
+                "episode_object_seed": get_current_episode_object_seed_info(self.env.cfg).get("seed"),
+                "episode_object_seed_source": get_current_episode_object_seed_info(self.env.cfg).get("source"),
             },
+            "episode_init_env": self._episode_init_env_state,
             "markers": {
                 "frame_index": int(self._latest_frame_index),
                 "episode_step": int(self.recording_manager.frame_count),

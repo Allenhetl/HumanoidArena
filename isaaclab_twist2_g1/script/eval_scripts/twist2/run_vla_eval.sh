@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ISAACLAB_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 export ROBOT_USD_OVERRIDE="${ISAACLAB_ROOT}/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2.usd"
 TASK_NAME="Isaac-Move-Football-Single-G129-Dex3-Wholebody"
-ENV_CONFIG_YAML="tasks/common_env_config/twist2_default.yaml"
+ENV_CONFIG_YAML="tasks/common_env_config/football_single_twist2_vla.yaml"
 ISAAC_DEVICE="cpu"
 HEADLESS=1
 MAX_STEPS=500
@@ -34,7 +34,7 @@ MODEL_PATHS=(
   "/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/train/diffusion_twist2_0401/checkpoints/last/pretrained_model"
 )
 
-RESULTS_DIR="${SCRIPT_DIR}/eval_results/diffusion_policy_$(date +%Y%m%d_%H%M%S)"
+RESULTS_DIR="${SCRIPT_DIR}/eval_results/dp_rand_$(date +%Y%m%d_%H%M%S)"
 
 ARGS=(
   --task "${TASK_NAME}"

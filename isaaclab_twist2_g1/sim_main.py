@@ -18,6 +18,7 @@ import argparse
 import time
 import sys
 import signal
+import numpy as np
 import torch
 import gymnasium as gym
 from pathlib import Path
@@ -223,6 +224,7 @@ from action_provider.reset_control import (
     publish_reset_complete,
     read_reset_trigger,
 )
+from common_env_objects import resolve_env_object_scene_key
 from tasks.common_env_config import apply_env_config_yaml
 from tasks.common_runtime import apply_optional_runtime_augments
 from tools.get_stiffness import get_robot_stiffness_from_env
@@ -306,6 +308,14 @@ def _notify_action_provider_env_reset(action_provider):
             return
 
 
+def _notify_action_provider_env_objects_reset(action_provider):
+    if action_provider is None:
+        return
+    method = getattr(action_provider, "on_env_objects_reset", None)
+    if callable(method):
+        method()
+
+
 def _publish_backend_input_ready(args_cli, *, redis_client=None, source="startup"):
     backend = _resolve_input_guard_backend(args_cli)
     if backend is None:
@@ -318,11 +328,123 @@ def _publish_backend_input_ready(args_cli, *, redis_client=None, source="startup
     return payload
 
 
+def _load_replay_initial_env_object_states(args_cli):
+    replay_file = getattr(args_cli, "replay_file", "")
+    if not replay_file:
+        return {}
+
+    cached = getattr(args_cli, "_replay_initial_env_object_states_cache", None)
+    if cached is not None:
+        return cached
+
+    replay_path = Path(replay_file).expanduser().resolve()
+    object_states = {}
+    suffixes = {
+        "_position": "position",
+        "_orientation": "orientation",
+        "_linear_velocity": "linear_velocity",
+        "_angular_velocity": "angular_velocity",
+    }
+
+    with np.load(replay_path, allow_pickle=True) as replay_data:
+        for key in replay_data.files:
+            if not key.startswith("episode_init_env_obj_"):
+                continue
+            for suffix, field_name in suffixes.items():
+                if key.endswith(suffix):
+                    object_name = key[len("episode_init_env_obj_") : -len(suffix)]
+                    object_states.setdefault(object_name, {})[field_name] = np.asarray(replay_data[key]).copy()
+                    break
+
+        if not object_states:
+            for key in replay_data.files:
+                if not key.startswith("env_obj_"):
+                    continue
+                for suffix, field_name in suffixes.items():
+                    if key.endswith(suffix):
+                        object_name = key[len("env_obj_") : -len(suffix)]
+                        value = np.asarray(replay_data[key]).copy()
+                        if value.ndim >= 1:
+                            value = value[0].copy()
+                        object_states.setdefault(object_name, {})[field_name] = value
+                        break
+            if object_states:
+                print(
+                    "[replay_env_init] episode_init_env_obj_* missing, "
+                    "falling back to frame-0 env_obj_* state from replay file"
+                )
+
+    setattr(args_cli, "_replay_initial_env_object_states_cache", object_states)
+    return object_states
+
+
+def _apply_explicit_env_object_states(env, env_cfg, object_states, *, log_prefix="replay_env_init"):
+    if not object_states:
+        return False
+
+    env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+    applied_objects = []
+
+    def _broadcast_field(value, width):
+        tensor = torch.as_tensor(np.asarray(value), device=env.device, dtype=torch.float32)
+        if tensor.ndim == 1:
+            tensor = tensor.unsqueeze(0).repeat(env.num_envs, 1)
+        elif tensor.ndim == 2 and tensor.shape[0] == env.num_envs:
+            pass
+        else:
+            tensor = tensor.reshape(1, -1).repeat(env.num_envs, 1)
+        return tensor[:, :width]
+
+    for object_name, state in object_states.items():
+        scene_name = resolve_env_object_scene_key(env, env_cfg, object_name)
+        if scene_name is None:
+            continue
+
+        asset = env.scene[scene_name]
+        try:
+            root_state = asset.data.default_root_state.clone()
+        except Exception:
+            root_state = asset.data.root_state_w.clone()
+
+        if "position" in state:
+            root_state[:, 0:3] = _broadcast_field(state["position"], 3)
+        if "orientation" in state:
+            root_state[:, 3:7] = _broadcast_field(state["orientation"], 4)
+        if "linear_velocity" in state:
+            root_state[:, 7:10] = _broadcast_field(state["linear_velocity"], 3)
+        else:
+            root_state[:, 7:10] = 0.0
+        if "angular_velocity" in state:
+            root_state[:, 10:13] = _broadcast_field(state["angular_velocity"], 3)
+        else:
+            root_state[:, 10:13] = 0.0
+
+        asset.write_root_state_to_sim(root_state, env_ids=env_ids)
+        applied_objects.append(
+            f"{object_name}->{scene_name}:pos={root_state[0, 0:3].detach().cpu().numpy().tolist()}"
+        )
+
+    if not applied_objects:
+        return False
+
+    env.scene.write_data_to_sim()
+    print(f"[{log_prefix}] applied initial env object state: " + ", ".join(applied_objects))
+    return True
+
+
+def _restore_replay_initial_env_state_if_needed(env, args_cli):
+    object_states = _load_replay_initial_env_object_states(args_cli)
+    if not object_states:
+        return False
+    return _apply_explicit_env_object_states(env, env.cfg, object_states)
+
+
 def _perform_complete_reset(env, env_cfg, args_cli, redis_client=None, action_provider=None):
     print("🔄 Complete reset (PhysX + all entities)...")
     env.sim.reset()
     env.reset()
     _trigger_task_reset_event(env_cfg, "reset_all_self", env)
+    _restore_replay_initial_env_state_if_needed(env, args_cli)
     _notify_action_provider_env_reset(action_provider)
     _publish_backend_input_ready(args_cli, redis_client=redis_client, source="complete_reset")
     print("✅ Complete reset finished")
@@ -551,6 +673,7 @@ def main():
     if getattr(env_cfg, "startup_task_reset_enabled", True):
         try:
             _trigger_task_reset_event(env_cfg, "reset_all_self", env)
+            _restore_replay_initial_env_state_if_needed(env, args_cli)
         except Exception as exc:
             print(f"[env_runtime] startup reset_all_self failed: {exc}")
     else:
@@ -879,9 +1002,12 @@ def main():
                                 if reset_category == "1":
                                     print("🔄 Resetting object...")
                                     _trigger_task_reset_event(env_cfg, "reset_object_self", env)
+                                    _restore_replay_initial_env_state_if_needed(env, args_cli)
+                                    _notify_action_provider_env_objects_reset(action_provider)
                                 elif reset_category == "2":
                                     print("🔄 Resetting all (robot + objects)...")
                                     _trigger_task_reset_event(env_cfg, "reset_all_self", env)
+                                    _restore_replay_initial_env_state_if_needed(env, args_cli)
                                     _notify_action_provider_env_reset(action_provider)
                                     _publish_backend_input_ready(
                                         args_cli,
@@ -921,11 +1047,14 @@ def main():
                                     # Reset object only
                                     print("🔄 Resetting object...")
                                     _trigger_task_reset_event(env_cfg, "reset_object_self", env)
+                                    _restore_replay_initial_env_state_if_needed(env, args_cli)
+                                    _notify_action_provider_env_objects_reset(action_provider)
                                     reset_pose_dds.write_reset_pose_command(-1)
                                 elif reset_category == '2':
                                     # Reset all (robot + objects)
                                     print("🔄 Resetting all (robot + objects)...")
                                     _trigger_task_reset_event(env_cfg, "reset_all_self", env)
+                                    _restore_replay_initial_env_state_if_needed(env, args_cli)
                                     _notify_action_provider_env_reset(action_provider)
                                     _publish_backend_input_ready(
                                         args_cli,

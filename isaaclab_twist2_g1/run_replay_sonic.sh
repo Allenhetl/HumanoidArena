@@ -13,7 +13,7 @@ REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recordin
 REPLAY_MODE="direct_replay"   # inference_replay | direct_replay
 REPLAY_LOOP=0                    # 1 | 0
 TASK_NAME="Isaac-Move-Football-Single-G129-Dex3-Wholebody"                     # 留空则从 replay 文件读取
-ENV_CONFIG_YAML="tasks/common_env_config/sonic_default.yaml"
+ENV_CONFIG_YAML="tasks/common_env_config/football_single_sonic.yaml"
 RUN_DEVICE="cpu"
 ROBOT_TYPE="g129"
 ROBOT_COLLIDER_MODE="box"        # box | fourpoints
@@ -26,6 +26,7 @@ IMAGE_TRANSPORT="zmq"
 IMAGE_ZMQ_PORT="5555"
 IMAGE_FPS="30"
 LOG_DIR="${SCRIPT_DIR}/logs/sonic_replay"
+SEED="42"
 
 export PROJECT_ROOT="${SCRIPT_DIR}"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
@@ -99,6 +100,7 @@ echo "[robot_usd] path=${ROBOT_USD_OVERRIDE}"
 echo "[sonic replay] file=${REPLAY_FILE}"
 echo "[sonic replay] mode=${REPLAY_MODE}"
 echo "[sonic replay] task=${TASK_NAME}"
+echo "[sonic replay] seed=${SEED}"
 echo "[sonic replay] encoder=${SONIC_ENCODER_PATH}"
 echo "[sonic replay] decoder=${SONIC_DECODER_PATH}"
 echo "[sonic replay] python=${PYTHON_BIN}"
@@ -119,6 +121,7 @@ cmd=(
   --image_transport "${IMAGE_TRANSPORT}"
   --image_fps "${IMAGE_FPS}"
   --image_zmq_port "${IMAGE_ZMQ_PORT}"
+  --seed "${SEED}"
 )
 
 if [ "${ENABLE_CAMERAS}" = "1" ]; then

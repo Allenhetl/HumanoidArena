@@ -8,7 +8,6 @@ import torch
 
 import isaaclab.envs.mdp as base_mdp
 from isaaclab.envs import ManagerBasedRLEnvCfg
-from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
@@ -22,6 +21,7 @@ from . import mdp
 from tasks.common_config import G1RobotPresets, CameraPresets
 from tasks.common_event.event_manager import SimpleEvent, SimpleEventManager
 from tasks.common_runtime import apply_optional_runtime_augments
+from common_env_objects import apply_deterministic_object_resets
 from tasks.common_scene.base_scene_football_single_cfg_wholebody import (
     TableFootballSceneCfgWH,
     ROBOT_INIT_X,
@@ -147,6 +147,19 @@ class MoveFootballG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self):
         self.decimation = 10
         self.episode_length_s = 20.0
+        self.object_reset_seed_source = "time"
+        self.deterministic_object_resets = [
+            {
+                "record_name": "football",
+                "scene_keys": ["object", "football"],
+                "pose_range": {
+                    "x": [-0.05, 0.05],
+                    "y": [0.0, 0.05],
+                },
+                "zero_velocity_on_reset": True,
+            }
+        ]
+        self._replay_initial_env_state_active = False
 
         self.sim.dt = 0.001
         self.scene.contact_forces.update_period = self.sim.dt
@@ -185,6 +198,7 @@ class MoveFootballG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
 
     def initialize_task_scene(self, env, args_cli=None):
         self._task_adjust_args_cli = args_cli
+        self._replay_initial_env_state_active = bool(getattr(args_cli, "replay_file", "")) if args_cli else False
         self.adjust_task_scene(env, phase="init", args_cli=args_cli)
 
     def adjust_task_scene(self, env, phase="init", args_cli=None):
@@ -195,19 +209,22 @@ class MoveFootballG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
             self._apply_reset_adjustments()
 
     def _reset_object_self(self, env):
-        base_mdp.reset_root_state_uniform(
+        applied = apply_deterministic_object_resets(
+            self,
             env,
-            torch.arange(env.num_envs, device=env.device),
-            pose_range={"x": [-0.05, 0.05], "y": [0.0, 0.05]},
-            velocity_range={},
-            asset_cfg=SceneEntityCfg("object"),
+            selected_record_names={"football"},
         )
+        if applied:
+            print("[object_reset] " + ", ".join(applied))
 
     def _reset_all_self(self, env):
         base_mdp.reset_scene_to_default(
             env,
             torch.arange(env.num_envs, device=env.device),
         )
+        applied = apply_deterministic_object_resets(self, env)
+        if applied:
+            print("[object_reset] " + ", ".join(applied))
         self.adjust_task_scene(env, phase="reset")
 
     def _apply_init_adjustments(self, args_cli=None):
@@ -262,6 +279,3 @@ class MoveFootballG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
             print(f"[grass_ground_material] after reset apply result: {grass_ok_post}")
         except Exception as exc:
             print(f"[football_runtime] post-reset grass skipped: {exc}")
-
-
-
