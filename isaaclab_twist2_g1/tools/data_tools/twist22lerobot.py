@@ -63,6 +63,8 @@ ACTION_NAMES = [
     "command.pitch",
     "command.yaw_vel",
     *[f"command.joint_target.{name}" for name in TWIST2_ACTION_JOINT_NAMES],
+    "command.left_grip_binary",
+    "command.right_grip_binary",
 ]
 
 STATE_NAMES = [
@@ -201,6 +203,23 @@ def build_features(image_shape: tuple[int, int, int], use_videos: bool) -> dict[
     }
 
 
+def get_grip_binary_arrays(data: np.lib.npyio.NpzFile, num_frames: int) -> tuple[np.ndarray, np.ndarray]:
+    left = np.asarray(data["pico_left_grip_binary"], dtype=np.float32) if "pico_left_grip_binary" in data else None
+    right = np.asarray(data["pico_right_grip_binary"], dtype=np.float32) if "pico_right_grip_binary" in data else None
+
+    if left is None:
+        left = np.zeros(num_frames, dtype=np.float32)
+    if right is None:
+        right = np.zeros(num_frames, dtype=np.float32)
+
+    if left.shape != (num_frames,):
+        raise ValueError(f"Unexpected pico_left_grip_binary shape: {left.shape}, expected {(num_frames,)}")
+    if right.shape != (num_frames,):
+        raise ValueError(f"Unexpected pico_right_grip_binary shape: {right.shape}, expected {(num_frames,)}")
+
+    return left, right
+
+
 def normalize_task(task_value, npz_path: Path, input_root: Path) -> str:
     if task_value is not None:
         task = decode_scalar(task_value).strip()
@@ -265,6 +284,7 @@ def main() -> None:
                 obs_buf = np.asarray(data["robot_obs_buf"], dtype=np.float32)
                 vision_rgb = np.asarray(data["vision_rgb"], dtype=np.uint8)
                 vision_frame_indices = np.asarray(data["vision_frame_indices"], dtype=np.int64)
+                left_grip_binary, right_grip_binary = get_grip_binary_arrays(data, obs_buf.shape[0])
 
                 if obs_buf.ndim != 2 or obs_buf.shape[1] < FUTURE_OBS_END:
                     raise ValueError(f"{npz_path} has unexpected robot_obs_buf shape: {obs_buf.shape}")
@@ -290,7 +310,21 @@ def main() -> None:
                             "observation.state": np.ascontiguousarray(
                                 obs_buf[frame_index, OBS_PROPRIO_START:OBS_PROPRIO_END]
                             ),
-                            "action": np.ascontiguousarray(obs_buf[frame_index, FUTURE_OBS_START:FUTURE_OBS_END]),
+                            "action": np.ascontiguousarray(
+                                np.concatenate(
+                                    [
+                                        obs_buf[frame_index, FUTURE_OBS_START:FUTURE_OBS_END],
+                                        np.array(
+                                            [
+                                                left_grip_binary[frame_index],
+                                                right_grip_binary[frame_index],
+                                            ],
+                                            dtype=np.float32,
+                                        ),
+                                    ],
+                                    axis=0,
+                                )
+                            ),
                         }
                     )
                     frames_in_episode += 1

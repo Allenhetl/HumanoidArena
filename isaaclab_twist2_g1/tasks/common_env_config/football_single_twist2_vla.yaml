@@ -10,6 +10,6 @@ overrides:
     - record_name: football
       scene_keys: [object, football]
       pose_range:
-        x: [-1.0, 1.0]
-        y: [0.6, 1.2]
+        x: [-1.5, 1.5]
+        y: [-1.5, 1.5]
       zero_velocity_on_reset: true

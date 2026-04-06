@@ -96,7 +96,7 @@ overrides:
 - `scene_keys`
   在 Isaac scene 中可尝试匹配的 asset key 列表。
 - `pose_range`
-  本次 reset 的偏移范围，支持 `x/y/z`。
+  本次 reset 的绝对位置采样范围，支持 `x/y/z`。
 - `zero_velocity_on_reset`
   reset 后是否把线速度和角速度清零。
 

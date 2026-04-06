@@ -1237,11 +1237,18 @@ class TWIST2ActionProvider(ActionProvider):
         action = action.to(self.env.device, dtype=torch.float32)
         if action.dim() == 1:
             action = action.unsqueeze(0)
-        if action.shape[-1] != 37:
-            raise ValueError(f"[{self.name}] Expected LeRobot action dim 37, got {tuple(action.shape)}")
-
-        self._vla_gripper_binary.copy_(torch.clamp(action[:, 35:37], 0.0, 1.0))
-        return action[:, :35]
+        if action.shape[-1] == 35:
+            # Older TWIST2 LeRobot datasets only contain the 35D body command.
+            # In that case, default both grip-binary channels to open.
+            self._vla_gripper_binary.zero_()
+            if not getattr(self, "_warned_lerobot_action_dim_35", False):
+                print(f"[{self.name}] LeRobot action dim 35 detected; defaulting both grip binaries to 0")
+                self._warned_lerobot_action_dim_35 = True
+            return action
+        if action.shape[-1] == 37:
+            self._vla_gripper_binary.copy_(torch.clamp(action[:, 35:37], 0.0, 1.0))
+            return action[:, :35]
+        raise ValueError(f"[{self.name}] Expected LeRobot action dim 35 or 37, got {tuple(action.shape)}")
 
     def _apply_vla_gripper_command(self, full_action: torch.Tensor) -> bool:
         if not self._use_lerobot_vla or not self.enable_gripper or not hasattr(self, "_gripper_source_idx_t"):

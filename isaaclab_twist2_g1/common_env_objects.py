@@ -205,8 +205,8 @@ def apply_deterministic_object_resets(env_cfg: Any, env, *, selected_record_name
                     continue
                 low, high = [float(v) for v in axis_range]
                 low, high = min(low, high), max(low, high)
-                offset = float(rng.uniform(low, high)) if high > low else low
-                root_state[env_id, axis_idx] += offset
+                position = float(rng.uniform(low, high)) if high > low else low
+                root_state[env_id, axis_idx] = position
             if spec.get("zero_velocity_on_reset", True):
                 root_state[env_id, 7:13] = 0.0
 

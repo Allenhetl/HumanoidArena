@@ -1,0 +1,31 @@
+PYTHONPATH=src python src/lerobot/scripts/lerobot_train.py \
+  --dataset.repo_id=local/twist2-0405-vla \
+  --dataset.root=/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/datasets/twist2_0405_vla \
+  --dataset.image_transforms.enable=true \
+  --policy.type=act \
+  --policy.device=cuda \
+  --policy.chunk_size=20 \
+  --policy.n_action_steps=20 \
+  --policy.optimizer_lr=1e-5 \
+  --policy.push_to_hub=false \
+  --batch_size=80 \
+  --steps=100000 \
+  --output_dir=/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/train/act_twist2_football_rand_0405 \
+  --job_name=act_twist2_football_rand_0405
+
+
+PYTHONPATH=src python src/lerobot/scripts/lerobot_train.py \
+  --dataset.repo_id=local/twist2-0405-vla \
+  --dataset.root=/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/datasets/twist2_0405_vla \
+  --dataset.image_transforms.enable=true \
+  --policy.type=diffusion \
+  --policy.device=cuda \
+  --policy.n_obs_steps=2 \
+  --policy.horizon=24 \
+  --policy.n_action_steps=20 \
+  --policy.optimizer_lr=1e-4 \
+  --policy.push_to_hub=false \
+  --batch_size=32 \
+  --steps=100000 \
+  --output_dir=/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/train/diffusion_twist2_football_rand_0405 \
+  --job_name=diffusion_twist2_football_rand_0405

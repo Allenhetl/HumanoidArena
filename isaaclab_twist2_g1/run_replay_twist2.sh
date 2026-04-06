@@ -8,7 +8,7 @@ cd "${SCRIPT_DIR}" || exit 1
 # User config: edit here
 # ------------------------------------------------------------------
 PYTHON_BIN="python"
-REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/0405/twist2_test/Isaac-Move-Football-Single-G129-Dex3-Wholebody_1775362776298261.npz"
+REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_football_v2/twist2/yb/Isaac-Move-Football-Single-G129-Dex3-Wholebody_1775481557188038.npz"
 REPLAY_MODE="inference"   # inference | direct
 REPLAY_LOOP=0             # 1 | 0
 TASK_NAME=""              # 留空则从 replay 文件读取

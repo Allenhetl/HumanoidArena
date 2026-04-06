@@ -31,11 +31,9 @@ from tasks.common_scene.base_scene_football_single_cfg_wholebody import (
 
 GOAL_REFERENCE_LINE_RELATIVE_OFFSETS = (
     (0.0, 0.0),
-    (0.0, 0.0),
 )
 GOAL_REFERENCE_LINE_ABSOLUTE_CENTERS = (
     (0.0, 50.0),
-    (0.0, -50.0),
 )
 GOAL_REFERENCE_LINE_LENGTH = 5.0
 GOAL_REFERENCE_LINE_WIDTH_RATIO = 0.5
@@ -52,7 +50,7 @@ class FootballTableSceneCfg(TableFootballSceneCfgWH):
     """Football table scene with G1 29DOF Dex3 wholebody robot."""
 
     robot: ArticulationCfg = G1RobotPresets.g1_29dof_dex3_wholebody(
-        init_pos=(ROBOT_INIT_X, ROBOT_INIT_Y, ROBOT_INIT_Z),
+        init_pos=(ROBOT_INIT_X, ROBOT_INIT_Y-2, ROBOT_INIT_Z),
         init_rot=(0.7071, 0.0, 0.0, 0.7071),  # 向左旋轉 90° (繞 Z 軸)
     )
     # robot: ArticulationCfg = G1RobotPresets.g1_29dof_dex3_wholebody(

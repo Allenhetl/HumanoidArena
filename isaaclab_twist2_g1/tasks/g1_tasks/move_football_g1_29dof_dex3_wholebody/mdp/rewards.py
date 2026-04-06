@@ -28,7 +28,6 @@ def compute_reward(
     goal_local_y_max: float = 2.10,
     goal_min_height: float = 0.00,
     goal_max_height: float = 1.85,
-    ball_radius: float = 0.11,
 ) -> torch.Tensor:
     """Binary football reward based on the goal asset bounds.
 
@@ -43,14 +42,13 @@ def compute_reward(
     ball_y = football.data.root_pos_w[:, 1]
     ball_z = football.data.root_pos_w[:, 2]
 
-    # These local bounds come from the football goal asset's XY footprint after
-    # the 0.01 scale in the scene config is applied, with a small safety margin.
-    front_x_min = front_goal_origin_x + goal_local_x_min - ball_radius
-    front_x_max = front_goal_origin_x + goal_local_x_max + ball_radius
-    front_y_min = front_goal_origin_y + goal_local_y_min - ball_radius
-    front_y_max = front_goal_origin_y + goal_local_y_max + ball_radius
+    # Score only when the BALL CENTER is inside the goal volume (no radius margin).
+    front_x_min = front_goal_origin_x + goal_local_x_min
+    front_x_max = front_goal_origin_x + goal_local_x_max
+    front_y_min = front_goal_origin_y + goal_local_y_min
+    front_y_max = front_goal_origin_y + goal_local_y_max
 
-    in_goal_z = (ball_z > goal_min_height - ball_radius) & (ball_z < goal_max_height + ball_radius)
+    in_goal_z = (ball_z > goal_min_height) & (ball_z < goal_max_height)
 
     in_front_goal_x = (ball_x > front_x_min) & (ball_x < front_x_max)
     in_front_goal_y = (ball_y > front_y_min) & (ball_y < front_y_max)
@@ -58,10 +56,10 @@ def compute_reward(
 
     has_back_goal = "goal_net_2" in env.scene.keys()
     if has_back_goal:
-        back_x_min = back_goal_origin_x - goal_local_x_max - ball_radius
-        back_x_max = back_goal_origin_x - goal_local_x_min + ball_radius
-        back_y_min = back_goal_origin_y - goal_local_y_max - ball_radius
-        back_y_max = back_goal_origin_y - goal_local_y_min + ball_radius
+        back_x_min = back_goal_origin_x - goal_local_x_max
+        back_x_max = back_goal_origin_x - goal_local_x_min
+        back_y_min = back_goal_origin_y - goal_local_y_max
+        back_y_max = back_goal_origin_y - goal_local_y_min
         in_back_goal_x = (ball_x > back_x_min) & (ball_x < back_x_max)
         in_back_goal_y = (ball_y > back_y_min) & (ball_y < back_y_max)
         scored_back = in_back_goal_x & in_back_goal_y & in_goal_z

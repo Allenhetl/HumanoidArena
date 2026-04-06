@@ -60,7 +60,7 @@ class TableFootballSceneCfgWH(InteractiveSceneCfg):
     object = RigidObjectCfg(
         prim_path="/World/envs/env_.*/Object",
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=[ROBOT_INIT_X + BALL_OFFSET_X, ROBOT_INIT_Y + BALL_OFFSET_Y, 0.11],
+            pos=[BALL_OFFSET_X, BALL_OFFSET_Y, 0.11],
             rot=[1.0, 0.0, 0.0, 0.0],
         ),
         spawn=UsdFileCfg(
