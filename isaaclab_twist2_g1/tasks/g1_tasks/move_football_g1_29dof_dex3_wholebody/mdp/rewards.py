@@ -1,5 +1,14 @@
 # Copyright (c) 2025, Unitree Robotics Co., Ltd. All Rights Reserved.
 # License: Apache License, Version 2.0
+"""Football goal reward — all geometry for this task lives in this file only.
+
+Scoring rule: ball *center* must (1) cross the **inner edge** of the painted goal reference line
+(same width as ``tools.pitch_lines``: ``0.12 * 0.5`` m), (2) stay within the goal mouth in X,
+(3) stay within goal height in Z.
+
+Line center in ``(x, y)`` is taken as ``GOAL_NET_*_ORIGIN`` (goal spawn origin), matching a
+``goal_reference`` line drawn with relative offset ``(0, 0)`` at that center.
+"""
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -14,6 +23,20 @@ from tasks.common_scene.base_scene_football_single_cfg_wholebody import GOAL_NET
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
+# --- constants (kept here only; must match ``create_goal_reference_lines`` width formula) ---
+# ``tools.pitch_lines.DEFAULT_LINE_WIDTH`` * env ``GOAL_REFERENCE_LINE_WIDTH_RATIO`` (0.5)
+_PITCH_DEFAULT_LINE_WIDTH_M = 0.12
+_GOAL_REFERENCE_LINE_WIDTH_RATIO = 0.5
+_GOAL_LINE_WIDTH_M = _PITCH_DEFAULT_LINE_WIDTH_M * _GOAL_REFERENCE_LINE_WIDTH_RATIO
+
+# Mouth inner span along world X: offsets from ``GOAL_NET_*_ORIGIN[0]`` (meters), no padding.
+_GOAL_MOUTH_X_MIN_LOCAL = 0.0
+_GOAL_MOUTH_X_MAX_LOCAL = 5.1
+
+# Height under crossbar (world Z), meters.
+_GOAL_HEIGHT_Z_MIN = 0.0
+_GOAL_HEIGHT_Z_MAX = 1.85
+
 
 def compute_reward(
     env: "ManagerBasedRLEnv",
@@ -22,19 +45,13 @@ def compute_reward(
     front_goal_origin_y: float = GOAL_NET_1_ORIGIN[1],
     back_goal_origin_x: float = GOAL_NET_2_ORIGIN[0],
     back_goal_origin_y: float = GOAL_NET_2_ORIGIN[1],
-    goal_local_x_min: float = -0.05,
-    goal_local_x_max: float = 5.05,
-    goal_local_y_min: float = -0.05,
-    goal_local_y_max: float = 2.10,
-    goal_min_height: float = 0.00,
-    goal_max_height: float = 1.85,
+    goal_mouth_x_min_local: float = _GOAL_MOUTH_X_MIN_LOCAL,
+    goal_mouth_x_max_local: float = _GOAL_MOUTH_X_MAX_LOCAL,
+    goal_min_height: float = _GOAL_HEIGHT_Z_MIN,
+    goal_max_height: float = _GOAL_HEIGHT_Z_MAX,
+    goal_line_width: float = _GOAL_LINE_WIDTH_M,
 ) -> torch.Tensor:
-    """Binary football reward based on the goal asset bounds.
-
-    The single-goal task uses only ``goal_net``. This reward therefore always
-    checks the front goal and only checks the mirrored back goal when the scene
-    actually contains ``goal_net_2``.
-    """
+    """Binary reward: +1 if scored, else -1."""
 
     football: RigidObject = env.scene[object_cfg.name]
 
@@ -42,26 +59,25 @@ def compute_reward(
     ball_y = football.data.root_pos_w[:, 1]
     ball_z = football.data.root_pos_w[:, 2]
 
-    # Score only when the BALL CENTER is inside the goal volume (no radius margin).
-    front_x_min = front_goal_origin_x + goal_local_x_min
-    front_x_max = front_goal_origin_x + goal_local_x_max
-    front_y_min = front_goal_origin_y + goal_local_y_min
-    front_y_max = front_goal_origin_y + goal_local_y_max
+    front_x_min = front_goal_origin_x + goal_mouth_x_min_local
+    front_x_max = front_goal_origin_x + goal_mouth_x_max_local
+    front_goal_line_center_y = front_goal_origin_y
+    front_goal_line_inner_y = front_goal_line_center_y + goal_line_width * 0.5
 
     in_goal_z = (ball_z > goal_min_height) & (ball_z < goal_max_height)
 
     in_front_goal_x = (ball_x > front_x_min) & (ball_x < front_x_max)
-    in_front_goal_y = (ball_y > front_y_min) & (ball_y < front_y_max)
+    in_front_goal_y = ball_y > front_goal_line_inner_y
     scored_front = in_front_goal_x & in_front_goal_y & in_goal_z
 
     has_back_goal = "goal_net_2" in env.scene.keys()
     if has_back_goal:
-        back_x_min = back_goal_origin_x - goal_local_x_max
-        back_x_max = back_goal_origin_x - goal_local_x_min
-        back_y_min = back_goal_origin_y - goal_local_y_max
-        back_y_max = back_goal_origin_y - goal_local_y_min
+        back_x_min = back_goal_origin_x - goal_mouth_x_max_local
+        back_x_max = back_goal_origin_x - goal_mouth_x_min_local
+        back_goal_line_center_y = back_goal_origin_y
+        back_goal_line_inner_y = back_goal_line_center_y - goal_line_width * 0.5
         in_back_goal_x = (ball_x > back_x_min) & (ball_x < back_x_max)
-        in_back_goal_y = (ball_y > back_y_min) & (ball_y < back_y_max)
+        in_back_goal_y = ball_y < back_goal_line_inner_y
         scored_back = in_back_goal_x & in_back_goal_y & in_goal_z
     else:
         scored_back = torch.zeros_like(scored_front)

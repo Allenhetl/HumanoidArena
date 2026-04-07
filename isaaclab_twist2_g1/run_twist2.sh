@@ -8,15 +8,16 @@ cd "${SCRIPT_DIR}" || exit 1
 # User config: edit here
 # ------------------------------------------------------------------
 PYTHON_BIN="python"
-TASK_NAME="Isaac-Move-Football-Single-G129-Dex3-Wholebody"
-ENV_CONFIG_YAML="tasks/common_env_config/football_single_twist2.yaml"
+# TASK_NAME="Isaac-Move-Football-Single-G129-Dex3-Wholebody"
+TASK_NAME="Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody"
+ENV_CONFIG_YAML="tasks/common_env_config/livingroom_grapcup_twist2.yaml"
 RUN_DEVICE="cpu"
 ROBOT_TYPE="g129"
 ROBOT_COLLIDER_MODE="box"   # box | fourpoints
 SEED="42"
 ENABLE_CAMERAS=1
 ENABLE_DEX3_DDS=1
-HEADLESS=1
+HEADLESS=0
 IMAGE_TRANSPORT="xrobot"
 IMAGE_XROBOT_HOST="10.42.0.35" # eth
 #IMAGE_XROBOT_HOST="192.168.101.69" ｜ wifi
@@ -24,7 +25,7 @@ IMAGE_XROBOT_PORT="12345"
 IMAGE_XROBOT_BITRATE="16777216"
 IMAGE_FPS="30"
 IMAGE_XROBOT_FFMPEG="/usr/bin/ffmpeg"
-RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HOI_football_v2/twist2/tw"
+RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/temp"
 
 export PROJECT_ROOT="${SCRIPT_DIR}"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"

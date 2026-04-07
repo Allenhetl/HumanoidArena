@@ -19,7 +19,7 @@ from tasks.common_scene.base_scene_pickplace_doubledesk import DoubleTableSceneC
 @configclass
 class PickPlaceDoubleDeskSceneCfg(DoubleTableSceneCfg):
     robot: ArticulationCfg = G1RobotPresets.g1_29dof_dex3_wholebody(
-        init_pos=(-2.0, -3.0, 0.8),
+        init_pos=(-3.0, -2.5, 0.8),
         init_rot=(1, 0.0, 0.0, 0.0),
     )
 
@@ -96,6 +96,7 @@ class MovePickPlaceDoubleDeskG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self):
         self.decimation = 4
         self.episode_length_s = 20.0
+        self.object_reset_seed_source = "time"
 
         self.sim.dt = 0.005
         self.scene.contact_forces.update_period = self.sim.dt
@@ -134,3 +135,46 @@ class MovePickPlaceDoubleDeskG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
                 )
             ),
         )
+
+    def initialize_task_scene(self, env, args_cli=None):
+        self._deactivate_room_embedded_cameras(env)
+        self._apply_grey_studio_light_rig()
+
+    def _deactivate_room_embedded_cameras(self, env):
+        try:
+            import omni.usd
+
+            stage = omni.usd.get_context().get_stage()
+            deactivated = []
+            for env_idx in range(env.num_envs):
+                cameras_prim = stage.GetPrimAtPath(
+                    f"/World/envs/env_{env_idx}/Room/Lab/Cameras"
+                )
+                if cameras_prim and cameras_prim.IsValid() and cameras_prim.IsActive():
+                    cameras_prim.SetActive(False)
+                    deactivated.append(cameras_prim.GetPath().pathString)
+            print(
+                f"[scene_camera_cleanup] deactivated embedded room camera roots: {deactivated}"
+            )
+        except Exception as exc:
+            print(f"[scene_camera_cleanup] failed: {exc}")
+
+    def _apply_grey_studio_light_rig(self):
+        try:
+            import omni.kit.actions.core
+            import omni.usd
+
+            usd_context = omni.usd.get_context()
+            action_registry = omni.kit.actions.core.get_action_registry()
+            set_lighting_mode_rig = action_registry.get_action(
+                "omni.kit.viewport.menubar.lighting",
+                "set_lighting_mode_rig",
+            )
+            if set_lighting_mode_rig is None:
+                print("[scene_light_rig] viewport lighting action not found; using stage lights only")
+                return
+
+            result = set_lighting_mode_rig.execute("Grey_Studio", usd_context=usd_context)
+            print(f"[scene_light_rig] applied Grey_Studio rig: {result}")
+        except Exception as exc:
+            print(f"[scene_light_rig] failed: {exc}")

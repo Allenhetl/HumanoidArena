@@ -105,6 +105,8 @@ def _run_episode(args, server_url: str, model_path: str, model_label: str, seed:
         str(failure_video_dir),
         "--video_fps",
         str(args.video_fps),
+        "--post_termination_record_steps",
+        str(args.post_termination_record_steps),
         "--episode_index",
         str(episode_index),
         "--model_label",
@@ -222,6 +224,7 @@ def main() -> int:
     parser.add_argument("--repeats_per_seed", type=int, default=1)
     parser.add_argument("--max_steps", type=int, default=300)
     parser.add_argument("--video_fps", type=int, default=30)
+    parser.add_argument("--post_termination_record_steps", type=int, default=0)
     parser.add_argument("--robot_type", type=str, default="g129")
     parser.add_argument("--twist2_model_path", type=str, required=True)
     parser.add_argument("--results_dir", type=str, required=True)

@@ -1,0 +1,8 @@
+name: livingroom_grapcup_twist2
+description: TWIST2 env config for Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody.
+
+overrides:
+  sim:
+    dt: 0.001
+  decimation: 10
+  object_reset_seed_source: time

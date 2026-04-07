@@ -40,6 +40,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--success_video_dir", type=str, required=True)
     parser.add_argument("--failure_video_dir", type=str, required=True)
     parser.add_argument("--video_fps", type=int, default=30)
+    parser.add_argument("--post_termination_record_steps", type=int, default=0)
     parser.add_argument("--episode_index", type=int, default=0)
     parser.add_argument("--model_label", type=str, default="")
     parser.add_argument("--eval_model_path", type=str, default="")
@@ -227,9 +228,11 @@ def main() -> int:
     max_reward_scaled = float("-inf")
     final_reward = 0.0
     final_reward_scaled = 0.0
+    terminal_step_idx = 0
     success = False
     failure_reason = "unknown"
     video_path = ""
+    post_termination_steps_remaining = 0
 
     try:
         env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=1)
@@ -284,6 +287,19 @@ def main() -> int:
             if frame is not None:
                 recorder.add_frame(frame)
 
+            if post_termination_steps_remaining > 0:
+                post_termination_steps_remaining -= 1
+                if env.sim.is_stopped():
+                    print(
+                        f"[sim_eval_vla] post-termination recording interrupted at control_step={step_idx} "
+                        "because simulation stopped"
+                    )
+                    break
+                if post_termination_steps_remaining == 0:
+                    print(f"[sim_eval_vla] post-termination recording finished at control_step={step_idx}")
+                    break
+                continue
+
             reward_info = _extract_reward_info(env)
             final_reward = reward_info["raw_total"]
             final_reward_scaled = reward_info["scaled_total"]
@@ -302,22 +318,37 @@ def main() -> int:
             if final_reward >= 1.0:
                 success = True
                 failure_reason = "success"
+                terminal_step_idx = step_idx
                 print(
                     f"[sim_eval_vla] success at control_step={step_idx} "
                     f"raw_reward={final_reward:.4f} scaled_reward={final_reward_scaled:.4f}"
                 )
-                break
+                post_termination_steps_remaining = args_cli.post_termination_record_steps
+                if post_termination_steps_remaining <= 0:
+                    break
+                print(
+                    f"[sim_eval_vla] recording {post_termination_steps_remaining} extra frames after success"
+                )
+                continue
 
             if step_idx >= args_cli.max_steps:
                 failure_reason = "timeout"
+                terminal_step_idx = step_idx
                 print(
                     f"[sim_eval_vla] timeout at control_step={step_idx} "
                     f"raw_reward={final_reward:.4f} scaled_reward={final_reward_scaled:.4f}"
                 )
-                break
+                post_termination_steps_remaining = args_cli.post_termination_record_steps
+                if post_termination_steps_remaining <= 0:
+                    break
+                print(
+                    f"[sim_eval_vla] recording {post_termination_steps_remaining} extra frames after timeout"
+                )
+                continue
 
             if env.sim.is_stopped():
                 failure_reason = "sim_stopped"
+                terminal_step_idx = step_idx
                 print(f"[sim_eval_vla] simulation stopped at control_step={step_idx}")
                 break
 
@@ -337,7 +368,7 @@ def main() -> int:
             "episode_index": args_cli.episode_index,
             "success": success,
             "failure_reason": failure_reason,
-            "episode_steps": step_idx,
+            "episode_steps": terminal_step_idx or step_idx,
             "max_steps": args_cli.max_steps,
             "final_reward": final_reward,
             "final_reward_scaled": final_reward_scaled,

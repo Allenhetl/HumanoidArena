@@ -12,6 +12,8 @@ HEADLESS=1
 MAX_STEPS=1000
 VIDEO_FPS=30
 POST_TERMINATION_RECORD_STEPS=50
+NUM_WORKERS=4
+SERVER_PORT_BASE=18443
 ROBOT_TYPE="g129"
 
 TWIST2_MODEL_PATH="${ISAACLAB_ROOT}/../TWIST2/assets/ckpts/twist2_1017_20k.onnx"
@@ -20,7 +22,6 @@ SERVER_PYTHON="/home/dreams/miniconda3/envs/lerobot/bin/python"
 SERVER_SCRIPT="${ISAACLAB_ROOT}/../lerobot/scripts/serve_lerobot_vla_http.py"
 SERVER_DEVICE="cuda:0"
 SERVER_HOST="127.0.0.1"
-SERVER_PORT=8443
 SERVER_SCHEME="http"
 SERVER_READY_TIMEOUT=60
 LEROBOT_SERVER_TIMEOUT=5.0
@@ -32,12 +33,11 @@ REPEATS_PER_SEED=1
 SEEDS=($(seq 0 99))
 echo "${SEEDS[@]}"
 
-
 MODEL_PATHS=(
   "/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/train/diffusion_twist2_0401/checkpoints/last/pretrained_model"
 )
 
-RESULTS_DIR="${SCRIPT_DIR}/eval_results/act_rand_trained_0407_$(date +%Y%m%d_%H%M%S)"
+RESULTS_DIR="${SCRIPT_DIR}/eval_results/act_rand_trained_parallel_0407_$(date +%Y%m%d_%H%M%S)"
 
 ARGS=(
   --task "${TASK_NAME}"
@@ -46,6 +46,8 @@ ARGS=(
   --max_steps "${MAX_STEPS}"
   --video_fps "${VIDEO_FPS}"
   --post_termination_record_steps "${POST_TERMINATION_RECORD_STEPS}"
+  --num_workers "${NUM_WORKERS}"
+  --server_port_base "${SERVER_PORT_BASE}"
   --robot_type "${ROBOT_TYPE}"
   --twist2_model_path "${TWIST2_MODEL_PATH}"
   --results_dir "${RESULTS_DIR}"
@@ -54,7 +56,6 @@ ARGS=(
   --server_script "${SERVER_SCRIPT}"
   --server_device "${SERVER_DEVICE}"
   --server_host "${SERVER_HOST}"
-  --server_port "${SERVER_PORT}"
   --server_scheme "${SERVER_SCHEME}"
   --server_ready_timeout "${SERVER_READY_TIMEOUT}"
   --lerobot_server_timeout "${LEROBOT_SERVER_TIMEOUT}"
@@ -85,4 +86,4 @@ for model_path in "${MODEL_PATHS[@]}"; do
 done
 
 cd "${SCRIPT_DIR}"
-python eval_vla_suite.py "${ARGS[@]}"
+python eval_vla_suite_parallel.py "${ARGS[@]}"

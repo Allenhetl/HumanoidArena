@@ -10,7 +10,7 @@
 VLA -> 86D semantic action -> SONIC encoder active blocks -> SONIC encoder
     -> latent -> SONIC decoder -> 29D body target -> IsaacLab
 
-VLA -> 2D hand position -> hand pose interpolation -> 7+7 hand joints -> IsaacLab
+VLA -> 2D hand binary -> open/close hand pose mapping -> 7+7 hand joints -> IsaacLab
 ```
 
 这意味着：
@@ -57,8 +57,8 @@ body semantic token:
   wrist_ref_t              6D
 
 hand semantic token:
-  left_hand_position       1D
-  right_hand_position      1D
+  left_hand_binary         1D
+  right_hand_binary        1D
 
 total = 72 + 6 + 6 + 2 = 86D
 ```
@@ -68,21 +68,21 @@ total = 72 + 6 + 6 + 2 = 86D
 - `smpl_joints_t` 对应 `human_smpl_joints[t]`
 - `anchor_rot6d_t` 由 `human_body_quat_w[t]` 或 anchor 对齐后的姿态转换而来
 - `wrist_ref_t` 对应 encoder 中实际使用的 6 维 wrist reference
-- `left/right_hand_position` 是手部开合连续量，不是 7 维手关节
+- `left/right_hand_binary` 是手部开合的二值语义，不是 7 维手关节
 
-## 4. 为什么手要用 2D position，而不是 14D joint
+## 4. 为什么手要用 2D binary，而不是 14D joint
 
 当前 `SONIC` / `pico_server` 的手部逻辑不是 14 自由度独立控制，而是：
 
 1. 控制器输入先更新一个持续累积的 `hand_position in [0,1]`
 2. 再用 open pose 和 close pose 线性插值出 7 维手关节
 
-因此，手的本质语义是：
+虽然运行时内部存在累计的 hand position，但对 VLA 来说，第一版只保留最终任务最相关、也最稳的二值语义：
 
-- 左手开合程度 `left_hand_position`
-- 右手开合程度 `right_hand_position`
+- 左手闭合状态 `left_hand_binary`
+- 右手闭合状态 `right_hand_binary`
 
-手部 7 维关节可以在推理时通过现有插值逻辑恢复，不应作为 VLA 的主控制语义。
+手部 7 维关节可以在推理时通过 open/close pose 恢复，不应作为 VLA 的主控制语义。
 
 这有三个直接好处：
 
@@ -141,8 +141,8 @@ total = 72 + 6 + 6 + 2 = 86D
 
 单步推理流程：
 
-1. VLA 输出 `left_hand_position/right_hand_position`
-2. 调用当前 hand interpolation 逻辑恢复 `7+7` 手关节
+1. VLA 输出 `left_hand_binary/right_hand_binary`
+2. 调用当前 hand open/close pose 映射恢复 `7+7` 手关节
 3. 送入 IsaacLab hand joints
 
 ### 6.3 reset 语义
@@ -151,7 +151,7 @@ episode reset 时必须同步清空：
 
 - body semantic history ring buffer
 - `SONIC` 内部 `last_action_hist`
-- hand position 状态
+- hand binary 状态
 - 任何 VLA preprocessor/postprocessor 的 temporal state
 
 否则第二段 episode 的输入相位会错位。
@@ -178,8 +178,8 @@ action.body.smpl_joint.<joint_name>.y
 action.body.smpl_joint.<joint_name>.z
 action.body.anchor_rot6d.0..5
 action.body.wrist_ref.0..5
-action.hand.left_position
-action.hand.right_position
+action.hand.left_binary
+action.hand.right_binary
 ```
 
 ### 7.3 推荐 observation.state
@@ -192,7 +192,7 @@ gravity_dir                  3
 joint_pos_delta_29          29
 joint_vel_29                29
 last_body_raw_action_29     29
-hand_position_2              2
+hand_binary_2                2
 
 total = 95D
 ```
@@ -225,15 +225,10 @@ total = 95D
 
 录制中需要显式保存：
 
-- `hand_left_position`
-- `hand_right_position`
+- `pico_left_grip_binary`
+- `pico_right_grip_binary`
 
-如果当前录制尚未保存这两个标量，则有两种策略：
-
-1. 在录制侧补写这两个字段，之后重新录制
-2. 用 `hand_action_left/right` 反推 position，作为兼容方案
-
-推荐采用方案 1，因为它更稳，也和线上控制语义一致。
+当前录制已经保存这两个二值字段，因此手部标签可以直接复用，不需要再反推 position。
 
 ## 9. sonic2lerobot 的实现规划
 
@@ -302,7 +297,7 @@ optimizer_lr=1e-4
 1. `LeRobot VLA client`
 2. `86D action` 解包
 3. `body semantic history ring buffer`
-4. `hand position -> 7D hand joints` 插值
+4. `hand binary -> 7D hand joints` open/close 映射
 5. reset 时同步清理所有状态
 
 ### 11.3 provider 的执行流程
@@ -316,7 +311,7 @@ optimizer_lr=1e-4
 5. 调用 `SONIC encoder`
 6. 调用 `SONIC decoder`
 7. body 输出送入原有 body control
-8. hand position 恢复成手关节并送入原有 hand control
+8. hand binary 恢复成手关节并送入原有 hand control
 
 ## 12. 评测规划
 
@@ -360,7 +355,7 @@ optimizer_lr=1e-4
 
 ### Phase 1: 录制增强
 
-- 在 `SONIC` 录制中新增 `hand_left_position/right_position`
+- 复用现有 `pico_left_grip_binary/right_grip_binary`
 - 必要时补充 `current_frame` wrist ref 显式字段
 
 ### Phase 2: 数据转换

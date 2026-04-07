@@ -13,10 +13,10 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 
 DEFAULT_INPUT_ROOT = Path(
-    "/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_football"
+    "/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_football_v2/twist2"
 )
-DEFAULT_OUTPUT_ROOT = Path("outputs/datasets/twist2_0405_vla")
-DEFAULT_REPO_ID = "local/twist2-0405-vla"
+DEFAULT_OUTPUT_ROOT = Path("outputs/datasets/twist2_0407_vla")
+DEFAULT_REPO_ID = "local/twist2-0407-vla"
 
 OBS_PROPRIO_START = 35
 OBS_PROPRIO_END = 127

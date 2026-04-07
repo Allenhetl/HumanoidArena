@@ -240,6 +240,7 @@ def _normalize_control_routing(args_cli):
             ("pico_twist2", "twist2"): "twist2_wholebody",
             ("pico_sonic", "sonic"): "sonic_wholebody",
             ("vla", "twist2"): "twist2_wholebody",
+            ("vla", "sonic"): "sonic_wholebody",
             ("replay", "twist2"): "twist2_wholebody",
             ("replay", "sonic"): "sonic_wholebody",
         }
@@ -553,8 +554,8 @@ def main():
         print(f"Input source: {args_cli.input_source or 'legacy'}")
         print(f"GMT backend: {args_cli.gmt_backend or 'legacy'}")
     if args_cli.input_source == "vla":
-        if args_cli.gmt_backend and args_cli.gmt_backend != "twist2":
-            raise ValueError("input_source=vla currently only supports --gmt_backend twist2")
+        if args_cli.gmt_backend and args_cli.gmt_backend not in {"twist2", "sonic"}:
+            raise ValueError("input_source=vla currently only supports --gmt_backend twist2 or sonic")
         if not args_cli.lerobot_server_url and not args_cli.lerobot_policy_path:
             raise ValueError("--lerobot_server_url or --lerobot_policy_path is required when using input_source=vla")
     if args_cli.action_source == "openpi":

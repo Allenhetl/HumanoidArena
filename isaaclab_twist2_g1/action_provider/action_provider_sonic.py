@@ -46,6 +46,7 @@ import torch
 from scipy.spatial.transform import Rotation as R
 
 from action_provider.action_base import ActionProvider
+from action_provider.lerobot_vla_http_client import LeRobotVLAHttpClient
 from action_provider.recording_common import AsyncEpisodeRecorder
 from action_provider.reset_control import consume_reset_complete, get_input_ready_key, publish_reset_command
 from common_env_objects import (
@@ -55,6 +56,7 @@ from common_env_objects import (
     get_current_episode_object_seed_info,
     resolve_env_object_scene_key,
 )
+from pico_server.data_utils.params import DEFAULT_HAND_POSE
 
 # Isaac Sim imports for RTF monitoring
 try:
@@ -86,6 +88,12 @@ except ImportError:
 # ZMQ pose 消息解析（Protocol v3，1280-byte JSON header + binary payload）
 # ---------------------------------------------------------------------------
 _HEADER_SIZE = 1280
+project_root = os.environ.get("PROJECT_ROOT")
+
+SONIC_VLA_BODY_DIM = 84
+SONIC_VLA_ACTION_DIM = 86
+SONIC_VLA_STATE_DIM = 95
+SONIC_HAND_POSE_ROBOT_NAME = "unitree_g1_with_hands"
 
 
 def _parse_zmq_pose(raw: bytes) -> Optional[dict]:
@@ -1088,6 +1096,8 @@ def _organize_sonic_episode(data_buffer: list[dict[str, Any]], timestamp_us: int
         "body_effort_target": _stack(("action", "body_effort_target"), np.float32),
         "hand_action_left": _stack(("action", "hand_action_left"), np.float32),
         "hand_action_right": _stack(("action", "hand_action_right"), np.float32),
+        "vla_action_body_token": _stack(("vla", "action_body_token"), np.float32),
+        "vla_action_hand_binary": _stack(("vla", "action_hand_binary"), np.float32),
         "human_raw_smplx_json": np.array(
             _json_string([frame["human_raw"]["smplx_frame"] for frame in data_buffer])
         ),
@@ -1155,6 +1165,7 @@ class SonicActionProvider(ActionProvider):
 
         self.enable_dex3    = getattr(args_cli, "enable_dex3_dds",   False)
         self.enable_gripper = getattr(args_cli, "enable_dex1_dds",   False)
+        self.enable_robot   = getattr(args_cli, "robot_type", "g129")
         self._pose_source   = getattr(args_cli, "sonic_pose_source", "redis")  # "zmq" | "redis"
         self.zmq_host       = getattr(args_cli, "sonic_zmq_host",    "localhost")
         self.zmq_port       = getattr(args_cli, "sonic_zmq_port",    5556)
@@ -1166,8 +1177,22 @@ class SonicActionProvider(ActionProvider):
         self._replay_mode   = self._normalize_replay_mode(getattr(args_cli, "replay_mode", "inference_replay"))
         self._replay_loop   = bool(getattr(args_cli, "replay_loop", False))
         self._replay_enabled = bool(self._replay_file)
+        self._input_source = getattr(args_cli, "input_source", "") or ""
+        self._use_lerobot_vla = self._input_source == "vla"
+        self._lerobot_server_url = getattr(args_cli, "lerobot_server_url", "") or ""
+        self._lerobot_server_timeout = float(getattr(args_cli, "lerobot_server_timeout", 5.0))
+        self._lerobot_server_verify_ssl = bool(getattr(args_cli, "lerobot_server_verify_ssl", False))
+        self._lerobot_policy = None
+        self._lerobot_preprocessor = None
+        self._lerobot_postprocessor = None
+        self._lerobot_predict_action = None
+        self._lerobot_device = None
+        self._lerobot_http_client = None
+        self._lerobot_hand_binary_threshold = float(getattr(args_cli, "lerobot_gripper_threshold", 0.5))
         if self._replay_enabled:
             self._pose_source = "replay"
+        if self._use_lerobot_vla and self._replay_enabled:
+            raise ValueError("[SonicActionProvider] input_source=vla and replay_file are mutually exclusive")
         self._replay_anchor_heading_initialized = None
         self._replay_anchor_use_heading_align = None
         self._replay_anchor_init_base_quat_wxyz = None
@@ -1244,6 +1269,8 @@ class SonicActionProvider(ActionProvider):
         self._setup_pd_controller()
         if self._replay_enabled:
             self._setup_local_replay()
+        elif self._use_lerobot_vla:
+            pass
         elif self._pose_source == "redis":
             self._setup_redis()
         else:
@@ -1251,6 +1278,8 @@ class SonicActionProvider(ActionProvider):
         self._setup_policy()
         self._setup_buffers()
         self._latest_decoder_target = self._sonic_default_np.copy()
+        if self._use_lerobot_vla:
+            self._setup_lerobot_vla(args_cli)
         self._setup_hand_dds(args_cli)
 
         print(f"[SonicActionProvider] POSE mode ready  "
@@ -1569,6 +1598,214 @@ class SonicActionProvider(ActionProvider):
             print("[SonicActionProvider] encoder/decoder not loaded, "
                   "will hold default standing pose.")
 
+    def _setup_lerobot_vla(self, args_cli) -> None:
+        if self._lerobot_server_url:
+            self._lerobot_http_client = LeRobotVLAHttpClient(
+                base_url=self._lerobot_server_url,
+                timeout_s=self._lerobot_server_timeout,
+                verify_ssl=self._lerobot_server_verify_ssl,
+            )
+            print(
+                f"[SonicActionProvider] LeRobot VLA remote client enabled: "
+                f"url={self._lerobot_server_url} verify_ssl={self._lerobot_server_verify_ssl}"
+            )
+            return
+
+        lerobot_policy_path = Path(getattr(args_cli, "lerobot_policy_path", "")).expanduser().resolve()
+        if not lerobot_policy_path.is_dir():
+            raise FileNotFoundError(
+                f"[SonicActionProvider] LeRobot policy directory not found: {lerobot_policy_path}"
+            )
+
+        isaaclab_root = Path(project_root) if project_root else Path(__file__).resolve().parents[1]
+        lerobot_src = isaaclab_root.parent / "lerobot" / "src"
+        if not lerobot_src.is_dir():
+            raise FileNotFoundError(f"[SonicActionProvider] LeRobot src directory not found: {lerobot_src}")
+
+        import sys
+
+        if str(lerobot_src) not in sys.path:
+            sys.path.insert(0, str(lerobot_src))
+
+        from lerobot.configs.policies import PreTrainedConfig
+        from lerobot.policies.factory import _reconnect_relative_absolute_steps, get_policy_class
+        from lerobot.processor import PolicyProcessorPipeline
+        from lerobot.processor.converters import policy_action_to_transition, transition_to_policy_action
+        from lerobot.utils.constants import (
+            POLICY_POSTPROCESSOR_DEFAULT_NAME,
+            POLICY_PREPROCESSOR_DEFAULT_NAME,
+        )
+        from lerobot.utils.control_utils import predict_action
+
+        device_name = getattr(args_cli, "lerobot_policy_device", "") or getattr(args_cli, "device", "cuda:0")
+        config = PreTrainedConfig.from_pretrained(lerobot_policy_path)
+        config.device = device_name
+        policy_cls = get_policy_class(config.type)
+
+        self._lerobot_policy = policy_cls.from_pretrained(lerobot_policy_path, config=config)
+        self._lerobot_preprocessor = PolicyProcessorPipeline.from_pretrained(
+            lerobot_policy_path,
+            config_filename=f"{POLICY_PREPROCESSOR_DEFAULT_NAME}.json",
+        )
+        self._lerobot_postprocessor = PolicyProcessorPipeline.from_pretrained(
+            lerobot_policy_path,
+            config_filename=f"{POLICY_POSTPROCESSOR_DEFAULT_NAME}.json",
+            to_transition=policy_action_to_transition,
+            to_output=transition_to_policy_action,
+        )
+        _reconnect_relative_absolute_steps(self._lerobot_preprocessor, self._lerobot_postprocessor)
+
+        self._lerobot_predict_action = predict_action
+        self._lerobot_device = torch.device(device_name)
+        self._lerobot_policy.reset()
+        self._lerobot_preprocessor.reset()
+        self._lerobot_postprocessor.reset()
+
+        print(
+            f"[SonicActionProvider] LeRobot VLA enabled: "
+            f"path={lerobot_policy_path} type={config.type} device={self._lerobot_device}"
+        )
+
+    def _get_front_camera_rgb_for_vla(self) -> np.ndarray:
+        if "front_camera" not in self.env.scene.keys():
+            raise RuntimeError("[SonicActionProvider] front_camera not found in scene for LeRobot VLA inference")
+
+        camera = self.env.scene["front_camera"]
+        if "rgb" not in camera.data.output:
+            raise RuntimeError("[SonicActionProvider] front_camera has no rgb output for LeRobot VLA inference")
+
+        rgb = camera.data.output["rgb"][0].detach().cpu().numpy()
+        if rgb.ndim != 3:
+            raise RuntimeError(f"[SonicActionProvider] Unexpected front_camera rgb shape: {rgb.shape}")
+        if rgb.shape[-1] == 4:
+            rgb = rgb[..., :3]
+        if rgb.dtype != np.uint8:
+            rgb = np.clip(rgb, 0, 255).astype(np.uint8)
+        return rgb
+
+    def _get_hand_pose_from_binary(self, side: str, closed: bool) -> np.ndarray:
+        pose_name = "close" if closed else "open"
+        pose = DEFAULT_HAND_POSE[SONIC_HAND_POSE_ROBOT_NAME][side][pose_name]
+        return np.asarray(pose, dtype=np.float32).reshape(-1)
+
+    def _apply_hand_binary_targets(self, left_closed: bool, right_closed: bool) -> None:
+        self._left_hand_binary_state = bool(left_closed)
+        self._right_hand_binary_state = bool(right_closed)
+        self._left_hand_target[:] = self._get_hand_pose_from_binary("left", left_closed)
+        self._right_hand_target[:] = self._get_hand_pose_from_binary("right", right_closed)
+
+    def _build_lerobot_vla_observation_state(self) -> np.ndarray:
+        robot = self.env.scene["robot"].data
+        joint_pos = robot.joint_pos[0, self._sonic_idx].cpu().numpy().astype(np.float32)
+        joint_vel = robot.joint_vel[0, self._sonic_idx].cpu().numpy().astype(np.float32)
+        base_quat_wxyz = robot.root_state_w[0, 3:7].cpu().numpy().astype(np.float32)
+        ang_vel = robot.root_ang_vel_b[0].cpu().numpy().astype(np.float32)
+        gravity_dir = gravity_dir_from_base_quat_wxyz(base_quat_wxyz)
+        joint_pos_delta = joint_pos - self._sonic_default_np
+        last_body_raw_action = self._last_action_hist[-1].astype(np.float32, copy=True)
+        hand_binary = np.array(
+            [
+                float(self._left_hand_binary_state),
+                float(self._right_hand_binary_state),
+            ],
+            dtype=np.float32,
+        )
+        state = np.concatenate(
+            [
+                ang_vel,
+                gravity_dir,
+                joint_pos_delta,
+                joint_vel,
+                last_body_raw_action,
+                hand_binary,
+            ],
+            axis=0,
+        ).astype(np.float32)
+        if state.shape != (SONIC_VLA_STATE_DIM,):
+            raise RuntimeError(
+                f"[SonicActionProvider] expected VLA observation.state shape {(SONIC_VLA_STATE_DIM,)}, got {state.shape}"
+            )
+        return state
+
+    def _infer_lerobot_semantic_action(self) -> np.ndarray:
+        rgb = self._get_front_camera_rgb_for_vla()
+        state = self._build_lerobot_vla_observation_state()
+        if self._lerobot_http_client is not None:
+            action = self._lerobot_http_client.infer(
+                front_rgb=rgb,
+                observation_state=state,
+                robot_type=self.enable_robot,
+            )
+        else:
+            if self._lerobot_policy is None or self._lerobot_predict_action is None:
+                raise RuntimeError("[SonicActionProvider] LeRobot VLA requested before initialization")
+            observation = {
+                "observation.images.front": rgb,
+                "observation.state": state,
+            }
+            action = self._lerobot_predict_action(
+                observation=observation,
+                policy=self._lerobot_policy,
+                device=self._lerobot_device,
+                preprocessor=self._lerobot_preprocessor,
+                postprocessor=self._lerobot_postprocessor,
+                use_amp=self._lerobot_device.type == "cuda",
+                task=None,
+                robot_type=self.enable_robot,
+            )
+
+        if isinstance(action, torch.Tensor):
+            action = action.detach().cpu().numpy()
+        action = np.asarray(action, dtype=np.float32).reshape(-1)
+        if action.shape == (SONIC_VLA_BODY_DIM,):
+            action = np.concatenate([action, np.zeros(2, dtype=np.float32)], axis=0)
+        if action.shape != (SONIC_VLA_ACTION_DIM,):
+            raise ValueError(
+                f"[SonicActionProvider] Expected LeRobot action dim {SONIC_VLA_BODY_DIM} or "
+                f"{SONIC_VLA_ACTION_DIM}, got {action.shape}"
+            )
+        return action
+
+    def _apply_lerobot_semantic_action(self, action: np.ndarray) -> None:
+        action = np.asarray(action, dtype=np.float32).reshape(-1)
+        body = action[:SONIC_VLA_BODY_DIM]
+        hand = action[SONIC_VLA_BODY_DIM:]
+
+        smpl_joints = body[:72].reshape(_N_SMPL_JOINTS, 3)
+        anchor_rot6d = body[72:78]
+        wrist_ref = body[78:84]
+
+        if self._vla_semantic_history_fill == 0:
+            self._smpl_joints_buf[:] = smpl_joints
+            self._body_rot6d_buf[:] = anchor_rot6d
+            self._motion_joint_pos_hist[:] = self._sonic_default_np
+            self._motion_joint_pos_hist[:, OFFICIAL_WRIST_INDICES] = wrist_ref
+            self._motion_anchor_rot6d_hist[:] = anchor_rot6d
+        else:
+            self._smpl_joints_buf = np.roll(self._smpl_joints_buf, -1, axis=0)
+            self._smpl_joints_buf[-1] = smpl_joints
+            self._body_rot6d_buf = np.roll(self._body_rot6d_buf, -1, axis=0)
+            self._body_rot6d_buf[-1] = anchor_rot6d
+            self._motion_joint_pos_hist = np.roll(self._motion_joint_pos_hist, -1, axis=0)
+            self._motion_joint_pos_hist[-1] = self._motion_joint_pos_hist[-2]
+            self._motion_joint_pos_hist[-1, OFFICIAL_WRIST_INDICES] = wrist_ref
+            self._motion_anchor_rot6d_hist = np.roll(self._motion_anchor_rot6d_hist, -1, axis=0)
+            self._motion_anchor_rot6d_hist[-1] = anchor_rot6d
+
+        self._smpl_data_valid = True
+        self._smpl_history_fill = min(_STEP1_FRAMES, self._smpl_history_fill + 1)
+        self._vla_semantic_history_fill = min(_STEP1_FRAMES, self._vla_semantic_history_fill + 1)
+        self._ref_window_valid = False
+
+        left_closed = bool(hand[0] >= self._lerobot_hand_binary_threshold)
+        right_closed = bool(hand[1] >= self._lerobot_hand_binary_threshold)
+        self._apply_hand_binary_targets(left_closed=left_closed, right_closed=right_closed)
+
+    def _run_gear_sonic_from_vla(self) -> np.ndarray:
+        action = self._infer_lerobot_semantic_action()
+        self._apply_lerobot_semantic_action(action)
+        return self._run_gear_sonic()
+
     def _setup_buffers(self):
         # SMPL 历史帧缓冲（encoder 需要 10 帧）
         self._smpl_joints_buf = np.zeros(
@@ -1613,6 +1850,9 @@ class SonicActionProvider(ActionProvider):
         # 手部关节目标
         self._left_hand_target  = np.zeros(7, dtype=np.float32)
         self._right_hand_target = np.zeros(7, dtype=np.float32)
+        self._left_hand_binary_state = False
+        self._right_hand_binary_state = False
+        self._vla_semantic_history_fill = 0
 
         # VR 3点姿态缓冲（来自 SMPL，用于 encoder 输入）
         # vr_position: (9,) - 3 points × 3D position [L-Wrist, R-Wrist, Neck]
@@ -1665,6 +1905,9 @@ class SonicActionProvider(ActionProvider):
         self._perf_total_ms = []
         self._perf_buffer_size = 50  # Keep last N frames for statistics
         self._perf_report_interval = 50  # Print performance report every N frames
+
+        if self._use_lerobot_vla:
+            self._apply_hand_binary_targets(left_closed=False, right_closed=False)
 
     def _next_replay_frame_idx(self) -> int | None:
         if not self._replay_enabled or self._replay_num_frames <= 0:
@@ -2078,6 +2321,19 @@ class SonicActionProvider(ActionProvider):
         self._stream_window_start = 0
         self._stream_current_frame = 0
         self._stream_frame_step = 1
+        self._left_hand_binary_state = False
+        self._right_hand_binary_state = False
+        self._vla_semantic_history_fill = 0
+        if self._use_lerobot_vla:
+            self._apply_hand_binary_targets(left_closed=False, right_closed=False)
+            if self._lerobot_http_client is not None:
+                self._lerobot_http_client.reset()
+            if self._lerobot_policy is not None:
+                self._lerobot_policy.reset()
+            if self._lerobot_preprocessor is not None:
+                self._lerobot_preprocessor.reset()
+            if self._lerobot_postprocessor is not None:
+                self._lerobot_postprocessor.reset()
         if self._replay_enabled:
             self._replay_cursor = 0
             self._replay_joint_mae_sum = 0.0
@@ -2291,6 +2547,22 @@ class SonicActionProvider(ActionProvider):
         root_state = robot.root_state_w
         joint_pos = robot.joint_pos[0, self._sonic_idx].cpu().numpy().astype(np.float32)
         joint_vel = robot.joint_vel[0, self._sonic_idx].cpu().numpy().astype(np.float32)
+        controller_binary = _extract_controller_binary_signals(self._latest_controller_data)
+        vla_action_body = np.concatenate(
+            [
+                self._latest_smpl_joint_window[-1].reshape(-1).astype(np.float32, copy=True),
+                self._latest_anchor_window[-1].reshape(-1).astype(np.float32, copy=True),
+                self._latest_wrist_window[-1].reshape(-1).astype(np.float32, copy=True),
+            ],
+            axis=0,
+        )
+        vla_action_hand_binary = np.array(
+            [
+                float(self._left_hand_binary_state) if self._use_lerobot_vla else float(controller_binary["left_grip_binary"]),
+                float(self._right_hand_binary_state) if self._use_lerobot_vla else float(controller_binary["right_grip_binary"]),
+            ],
+            dtype=np.float32,
+        )
         return {
             "meta": {
                 "task": self.task_name,
@@ -2324,7 +2596,7 @@ class SonicActionProvider(ActionProvider):
                 "left_hand": self._left_hand_target.copy(),
                 "right_hand": self._right_hand_target.copy(),
                 "controller_data": self._latest_controller_data,
-                "controller_binary": _extract_controller_binary_signals(self._latest_controller_data),
+                "controller_binary": controller_binary,
                 "recording_control": self._latest_recording_control,
             },
             "human_processed": {
@@ -2377,6 +2649,10 @@ class SonicActionProvider(ActionProvider):
                 "body_effort_target": body_effort_target.astype(np.float32).copy(),
                 "hand_action_left": self._left_hand_target.copy(),
                 "hand_action_right": self._right_hand_target.copy(),
+            },
+            "vla": {
+                "action_body_token": vla_action_body,
+                "action_hand_binary": vla_action_hand_binary,
             },
             "env": {
                 **self._collect_env_state(),
@@ -3515,6 +3791,11 @@ class SonicActionProvider(ActionProvider):
                 replay_direct_targets = self._prepare_replay_frame(replay_frame_idx)
                 if debug_log:
                     print(f"replay pose frame={replay_frame_idx} mode={self._replay_mode}")
+            elif self._use_lerobot_vla:
+                replay_frame_idx = None
+                replay_direct_targets = None
+                if debug_log:
+                    print("lerobot sonic vla")
             elif self._pose_source == "redis":
                 self._fetch_redis_pose()
                 if debug_log:
@@ -3535,6 +3816,8 @@ class SonicActionProvider(ActionProvider):
                 sonic_targets = replay_direct_targets
             elif self._replay_enabled and self._replay_mode == "inference_replay":
                 sonic_targets = self._run_gear_sonic_replay_inference(replay_frame_idx)
+            elif self._use_lerobot_vla:
+                sonic_targets = self._run_gear_sonic_from_vla()
             else:
                 sonic_targets = self._run_gear_sonic()
 

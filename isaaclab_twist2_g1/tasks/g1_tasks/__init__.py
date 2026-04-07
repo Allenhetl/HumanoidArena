@@ -15,52 +15,26 @@ def _safe_import(name):
 
 # Import move_football first (no pink dependency) so football test works when others fail
 from . import move_football_g1_29dof_dex3_wholebody
+from . import move_football_single_g1_29dof_dex3_wholebody
 from . import move_boxing_bag_g1_29dof_dex3_wholebody
 from . import move_pickplace_doubledesk_g1_29dof_dex3_wholebody
 from . import push_t_g1_29dof_dex3_wholebody
 from . import move_three_step_platform_g1_29dof_dex3_wholebody
 from . import move_artvip_livingroom_nosofa_g1_29dof_dex3_wholebody
 from . import move_open_door_g1_29dof_dex3_wholebody
-from . import move_plum_blossom_pile_g1_29dof_dex3_wholebody
 from . import move_indoor_trolley_g1_29dof_dex3_wholebody
 
 # Other tasks may use pink/pinocchio - wrap in _safe_import to tolerate ImportError
-_safe_import("tasks.g1_tasks.pick_place_cylinder_g1_29dof_dex3")
-_safe_import("tasks.g1_tasks.pick_place_cylinder_g1_29dof_dex1")
-_safe_import("tasks.g1_tasks.pick_place_cylinder_g1_29dof_inspire")
-_safe_import("tasks.g1_tasks.pick_place_redblock_g1_29dof_dex1")
-_safe_import("tasks.g1_tasks.pick_place_redblock_g1_29dof_dex3")
-_safe_import("tasks.g1_tasks.stack_rgyblock_g1_29dof_dex1")
-_safe_import("tasks.g1_tasks.stack_rgyblock_g1_29dof_dex3")
-_safe_import("tasks.g1_tasks.stack_rgyblock_g1_29dof_inspire")
-_safe_import("tasks.g1_tasks.pick_redblock_into_drawer_g1_29dof_dex1")
-_safe_import("tasks.g1_tasks.pick_redblock_into_drawer_g1_29dof_dex3")
-_safe_import("tasks.g1_tasks.pick_place_redblock_g1_29dof_inspire")
-_safe_import("tasks.g1_tasks.move_cylinder_g1_29dof_dex1_wholebody")
-_safe_import("tasks.g1_tasks.move_cylinder_g1_29dof_dex3_wholebody")
-_safe_import("tasks.g1_tasks.move_cylinder_g1_29dof_inspire_wholebody")
-_safe_import("tasks.g1_tasks.visual_zone_g1_29dof_dex3_wholebody")
 
 # export all modules
 __all__ = [
-        "pick_place_cylinder_g1_29dof_dex3", "pick_place_cylinder_g1_29dof_dex1", 
-        "pick_place_redblock_g1_29dof_dex1", "pick_place_redblock_g1_29dof_dex3", 
-        "stack_rgyblock_g1_29dof_dex1", "stack_rgyblock_g1_29dof_dex3", 
-        "stack_rgyblock_g1_29dof_inspire",
-        "pick_redblock_into_drawer_g1_29dof_dex1","pick_redblock_into_drawer_g1_29dof_dex3",
-        "pick_place_redblock_g1_29dof_inspire",
-        "pick_place_cylinder_g1_29dof_inspire",
-        "move_cylinder_g1_29dof_dex1_wholebody",
-        "move_cylinder_g1_29dof_dex3_wholebody",
-        "move_cylinder_g1_29dof_inspire_wholebody",
-        "visual_zone_g1_29dof_dex3_wholebody",
         "move_football_g1_29dof_dex3_wholebody",
+        "move_football_single_g1_29dof_dex3_wholebody",
         "move_boxing_bag_g1_29dof_dex3_wholebody",
         "move_pickplace_doubledesk_g1_29dof_dex3_wholebody",
         "push_t_g1_29dof_dex3_wholebody",
         "move_three_step_platform_g1_29dof_dex3_wholebody",
         "move_artvip_livingroom_nosofa_g1_29dof_dex3_wholebody",
         "move_open_door_g1_29dof_dex3_wholebody",
-        "move_plum_blossom_pile_g1_29dof_dex3_wholebody",
         "move_indoor_trolley_g1_29dof_dex3_wholebody",
 ]
