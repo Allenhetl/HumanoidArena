@@ -1,5 +1,7 @@
 name: football_single_twist2_vla
 description: VLA evaluation env config for Isaac-Move-Football-Single-G129-Dex3-Wholebody.
+task_name: Isaac-Move-Football-Single-G129-Dex3-Wholebody
+backend: twist2_vla
 
 overrides:
   sim:

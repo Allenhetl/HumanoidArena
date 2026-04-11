@@ -37,7 +37,7 @@ MODEL_PATHS=(
   "/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/train/diffusion_twist2_0401/checkpoints/last/pretrained_model"
 )
 
-RESULTS_DIR="${SCRIPT_DIR}/eval_results/act_rand_trained_0407_$(date +%Y%m%d_%H%M%S)"
+RESULTS_DIR="${SCRIPT_DIR}/eval_results/act_rand_trained_0410_64_40_$(date +%Y%m%d_%H%M%S)"
 
 ARGS=(
   --task "${TASK_NAME}"

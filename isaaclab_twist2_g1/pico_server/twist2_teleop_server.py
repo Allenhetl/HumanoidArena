@@ -62,6 +62,7 @@ import mujoco.viewer as mjv
 import numpy as np
 from loop_rate_limiters import RateLimiter
 from scipy.spatial.transform import Rotation as R
+import torch
 from general_motion_retargeting import GeneralMotionRetargeting as GMR
 from general_motion_retargeting import draw_frame
 from general_motion_retargeting import ROBOT_XML_DICT, ROBOT_BASE_DICT
@@ -72,7 +73,15 @@ import cv2
 import redis
 from rich import print
 from general_motion_retargeting import XRobotStreamer
-from action_provider.reset_control import get_input_ready_key
+from action_provider.reset_control import (
+    GMR_BODY_POS_KEY,
+    GMR_BODY_QUAT_W_KEY,
+    GMR_FRAME_INDEX_KEY,
+    GMR_FULL_QPOS_KEY,
+    GMR_JOINT_POS_KEY,
+    GMR_JOINT_VEL_KEY,
+    get_input_ready_key,
+)
 
 from data_utils.params import (
     DEFAULT_HAND_POSE,
@@ -81,6 +90,119 @@ from data_utils.params import (
 )
 from data_utils.rot_utils import euler_from_quaternion_np, quat_diff_np, quat_rotate_inverse_np
 from data_utils.fps_monitor import FPSMonitor
+from pico_server.sonic_tools.trl.utils.torch_transform import angle_axis_to_quaternion
+from pico_server.sonic_tools.isaac_utils.rotations import remove_smpl_base_rot, smpl_root_ytoz_up
+
+
+TWIST2_MUJOCO_JOINT_ORDER = [
+    "left_hip_pitch_joint",
+    "left_hip_roll_joint",
+    "left_hip_yaw_joint",
+    "left_knee_joint",
+    "left_ankle_pitch_joint",
+    "left_ankle_roll_joint",
+    "right_hip_pitch_joint",
+    "right_hip_roll_joint",
+    "right_hip_yaw_joint",
+    "right_knee_joint",
+    "right_ankle_pitch_joint",
+    "right_ankle_roll_joint",
+    "waist_yaw_joint",
+    "waist_roll_joint",
+    "waist_pitch_joint",
+    "left_shoulder_pitch_joint",
+    "left_shoulder_roll_joint",
+    "left_shoulder_yaw_joint",
+    "left_elbow_joint",
+    "left_wrist_roll_joint",
+    "left_wrist_pitch_joint",
+    "left_wrist_yaw_joint",
+    "right_shoulder_pitch_joint",
+    "right_shoulder_roll_joint",
+    "right_shoulder_yaw_joint",
+    "right_elbow_joint",
+    "right_wrist_roll_joint",
+    "right_wrist_pitch_joint",
+    "right_wrist_yaw_joint",
+]
+
+SONIC_ISAACLAB_JOINT_ORDER = [
+    "left_hip_pitch_joint",
+    "right_hip_pitch_joint",
+    "waist_yaw_joint",
+    "left_hip_roll_joint",
+    "right_hip_roll_joint",
+    "waist_roll_joint",
+    "left_hip_yaw_joint",
+    "right_hip_yaw_joint",
+    "waist_pitch_joint",
+    "left_knee_joint",
+    "right_knee_joint",
+    "left_shoulder_pitch_joint",
+    "right_shoulder_pitch_joint",
+    "left_ankle_pitch_joint",
+    "right_ankle_pitch_joint",
+    "left_shoulder_roll_joint",
+    "right_shoulder_roll_joint",
+    "left_ankle_roll_joint",
+    "right_ankle_roll_joint",
+    "left_shoulder_yaw_joint",
+    "right_shoulder_yaw_joint",
+    "left_elbow_joint",
+    "right_elbow_joint",
+    "left_wrist_roll_joint",
+    "right_wrist_roll_joint",
+    "left_wrist_pitch_joint",
+    "right_wrist_pitch_joint",
+    "left_wrist_yaw_joint",
+    "right_wrist_yaw_joint",
+]
+
+TWIST2_TO_SONIC_JOINT_INDICES = [
+    TWIST2_MUJOCO_JOINT_ORDER.index(name) for name in SONIC_ISAACLAB_JOINT_ORDER
+]
+
+# Match pico_server_pose_only live teleop cadence so SONIC sees reference motion
+# histories and finite-difference joint velocities in the same temporal spacing.
+SONIC_JOINT29_TARGET_FPS = 50
+
+SONIC_JOINT29_FALLBACK_BODY_QUAT_WXYZ = np.array(
+    [0.7071, 0.0, 0.0, 0.7071], dtype=np.float32
+)
+SONIC_JOINT29_BODY_QUAT_EMA_ALPHA = 0.35
+SONIC_JOINT29_JOINT_VEL_EMA_ALPHA = 0.2
+SONIC_JOINT29_JOINT_VEL_CLIP = 8.0
+
+def _quat_lerp_normalized_wxyz(q0: np.ndarray, q1: np.ndarray, alpha: float) -> np.ndarray:
+    """Linearly interpolate two wxyz quaternions and renormalize."""
+    q0 = np.asarray(q0, dtype=np.float32).reshape(4)
+    q1 = np.asarray(q1, dtype=np.float32).reshape(4)
+    if float(np.dot(q0, q1)) < 0.0:
+        q1 = -q1
+    q = (1.0 - float(alpha)) * q0 + float(alpha) * q1
+    norm = float(np.linalg.norm(q))
+    if norm > 1e-6:
+        return (q / norm).astype(np.float32)
+    return q1.copy()
+
+
+def _quat_heading_wxyz(quat: np.ndarray) -> np.ndarray:
+    """Extract z-up heading-only quaternion in wxyz format."""
+    quat = np.asarray(quat, dtype=np.float32).reshape(4)
+    norm = float(np.linalg.norm(quat))
+    if norm > 1e-6:
+        quat = quat / norm
+    w, x, y, z = quat
+    yaw = np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    half_yaw = 0.5 * float(yaw)
+    return np.array([np.cos(half_yaw), 0.0, 0.0, np.sin(half_yaw)], dtype=np.float32)
+
+
+def _quat_conjugate_wxyz_np(quat: np.ndarray) -> np.ndarray:
+    quat = np.asarray(quat, dtype=np.float32).reshape(4).copy()
+    quat[1:] *= -1.0
+    return quat
+
 
 def start_interpolation(state_machine, start_obs, end_obs, duration=1.0):
     """Start interpolation from start_obs to end_obs over given duration"""
@@ -198,6 +320,9 @@ class StateMachine:
         self.last_mimic_obs = None
         self.current_neck_data = None
         self.last_neck_data = None
+        self.recording_active = True
+        self.recording_command = "start"
+        self.recording_command_frame_count = 0
         self.hand_left_position = 0.0
         self.hand_right_position = 0.0
         self.velocity_commands[:] = 0.0
@@ -506,20 +631,40 @@ class XRobotTeleopToRobot:
         self.robot_name = args.robot
         self.xml_file = ROBOT_XML_DICT[args.robot]
         self.robot_base = ROBOT_BASE_DICT[args.robot]
+        self.target_backend = str(getattr(args, "target_backend", "twist2"))
 
         print(f"Pinch mode: {self.args.pinch_mode}")
         # Initialize state tracking
         self.last_qpos = None
         self.last_time = time.time()
-        self.target_fps = args.target_fps
-        self.measured_dt = 1/ self.target_fps # default fallback dt
+        requested_target_fps = int(args.target_fps)
+        if self.target_backend == "sonic_joint29" and requested_target_fps != SONIC_JOINT29_TARGET_FPS:
+            print(
+                f"[sonic_joint29] overriding target_fps {requested_target_fps} -> "
+                f"{SONIC_JOINT29_TARGET_FPS} to match SONIC live teleop cadence"
+            )
+            requested_target_fps = SONIC_JOINT29_TARGET_FPS
+        self.target_fps = requested_target_fps
+        self.measured_dt = 1 / self.target_fps  # default fallback dt
 
         # Initialize components
         self.teleop_data_streamer = None
         self.redis_client = None
-        self._input_ready_key = get_input_ready_key("twist2")
+        self._input_ready_key = get_input_ready_key(self.target_backend)
         self._input_ready_epoch_id = -1
         self._ready_for_live_stream = False
+        self._missing_ready_key_logged = False
+        self._recording_control_sequence = 0
+        self._last_recording_command_sent = "none"
+        self._last_sent_gmr_qpos = None
+        self._last_sent_gmr_time = None
+        self._last_sent_body_quat_w = None
+        self._last_sent_joint_vel_mujoco = None
+        self._sonic_joint29_prev_source_ts_ns = None
+        self._sonic_joint29_prev_qpos = None
+        self._sonic_joint29_prev_body_quat_w = None
+        self._sonic_joint29_next_target_ns = None
+        self._default_full_qpos = None
         self.retarget = None
         self.model = None
         self.data = None
@@ -542,6 +687,7 @@ class XRobotTeleopToRobot:
             expected_fps=self.target_fps,
             name="Teleop Loop"
         )
+        print(f"Teleop target backend: {self.target_backend}")
 
 
     def setup_teleop_data_streamer(self):
@@ -570,6 +716,8 @@ class XRobotTeleopToRobot:
         """Setup MuJoCo model and data"""
         self.model = mj.MjModel.from_xml_path(str(self.xml_file))
         self.data = mj.MjData(self.model)
+        mj.mj_forward(self.model, self.data)
+        self._default_full_qpos = self.data.qpos.copy()
         print("MuJoCo simulation initialized")
 
     def setup_video_recording(self):
@@ -605,8 +753,18 @@ class XRobotTeleopToRobot:
             raw_guard = self.redis_client.get(self._input_ready_key)
         except Exception as exc:
             print(f"[TWIST2_PICO] Failed to read input ready key: {exc}")
+            if not self._ready_for_live_stream:
+                self._ready_for_live_stream = True
             return self._ready_for_live_stream
         if raw_guard is None:
+            if not self._ready_for_live_stream:
+                self._ready_for_live_stream = True
+            if not self._missing_ready_key_logged:
+                print(
+                    f"[TWIST2_PICO] Input ready key not found yet: {self._input_ready_key}. "
+                    f"Continuing local preview and Redis publishing without guard."
+                )
+                self._missing_ready_key_logged = True
             return self._ready_for_live_stream
         try:
             if isinstance(raw_guard, (bytes, bytearray)):
@@ -618,7 +776,17 @@ class XRobotTeleopToRobot:
         if epoch_id != self._input_ready_epoch_id:
             self._input_ready_epoch_id = epoch_id
             self._ready_for_live_stream = True
+            self._missing_ready_key_logged = False
             self.state_machine.reset_for_ready_epoch()
+            self._last_sent_gmr_qpos = None
+            self._last_sent_body_quat_w = None
+            self._last_sent_gmr_time = None
+            self._last_sent_joint_vel_mujoco = None
+            self._sonic_joint29_prev_source_ts_ns = None
+            self._sonic_joint29_prev_qpos = None
+            self._sonic_joint29_prev_body_quat_w = None
+            self._sonic_joint29_next_target_ns = None
+            self._last_recording_command_sent = "none"
             print(f"[TWIST2_PICO] Input ready epoch updated: {epoch_id}")
             return False
         return self._ready_for_live_stream
@@ -809,7 +977,199 @@ class XRobotTeleopToRobot:
 
         return serializable_data
 
-    def send_to_redis(self, mimic_obs, neck_data=None, smplx_data=None, recording_active=False, recording_command="none"):
+    def _select_gmr_qpos_to_send(self, current_qpos):
+        """Select the full-body GMR qpos to publish for the current teleop state."""
+        current_state = self.state_machine.get_current_state()
+        if current_state == "teleop" and current_qpos is not None:
+            qpos_to_send = np.asarray(current_qpos, dtype=np.float32)
+        elif current_state == "teleop" and self._last_sent_gmr_qpos is not None:
+            qpos_to_send = self._last_sent_gmr_qpos.copy()
+        elif current_state == "pause" and self._last_sent_gmr_qpos is not None:
+            qpos_to_send = self._last_sent_gmr_qpos.copy()
+        elif self._default_full_qpos is not None:
+            qpos_to_send = np.asarray(self._default_full_qpos, dtype=np.float32)
+        else:
+            qpos_to_send = None
+        return qpos_to_send
+
+    def _compute_sonic_joint29_body_quat_w(self, smplx_data=None, qpos=None):
+        if qpos is not None:
+            try:
+                qpos = np.asarray(qpos, dtype=np.float32).reshape(-1)
+                if qpos.size >= 7:
+                    root_quat_wxyz = qpos[3:7].astype(np.float32, copy=False)
+                    norm = float(np.linalg.norm(root_quat_wxyz))
+                    if norm > 1e-6:
+                        return (root_quat_wxyz / norm).astype(np.float32, copy=False)
+            except Exception:
+                pass
+
+        if smplx_data is None:
+            if self._last_sent_body_quat_w is not None:
+                return self._last_sent_body_quat_w.copy()
+            return SONIC_JOINT29_FALLBACK_BODY_QUAT_WXYZ.copy()
+
+        try:
+            pelvis = smplx_data.get("Pelvis")
+            if pelvis is None or len(pelvis) < 2:
+                raise ValueError("Pelvis entry missing")
+            processed_pelvis_quat_wxyz = np.asarray(pelvis[1], dtype=np.float32).reshape(4)
+            unity_to_right_hand_rot = np.array(
+                [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]],
+                dtype=np.float32,
+            )
+            unity_to_right_hand_quat_wxyz = R.from_matrix(unity_to_right_hand_rot).as_quat(
+                scalar_first=True
+            ).astype(np.float32)
+            raw_pelvis_quat_wxyz = quat_mul_np(
+                _quat_conjugate_wxyz_np(unity_to_right_hand_quat_wxyz),
+                processed_pelvis_quat_wxyz,
+                scalar_first=True,
+            ).astype(np.float32)
+            root_rot = R.from_quat(raw_pelvis_quat_wxyz, scalar_first=True)
+            root_rot = root_rot * R.from_euler("y", 180.0, degrees=True)
+            global_orient_quat = torch.from_numpy(
+                root_rot.as_quat(scalar_first=True).astype(np.float32)
+            ).reshape(1, 4)
+            global_orient_quat = smpl_root_ytoz_up(global_orient_quat)
+            global_orient_quat = remove_smpl_base_rot(global_orient_quat, w_last=False)
+            body_quat_wxyz = global_orient_quat.detach().cpu().numpy().reshape(4).astype(np.float32)
+            norm = float(np.linalg.norm(body_quat_wxyz))
+            if norm > 1e-6:
+                body_quat_wxyz /= norm
+            else:
+                body_quat_wxyz = SONIC_JOINT29_FALLBACK_BODY_QUAT_WXYZ.copy()
+            return body_quat_wxyz
+        except Exception:
+            if self._last_sent_body_quat_w is not None:
+                return self._last_sent_body_quat_w.copy()
+            return SONIC_JOINT29_FALLBACK_BODY_QUAT_WXYZ.copy()
+
+    def _maybe_interpolate_sonic_joint29_reference(self, qpos, body_quat_w, source_timestamp_ns):
+        """Resample the live GMR stream onto a steady 50 Hz publish grid."""
+        if qpos is None or body_quat_w is None:
+            return qpos, body_quat_w
+
+        qpos = np.asarray(qpos, dtype=np.float32).reshape(-1)
+        body_quat_w = np.asarray(body_quat_w, dtype=np.float32).reshape(4)
+        try:
+            source_ts_ns = int(source_timestamp_ns)
+        except (TypeError, ValueError):
+            source_ts_ns = 0
+
+        if source_ts_ns <= 0:
+            return qpos, body_quat_w
+
+        step_ns = int(1e9 / max(1, self.target_fps))
+        prev_ts_ns = self._sonic_joint29_prev_source_ts_ns
+        prev_qpos = self._sonic_joint29_prev_qpos
+        prev_body_quat_w = self._sonic_joint29_prev_body_quat_w
+
+        if prev_ts_ns is None or prev_qpos is None or prev_body_quat_w is None:
+            self._sonic_joint29_prev_source_ts_ns = source_ts_ns
+            self._sonic_joint29_prev_qpos = qpos.copy()
+            self._sonic_joint29_prev_body_quat_w = body_quat_w.copy()
+            self._sonic_joint29_next_target_ns = source_ts_ns
+            return qpos, body_quat_w
+
+        if source_ts_ns <= prev_ts_ns:
+            if self._last_sent_gmr_qpos is not None and self._last_sent_body_quat_w is not None:
+                return self._last_sent_gmr_qpos.copy(), self._last_sent_body_quat_w.copy()
+            return qpos, body_quat_w
+
+        if self._sonic_joint29_next_target_ns is None:
+            self._sonic_joint29_next_target_ns = prev_ts_ns + step_ns
+        if self._sonic_joint29_next_target_ns < prev_ts_ns:
+            self._sonic_joint29_next_target_ns = prev_ts_ns
+
+        if self._sonic_joint29_next_target_ns > source_ts_ns:
+            # Not enough source horizon yet. Use the freshest reference to minimize lag,
+            # but keep the target grid unchanged so the next publish can catch up cleanly.
+            self._sonic_joint29_prev_source_ts_ns = source_ts_ns
+            self._sonic_joint29_prev_qpos = qpos.copy()
+            self._sonic_joint29_prev_body_quat_w = body_quat_w.copy()
+            return qpos, body_quat_w
+
+        denom = float(source_ts_ns - prev_ts_ns)
+        alpha = (
+            float(self._sonic_joint29_next_target_ns - prev_ts_ns) / denom
+            if denom > 0.0
+            else 1.0
+        )
+        alpha = float(np.clip(alpha, 0.0, 1.0))
+        use_qpos = ((1.0 - alpha) * prev_qpos + alpha * qpos).astype(np.float32)
+        use_body_quat_w = _quat_lerp_normalized_wxyz(prev_body_quat_w, body_quat_w, alpha)
+
+        self._sonic_joint29_next_target_ns += step_ns
+        self._sonic_joint29_prev_source_ts_ns = source_ts_ns
+        self._sonic_joint29_prev_qpos = qpos.copy()
+        self._sonic_joint29_prev_body_quat_w = body_quat_w.copy()
+        return use_qpos, use_body_quat_w
+
+    def _build_gmr_joint29_payload(
+        self, qpos, publish_dt=None, smplx_data=None, body_quat_w_override=None
+    ):
+        """Convert full MuJoCo qpos into the Redis payload expected by sonic_joint29."""
+        if qpos is None:
+            return None
+        qpos = np.asarray(qpos, dtype=np.float32).reshape(-1)
+        if qpos.size < 36:
+            return None
+
+        joint_pos_mujoco = qpos[7:36]
+        if joint_pos_mujoco.shape[0] != 29:
+            return None
+
+        joint_pos_sonic = joint_pos_mujoco[TWIST2_TO_SONIC_JOINT_INDICES]
+        if self._last_sent_gmr_qpos is None:
+            joint_vel_mujoco = np.zeros_like(joint_pos_mujoco)
+        else:
+            dt = max(
+                float(publish_dt) if publish_dt is not None else float(self.measured_dt),
+                1e-3,
+            )
+            last_joint_pos_mujoco = np.asarray(self._last_sent_gmr_qpos, dtype=np.float32).reshape(-1)[7:36]
+            joint_vel_mujoco = (joint_pos_mujoco - last_joint_pos_mujoco) / dt
+            if self._last_sent_joint_vel_mujoco is not None:
+                last_joint_vel = np.asarray(self._last_sent_joint_vel_mujoco, dtype=np.float32).reshape(29)
+                alpha = float(np.clip(SONIC_JOINT29_JOINT_VEL_EMA_ALPHA, 0.0, 1.0))
+                joint_vel_mujoco = alpha * joint_vel_mujoco + (1.0 - alpha) * last_joint_vel
+        joint_vel_mujoco = np.clip(
+            joint_vel_mujoco,
+            -SONIC_JOINT29_JOINT_VEL_CLIP,
+            SONIC_JOINT29_JOINT_VEL_CLIP,
+        ).astype(np.float32, copy=False)
+        joint_vel_sonic = joint_vel_mujoco[TWIST2_TO_SONIC_JOINT_INDICES]
+        if body_quat_w_override is not None:
+            body_quat_wxyz = np.asarray(body_quat_w_override, dtype=np.float32).reshape(4)
+        else:
+            body_quat_wxyz = self._compute_sonic_joint29_body_quat_w(smplx_data=smplx_data, qpos=qpos)
+        if self._last_sent_body_quat_w is not None:
+            body_quat_wxyz = _quat_lerp_normalized_wxyz(
+                self._last_sent_body_quat_w,
+                body_quat_wxyz,
+                SONIC_JOINT29_BODY_QUAT_EMA_ALPHA,
+            )
+
+        return {
+            "full_qpos": qpos.copy(),
+            "joint_pos": joint_pos_sonic.astype(np.float32, copy=False),
+            "joint_vel": joint_vel_sonic.astype(np.float32, copy=False),
+            "joint_vel_mujoco": joint_vel_mujoco.copy(),
+            "body_pos": qpos[0:3].astype(np.float32, copy=False),
+            "body_quat_w": body_quat_wxyz,
+        }
+
+    def send_to_redis(
+        self,
+        mimic_obs,
+        neck_data=None,
+        smplx_data=None,
+        recording_active=False,
+        recording_command="none",
+        qpos=None,
+        source_timestamp_ns=None,
+    ):
         """Send mimic observations to Redis"""
 
         if self.redis_client is not None and mimic_obs is not None:
@@ -841,10 +1201,56 @@ class XRobotTeleopToRobot:
             }
             self.redis_pipeline.set("human_info_unitree_g1_with_hands", json.dumps(human_info))
 
+        if self.target_backend == "sonic_joint29":
+            gmr_qpos_to_send = self._select_gmr_qpos_to_send(qpos)
+            body_quat_override = None
+            if (
+                self.state_machine.get_current_state() == "teleop"
+                and qpos is not None
+            ):
+                current_body_quat_w = self._compute_sonic_joint29_body_quat_w(
+                    smplx_data=smplx_data,
+                    qpos=gmr_qpos_to_send,
+                )
+                gmr_qpos_to_send, body_quat_override = self._maybe_interpolate_sonic_joint29_reference(
+                    gmr_qpos_to_send,
+                    current_body_quat_w,
+                    source_timestamp_ns,
+                )
+            now_monotonic = time.monotonic()
+            publish_dt = None
+            if self._last_sent_gmr_time is not None:
+                publish_dt = now_monotonic - self._last_sent_gmr_time
+            gmr_payload = self._build_gmr_joint29_payload(
+                gmr_qpos_to_send,
+                publish_dt=publish_dt,
+                smplx_data=smplx_data,
+                body_quat_w_override=body_quat_override,
+            )
+            if gmr_payload is not None:
+                frame_index = self._send_counter if hasattr(self, "_send_counter") else 0
+                self.redis_pipeline.set(GMR_FULL_QPOS_KEY, json.dumps(gmr_payload["full_qpos"].tolist()))
+                self.redis_pipeline.set(GMR_JOINT_POS_KEY, json.dumps(gmr_payload["joint_pos"].tolist()))
+                self.redis_pipeline.set(GMR_JOINT_VEL_KEY, json.dumps(gmr_payload["joint_vel"].tolist()))
+                self.redis_pipeline.set(GMR_BODY_POS_KEY, json.dumps(gmr_payload["body_pos"].tolist()))
+                self.redis_pipeline.set(GMR_BODY_QUAT_W_KEY, json.dumps(gmr_payload["body_quat_w"].tolist()))
+                self.redis_pipeline.set(GMR_FRAME_INDEX_KEY, frame_index)
+                self._last_sent_gmr_qpos = gmr_payload["full_qpos"].copy()
+                self._last_sent_gmr_time = now_monotonic
+                self._last_sent_joint_vel_mujoco = gmr_payload["joint_vel_mujoco"].copy()
+                self._last_sent_body_quat_w = gmr_payload["body_quat_w"].copy()
+
         # Send recording control state to redis
+        if recording_command != "none" and recording_command != self._last_recording_command_sent:
+            self._recording_control_sequence += 1
+        self._last_recording_command_sent = recording_command
+        timestamp_ms = int(time.time() * 1000)
         recording_control_data = {
             "active": recording_active,
-            "command": recording_command
+            "command": recording_command,
+            "sequence": self._recording_control_sequence,
+            "timestamp_ms": timestamp_ms,
+            "source": "twist2_teleop_server",
         }
         self.redis_pipeline.set("recording_control_unitree_g1_with_hands", json.dumps(recording_control_data))
 
@@ -856,7 +1262,7 @@ class XRobotTeleopToRobot:
             print(f"[SEND_TO_REDIS DEBUG] Recording state: active={recording_active}, command={recording_command}")
 
         # Send timestamp to redis
-        t_action = int(time.time() * 1000) # current timestamp in ms
+        t_action = timestamp_ms
         self.redis_pipeline.set("t_action", t_action)
 
         # execute the pipeline once
@@ -1023,7 +1429,13 @@ class XRobotTeleopToRobot:
                     neck_data_to_send,
                     smplx_data,
                     self.state_machine.recording_active if ready_for_live_stream else False,
-                    self.state_machine.recording_command if ready_for_live_stream else "none"
+                    self.state_machine.recording_command if ready_for_live_stream else "none",
+                    qpos=qpos if ready_for_live_stream else None,
+                    source_timestamp_ns=(
+                        controller_data.get("timestamp")
+                        if ready_for_live_stream and controller_data is not None
+                        else None
+                    ),
                 )
 
                 # Manage recording command visibility
@@ -1104,6 +1516,12 @@ def parse_arguments():
         type=int,
         default=0,
         help="Measure and print detailed FPS statistics (0=disabled, 1=enabled).",
+    )
+    parser.add_argument(
+        "--target_backend",
+        choices=["twist2", "sonic_joint29"],
+        default="twist2",
+        help="Select which Isaac input-ready/backend route this teleop publisher should target.",
     )
     return parser.parse_args()
 

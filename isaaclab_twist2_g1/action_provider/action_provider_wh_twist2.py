@@ -20,6 +20,16 @@ import copy
 import numpy as np
 from pathlib import Path
 from action_provider.lerobot_vla_http_client import LeRobotVLAHttpClient
+from action_provider.vla_smpl_runtime import (
+    VLA_SMPL_ACTION_DIM,
+    VLA_SMPL_STATE_DIM,
+    Twist2ActionMimicRecorder,
+    UnifiedSMPLActionRuntime,
+    build_twist2_mimic_obs,
+    build_vla_observation_state,
+    reorder_canonical_to_twist2_29,
+    reorder_twist2_to_canonical_29,
+)
 from common_env_objects import (
     add_env_object_frame_arrays,
     add_episode_init_env_object_fields,
@@ -27,6 +37,7 @@ from common_env_objects import (
     get_current_episode_object_seed_info,
     resolve_env_object_scene_key,
 )
+from pico_server.data_utils.params import DEFAULT_HAND_POSE
 
 project_root = os.environ.get("PROJECT_ROOT")
 
@@ -257,6 +268,7 @@ class RecordingManager:
 
         # Initialize storage
         organized = {
+            'schema_version': np.array("twist2_episode_v2"),
             'task': data_buffer[0]['task'],  # Task name (scalar)
             'num_frames': num_frames,
 
@@ -282,7 +294,19 @@ class RecordingManager:
             'robot_root_lin_vel_world': np.zeros((num_frames, 3), dtype=np.float32),
             'robot_root_ang_vel_world': np.zeros((num_frames, 3), dtype=np.float32),
             'robot_twist2_inference_qpos': np.zeros((num_frames, 29), dtype=np.float32),
+            'robot_action_mimic': np.zeros((num_frames, 35), dtype=np.float32),
             'robot_obs_buf': np.zeros((num_frames, 1432), dtype=np.float32),  # 127*11+35 = 1432
+            'vla_state': np.zeros((num_frames, VLA_SMPL_STATE_DIM), dtype=np.float32),
+            'vla_state_root_rot6d': np.zeros((num_frames, 6), dtype=np.float32),
+            'vla_state_dof_pos_29': np.zeros((num_frames, 29), dtype=np.float32),
+            'vla_state_dof_vel_29': np.zeros((num_frames, 29), dtype=np.float32),
+            'vla_action': np.zeros((num_frames, VLA_SMPL_ACTION_DIM), dtype=np.float32),
+            'vla_action_root_xy_delta': np.zeros((num_frames, 2), dtype=np.float32),
+            'vla_action_root_z': np.zeros((num_frames, 1), dtype=np.float32),
+            'vla_action_root_rot6d': np.zeros((num_frames, 6), dtype=np.float32),
+            'vla_action_joint_pos_29': np.zeros((num_frames, 29), dtype=np.float32),
+            'vla_action_hand_binary': np.zeros((num_frames, 2), dtype=np.float32),
+            'vla_action_hand_binary_2': np.zeros((num_frames, 2), dtype=np.float32),
 
             # System data
             'system_control_frequency': np.zeros(num_frames, dtype=np.float32),
@@ -353,7 +377,19 @@ class RecordingManager:
             organized['robot_root_lin_vel_world'][i] = frame_data['robot']['root_lin_vel_world']
             organized['robot_root_ang_vel_world'][i] = frame_data['robot']['root_ang_vel_world']
             organized['robot_twist2_inference_qpos'][i] = frame_data['robot']['twist2_inference_qpos']
+            organized['robot_action_mimic'][i] = frame_data['robot']['action_mimic']
             organized['robot_obs_buf'][i] = frame_data['robot']['observation']['obs_buf']
+            organized['vla_state'][i] = frame_data['robot']['vla_state']
+            organized['vla_state_root_rot6d'][i] = frame_data['robot']['vla_state'][:6]
+            organized['vla_state_dof_pos_29'][i] = frame_data['robot']['vla_state'][6:35]
+            organized['vla_state_dof_vel_29'][i] = frame_data['robot']['vla_state'][35:64]
+            organized['vla_action'][i] = frame_data['robot']['vla_action']
+            organized['vla_action_root_xy_delta'][i] = frame_data['robot']['vla_action'][:2]
+            organized['vla_action_root_z'][i] = frame_data['robot']['vla_action'][2:3]
+            organized['vla_action_root_rot6d'][i] = frame_data['robot']['vla_action'][3:9]
+            organized['vla_action_joint_pos_29'][i] = frame_data['robot']['vla_action'][9:38]
+            organized['vla_action_hand_binary'][i] = frame_data['robot']['vla_action'][38:40]
+            organized['vla_action_hand_binary_2'][i] = frame_data['robot']['vla_action'][38:40]
             if 'robot_applied_torque_before_decimation' in organized:
                 torque = frame_data['robot'].get('applied_torque_before_decimation')
                 if torque is not None:
@@ -544,7 +580,9 @@ class TWIST2ActionProvider(ActionProvider):
         self._lerobot_predict_action = None
         self._lerobot_device = None
         self._lerobot_http_client = None
+        self._lerobot_vla_runtime = UnifiedSMPLActionRuntime()
         self._lerobot_gripper_threshold = float(getattr(args_cli, "lerobot_gripper_threshold", 0.5))
+        self._latest_vla_action = None
         self.policy_path = self._resolve_policy_path(args_cli.model_path)
         if (not self._replay_enabled or self._replay_mode != "direct_replay") and not os.path.exists(self.policy_path):
             raise FileNotFoundError(f"[{self.name}] Policy file not found: {self.policy_path}")
@@ -638,6 +676,8 @@ class TWIST2ActionProvider(ActionProvider):
         # Recording control state
         self._recording_active = False
         self._recording_command = "none"  # "none", "start", "save", "cancel"
+        self._latest_recording_control = None
+        self._latest_recording_control_sequence = -1
 
         # Display state for overlay (persists until save completes)
         self._recording_display_state = "idle"  # "idle", "recording", "saving", "saved", "discard"
@@ -1034,6 +1074,9 @@ class TWIST2ActionProvider(ActionProvider):
         self.sim_step_counter = 0
         cfg = getattr(self.env, "cfg", None)
         self._twist2_decimation = int(getattr(cfg, "decimation", 4))
+        self._canonical_action_recorder = Twist2ActionMimicRecorder(
+            control_dt=float(self._twist2_decimation * self.env.physics_dt)
+        )
         # self._twist2_decimation = 1
 
         # Render control: only render when camera needs update
@@ -1200,11 +1243,25 @@ class TWIST2ActionProvider(ActionProvider):
             rgb = np.clip(rgb, 0, 255).astype(np.uint8)
         return rgb
 
-    def _infer_lerobot_high_level_command(self, obs_proprio: torch.Tensor) -> torch.Tensor:
+    def _build_lerobot_vla_observation_state(self) -> np.ndarray:
+        robot = self.env.scene["robot"].data
+        joint_pos_twist2 = robot.joint_pos[0, self.twist2_action_indices].detach().cpu().numpy().astype(np.float32)
+        joint_vel_twist2 = robot.joint_vel[0, self.twist2_action_indices].detach().cpu().numpy().astype(np.float32)
+        joint_pos_canonical = reorder_twist2_to_canonical_29(joint_pos_twist2)
+        joint_vel_canonical = reorder_twist2_to_canonical_29(joint_vel_twist2)
+        base_quat_wxyz = robot.root_state_w[0, 3:7].detach().cpu().numpy().astype(np.float32)
+        state = build_vla_observation_state(
+            root_orientation_wxyz=base_quat_wxyz,
+            joint_pos_canonical_29=joint_pos_canonical,
+            joint_vel_canonical_29=joint_vel_canonical,
+        )
+        if state.shape != (VLA_SMPL_STATE_DIM,):
+            raise RuntimeError(f"[{self.name}] Expected canonical VLA state shape {(VLA_SMPL_STATE_DIM,)}, got {state.shape}")
+        return state
+
+    def _infer_lerobot_high_level_command(self) -> torch.Tensor:
         rgb = self._get_front_camera_rgb_for_vla()
-        proprio = obs_proprio.squeeze(0).detach().cpu().numpy().astype(np.float32)
-        if proprio.shape != (92,):
-            raise RuntimeError(f"[{self.name}] Expected obs_proprio shape (92,), got {proprio.shape}")
+        proprio = self._build_lerobot_vla_observation_state()
 
         if self._lerobot_http_client is not None:
             action = self._lerobot_http_client.infer(
@@ -1234,37 +1291,59 @@ class TWIST2ActionProvider(ActionProvider):
 
         if not isinstance(action, torch.Tensor):
             action = torch.as_tensor(action)
-        action = action.to(self.env.device, dtype=torch.float32)
-        if action.dim() == 1:
-            action = action.unsqueeze(0)
-        if action.shape[-1] == 35:
-            # Older TWIST2 LeRobot datasets only contain the 35D body command.
-            # In that case, default both grip-binary channels to open.
-            self._vla_gripper_binary.zero_()
-            if not getattr(self, "_warned_lerobot_action_dim_35", False):
-                print(f"[{self.name}] LeRobot action dim 35 detected; defaulting both grip binaries to 0")
-                self._warned_lerobot_action_dim_35 = True
-            return action
-        if action.shape[-1] == 37:
-            self._vla_gripper_binary.copy_(torch.clamp(action[:, 35:37], 0.0, 1.0))
-            return action[:, :35]
-        raise ValueError(f"[{self.name}] Expected LeRobot action dim 35 or 37, got {tuple(action.shape)}")
+        action_np = action.detach().cpu().numpy().astype(np.float32).reshape(-1)
+        if action_np.shape != (VLA_SMPL_ACTION_DIM,):
+            raise ValueError(
+                f"[{self.name}] Expected canonical VLA action dim {VLA_SMPL_ACTION_DIM}, got {action_np.shape}"
+            )
+
+        self._latest_vla_action = action_np.copy()
+        runtime_frame = self._lerobot_vla_runtime.step(action_np)
+        self._vla_gripper_binary.copy_(
+            torch.from_numpy(np.clip(runtime_frame.hand_binary, 0.0, 1.0)).to(
+                self.env.device, dtype=torch.float32
+            ).unsqueeze(0)
+        )
+        control_dt = float(self._twist2_decimation * self.env.physics_dt)
+        mimic_obs = build_twist2_mimic_obs(
+            runtime_frame=runtime_frame,
+            control_dt=control_dt,
+        )
+        return torch.from_numpy(mimic_obs).to(self.env.device, dtype=torch.float32).unsqueeze(0)
 
     def _apply_vla_gripper_command(self, full_action: torch.Tensor) -> bool:
-        if not self._use_lerobot_vla or not self.enable_gripper or not hasattr(self, "_gripper_source_idx_t"):
+        if not self._use_lerobot_vla:
             return False
 
         left_closed = bool(self._vla_gripper_binary[0, 0].item() >= self._lerobot_gripper_threshold)
         right_closed = bool(self._vla_gripper_binary[0, 1].item() >= self._lerobot_gripper_threshold)
-        left_position = 0.03 if left_closed else -0.02
-        right_position = 0.03 if right_closed else -0.02
+        if self.enable_gripper and hasattr(self, "_gripper_source_idx_t"):
+            left_position = 0.03 if left_closed else -0.02
+            right_position = 0.03 if right_closed else -0.02
+            self._gripper_buf.copy_(
+                torch.tensor([right_position, left_position], dtype=torch.float32, device=self.env.device)
+            )
+            gp_vals = self._gripper_buf.index_select(0, self._gripper_source_idx_t)
+            full_action.index_copy_(0, self._gripper_target_idx_t, gp_vals)
+            return True
 
-        self._gripper_buf.copy_(
-            torch.tensor([right_position, left_position], dtype=torch.float32, device=self.env.device)
-        )
-        gp_vals = self._gripper_buf.index_select(0, self._gripper_source_idx_t)
-        full_action.index_copy_(0, self._gripper_target_idx_t, gp_vals)
-        return True
+        if self.enable_dex3 and hasattr(self, "_left_hand_target_idx_t"):
+            pose_robot_name = "unitree_g1_with_hands"
+            left_pose = DEFAULT_HAND_POSE[pose_robot_name]["left"]["close" if left_closed else "open"]
+            right_pose = DEFAULT_HAND_POSE[pose_robot_name]["right"]["close" if right_closed else "open"]
+            self._left_hand_buf.copy_(
+                torch.as_tensor(left_pose[: len(self._left_hand_buf)], dtype=torch.float32, device=self.env.device)
+            )
+            self._right_hand_buf.copy_(
+                torch.as_tensor(right_pose[: len(self._right_hand_buf)], dtype=torch.float32, device=self.env.device)
+            )
+            l_vals = self._left_hand_buf.index_select(0, self._left_hand_source_idx_t)
+            r_vals = self._right_hand_buf.index_select(0, self._right_hand_source_idx_t)
+            full_action.index_copy_(0, self._left_hand_target_idx_t, l_vals)
+            full_action.index_copy_(0, self._right_hand_target_idx_t, r_vals)
+            return True
+
+        return False
 
     def _load_replay_array(self, replay_data, *keys, required=False):
         for key in keys:
@@ -1280,11 +1359,22 @@ class TWIST2ActionProvider(ActionProvider):
             raise FileNotFoundError(f"[{self.name}] replay file not found: {replay_path}")
 
         with np.load(replay_path, allow_pickle=True) as replay_data:
-            self._replay_data_qpos = self._load_replay_array(
-                replay_data,
-                "robot_twist2_inference_qpos",
-                required=True,
-            )
+            self._replay_data_qpos = None
+            if "robot_twist2_inference_qpos" in replay_data:
+                self._replay_data_qpos = np.asarray(replay_data["robot_twist2_inference_qpos"]).copy()
+            elif "vla_action_joint_pos_29" in replay_data:
+                self._replay_data_qpos = reorder_canonical_to_twist2_29(
+                    np.asarray(replay_data["vla_action_joint_pos_29"], dtype=np.float32)
+                )
+            elif "vla_action" in replay_data:
+                vla_action = np.asarray(replay_data["vla_action"], dtype=np.float32)
+                if vla_action.ndim == 2 and vla_action.shape[-1] == VLA_SMPL_ACTION_DIM:
+                    self._replay_data_qpos = reorder_canonical_to_twist2_29(vla_action[:, 9:38])
+            if self._replay_data_qpos is None:
+                raise KeyError(
+                    f"[{self.name}] replay npz missing keys: "
+                    f"('robot_twist2_inference_qpos', 'vla_action_joint_pos_29', 'vla_action')"
+                )
             self._replay_recorded_joint_pos = self._load_replay_array(
                 replay_data,
                 "robot_qpos_before_decimation",
@@ -1296,6 +1386,36 @@ class TWIST2ActionProvider(ActionProvider):
             )
             self._replay_data_hand_left = self._load_replay_array(replay_data, "human_hand_left")
             self._replay_data_hand_right = self._load_replay_array(replay_data, "human_hand_right")
+            if (
+                self._replay_data_hand_left is None
+                and self._replay_data_hand_right is None
+                and (
+                    "vla_action_hand_binary_2" in replay_data
+                    or "vla_action_hand_binary" in replay_data
+                    or "vla_action" in replay_data
+                )
+            ):
+                hand_binary = None
+                if "vla_action_hand_binary_2" in replay_data:
+                    hand_binary = np.asarray(replay_data["vla_action_hand_binary_2"], dtype=np.float32)
+                elif "vla_action" in replay_data:
+                    vla_action = np.asarray(replay_data["vla_action"], dtype=np.float32)
+                    if vla_action.ndim == 2 and vla_action.shape[-1] == VLA_SMPL_ACTION_DIM:
+                        hand_binary = vla_action[:, 38:40]
+                elif "vla_action_hand_binary" in replay_data:
+                    hand_binary = np.asarray(replay_data["vla_action_hand_binary"], dtype=np.float32)
+                if hand_binary is not None and hand_binary.ndim == 2 and hand_binary.shape[-1] == 2:
+                    pose_robot_name = "unitree_g1_with_hands"
+                    left_open = np.asarray(DEFAULT_HAND_POSE[pose_robot_name]["left"]["open"], dtype=np.float32)
+                    left_close = np.asarray(DEFAULT_HAND_POSE[pose_robot_name]["left"]["close"], dtype=np.float32)
+                    right_open = np.asarray(DEFAULT_HAND_POSE[pose_robot_name]["right"]["open"], dtype=np.float32)
+                    right_close = np.asarray(DEFAULT_HAND_POSE[pose_robot_name]["right"]["close"], dtype=np.float32)
+                    self._replay_data_hand_left = np.stack(
+                        [left_close if row[0] >= 0.5 else left_open for row in hand_binary], axis=0
+                    ).astype(np.float32)
+                    self._replay_data_hand_right = np.stack(
+                        [right_close if row[1] >= 0.5 else right_open for row in hand_binary], axis=0
+                    ).astype(np.float32)
             self._replay_data_neck = self._load_replay_array(replay_data, "human_neck")
             self._replay_object_states = {}
             replay_object_suffixes = {
@@ -1718,24 +1838,42 @@ class TWIST2ActionProvider(ActionProvider):
                     if isinstance(recording_control_raw, (bytes, bytearray)):
                         recording_control_raw = recording_control_raw.decode("utf-8")
                     recording_control = json.loads(recording_control_raw)
-                    new_recording_state = recording_control.get("active", False)
-                    new_recording_command = recording_control.get("command", "none")
+                    self._latest_recording_control = recording_control
+                    new_recording_state = bool(recording_control.get("active", False))
+                    new_recording_command = str(recording_control.get("command", "none"))
+                    sequence = int(recording_control.get("sequence", -1))
 
-                    # Debug: print when state changes
-                    if new_recording_state != self._recording_active or new_recording_command != self._recording_command:
-                        print(f"[{self.name}] 🔄 Recording state changed: active={new_recording_state}, command={new_recording_command}")
+                    # Debug: print when the teleop-side state changes.
+                    if (
+                        new_recording_state != self._recording_active
+                        or (
+                            new_recording_command != "none"
+                            and sequence != self._latest_recording_control_sequence
+                        )
+                    ):
+                        print(
+                            f"[{self.name}] 🔄 Recording state changed: "
+                            f"active={new_recording_state}, command={new_recording_command}, seq={sequence}"
+                        )
 
-                    # Update state
                     self._recording_active = new_recording_state
-                    self._recording_command = new_recording_command
 
-                    # Print status based on command
-                    if new_recording_command == "start":
-                        print(f"[{self.name}] 🔴 Recording started")
-                    elif new_recording_command == "save":
-                        print(f"[{self.name}] 💾 Recording saved and stopped")
-                    elif new_recording_command == "cancel":
-                        print(f"[{self.name}] ❌ Recording cancelled (not saved)")
+                    # Recording commands are level-held in Redis for ~30 frames.
+                    # Only consume a command once per sequence edge, otherwise a
+                    # single button press repeatedly saves tiny 1-frame episodes.
+                    if (
+                        new_recording_command != "none"
+                        and sequence != self._latest_recording_control_sequence
+                    ):
+                        self._latest_recording_control_sequence = sequence
+                        self._recording_command = new_recording_command
+
+                        if new_recording_command == "start":
+                            print(f"[{self.name}] 🔴 Recording started")
+                        elif new_recording_command == "save":
+                            print(f"[{self.name}] 💾 Recording saved and stopped")
+                        elif new_recording_command == "cancel":
+                            print(f"[{self.name}] ❌ Recording cancelled (not saved)")
 
                 except Exception as e:
                     print(f"[{self.name}] Failed to parse recording control: {e}")
@@ -1892,7 +2030,7 @@ class TWIST2ActionProvider(ActionProvider):
         )  # [1,92]
 
         if self._use_lerobot_vla:
-            action_mimic = self._infer_lerobot_high_level_command(obs_proprio)  # [1,35]
+            action_mimic = self._infer_lerobot_high_level_command()  # [1,35]
         else:
             action_mimic = self._twist2_fetch_actions()  # [1,35]
 
@@ -2085,10 +2223,13 @@ class TWIST2ActionProvider(ActionProvider):
                 print(f"[{self.name}] 🔍 Recording command received: {self._recording_command}")
                 print(f"[{self.name}] 🔍 Recording manager state: is_recording={self.recording_manager.is_recording}, buffer_size={len(self.recording_manager.recording_buffer)}")
 
-            # If already recording and receive "start" command, treat it as "save"
+            # Teleop server emits a "start" edge on init and after every ready epoch.
+            # If recording is already running locally, that edge is only an ack and
+            # must not be reinterpreted as "save", otherwise we immediately flush a
+            # 1-frame episode and break save_and_reset semantics.
             if self._recording_command == "start" and self.recording_manager.is_recording:
-                print(f"[{self.name}] 🔄 Already recording: Converting 'start' command to 'save'")
-                self._recording_command = "save"
+                print(f"[{self.name}] 🔄 Already recording: ignoring duplicate 'start' edge")
+                self._recording_command = "none"
 
             # Handle recording commands from Redis
             if self._recording_command == "start" and not self.recording_manager.is_recording:
@@ -2657,6 +2798,32 @@ class TWIST2ActionProvider(ActionProvider):
 
         robot_data["vision"] = vision_data
 
+        action_mimic = obs_buf[0, :35].detach().cpu().numpy().astype(np.float32)
+        joint_pos_canonical = reorder_twist2_to_canonical_29(robot_data["qpos_before_decimation"])
+        joint_vel_canonical = reorder_twist2_to_canonical_29(robot_data["qvel_before_decimation"])
+        canonical_state = build_vla_observation_state(
+            root_orientation_wxyz=robot_data["root_orientation"],
+            joint_pos_canonical_29=joint_pos_canonical,
+            joint_vel_canonical_29=joint_vel_canonical,
+        )
+        if self._use_lerobot_vla and self._latest_vla_action is not None:
+            canonical_action = np.asarray(self._latest_vla_action, dtype=np.float32).copy()
+        else:
+            controller_binary = human_data["controller_binary"]
+            canonical_action = self._canonical_action_recorder.step(
+                mimic_obs=action_mimic,
+                hand_binary=np.array(
+                    [
+                        float(controller_binary.get("left_grip_binary", False)),
+                        float(controller_binary.get("right_grip_binary", False)),
+                    ],
+                    dtype=np.float32,
+                ),
+            )
+
+        robot_data["action_mimic"] = action_mimic
+        robot_data["vla_state"] = canonical_state
+        robot_data["vla_action"] = canonical_action
         recording_data["robot"] = robot_data
 
         # ===== SYSTEM DATA =====
@@ -2747,6 +2914,8 @@ class TWIST2ActionProvider(ActionProvider):
 
             # Reset hand validity flag
             self._twist2_hand_valid = False
+            self._latest_vla_action = None
+            self._canonical_action_recorder.reset()
 
             # Reset SMPLX data validity flags
             self._twist2_smplx_valid = False
@@ -2765,6 +2934,7 @@ class TWIST2ActionProvider(ActionProvider):
             self._replay_object_err_sums = {}
             self._replay_object_err_counts = {}
             if self._use_lerobot_vla:
+                self._lerobot_vla_runtime.reset()
                 if self._lerobot_http_client is not None:
                     self._lerobot_http_client.reset()
                 if self._lerobot_policy is not None:

@@ -1,5 +1,7 @@
 name: doubledesk_twist2
 description: TWIST2 env config for Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody.
+task_name: Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody
+backend: twist2
 
 overrides:
   sim:

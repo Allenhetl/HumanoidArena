@@ -9,7 +9,7 @@ cd "${SCRIPT_DIR}" || exit 1
 # ------------------------------------------------------------------
 PYTHON_BIN="python"
 DEFAULT_ISAACLAB_PY="/home/dreams/miniconda3/envs/unitree_sim_env_isaaclab5_0/bin/python"
-REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775040196890874.npz"
+REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/test0411/sonic/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775894715603602.npz"
 REPLAY_MODE="direct_replay"   # inference_replay | direct_replay
 REPLAY_LOOP=0                    # 1 | 0
 TASK_NAME="Isaac-Move-Football-Single-G129-Dex3-Wholebody"                     # 留空则从 replay 文件读取

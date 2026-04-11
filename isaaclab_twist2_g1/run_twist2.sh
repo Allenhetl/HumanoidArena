@@ -8,16 +8,14 @@ cd "${SCRIPT_DIR}" || exit 1
 # User config: edit here
 # ------------------------------------------------------------------
 PYTHON_BIN="python"
-# TASK_NAME="Isaac-Move-Football-Single-G129-Dex3-Wholebody"
-TASK_NAME="Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody"
-ENV_CONFIG_YAML="tasks/common_env_config/livingroom_grapcup_twist2.yaml"
+ENV_CONFIG_YAML="tasks/common_env_config/football_single_twist2.yaml"
 RUN_DEVICE="cpu"
 ROBOT_TYPE="g129"
 ROBOT_COLLIDER_MODE="box"   # box | fourpoints
 SEED="42"
 ENABLE_CAMERAS=1
 ENABLE_DEX3_DDS=1
-HEADLESS=0
+HEADLESS=1
 IMAGE_TRANSPORT="xrobot"
 IMAGE_XROBOT_HOST="10.42.0.35" # eth
 #IMAGE_XROBOT_HOST="192.168.101.69" ｜ wifi
@@ -25,10 +23,34 @@ IMAGE_XROBOT_PORT="12345"
 IMAGE_XROBOT_BITRATE="16777216"
 IMAGE_FPS="30"
 IMAGE_XROBOT_FFMPEG="/usr/bin/ffmpeg"
-RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/temp"
+RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/test/twist2"
 
 export PROJECT_ROOT="${SCRIPT_DIR}"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
+
+load_task_name_from_yaml() {
+  "${PYTHON_BIN}" - "${SCRIPT_DIR}/tasks/common_env_config/loader.py" "${1}" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+loader_path = pathlib.Path(sys.argv[1])
+config_path = sys.argv[2]
+spec = importlib.util.spec_from_file_location("common_env_config_loader", loader_path)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+task_name = module.get_env_config_task_name(config_path)
+if not task_name:
+    raise SystemExit(
+        f"Error: env config YAML must define a top-level 'task_name': {config_path}"
+    )
+print(task_name)
+PY
+}
+
+TASK_NAME="${TASK_NAME:-$(load_task_name_from_yaml "${ENV_CONFIG_YAML}")}"
 
 redis-cli DEL \
   action_body_unitree_g1_with_hands \
@@ -84,20 +106,13 @@ exec "${cmd[@]}"
 
 
 # 可切换：
-#一般沙袋: Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody
-#吊挂沙袋: Isaac-Move-Boxing-Bag-Hanging-G129-Dex3-Wholebody
-#足球: Isaac-Move-Football-G129-Dex3-Wholebody
-#双桌面拾放: Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody
-#Push-T: Isaac-Push-T-G129-Dex3-Wholebody
-#客厅交互：Isaac-Move-ArtVIP-Livingroom-G129-Dex3-Wholebody
-#客厅抓杯：Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody
-#三级台阶平台：Isaac-Move-Three-Step-Platform-G129-Dex3-Wholebody
-#ready
-#TASK_NAME="${TASK_NAME:-Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody}"
-#TASK_NAME="${TASK_NAME:-Isaac-Move-Football-G129-Dex3-Wholebody}"
-#TASK_NAME="${TASK_NAME:-Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody}"
-#TASK_NAME="${TASK_NAME:-Isaac-Move-Three-Step-Platform-G129-Dex3-Wholebody}"
-#TASK_NAME="${TASK_NAME:-Isaac-Move-ArtVIP-Livingroom-G129-Dex3-Wholebody}"
-#TASK_NAME="${TASK_NAME:-Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody}"
-#TASK_NAME="${TASK_NAME:-Isaac-Move-Football-G129-Dex3-Wholebody}"
-#TASK_NAME="${TASK_NAME:-Isaac-Move-Football-Single-G129-Dex3-Wholebody}"
+#一般沙袋: tasks/common_env_config/boxing_bag_twist2.yaml
+#吊挂沙袋: tasks/common_env_config/boxing_bag_hanging_twist2.yaml
+#足球: tasks/common_env_config/football_twist2.yaml
+#单足球: tasks/common_env_config/football_single_twist2.yaml
+#双桌面拾放: tasks/common_env_config/doubledesk_twist2.yaml
+#Push-T: tasks/common_env_config/push_t_twist2.yaml
+#客厅抓杯：tasks/common_env_config/livingroom_grapcup_twist2.yaml
+#三级台阶平台：tasks/common_env_config/three_step_platform_twist2.yaml
+#开门：tasks/common_env_config/opendoor_twist2.yaml
+#小推车：tasks/common_env_config/pickplace_small_trolley_twist2.yaml

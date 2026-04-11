@@ -8,14 +8,16 @@ from isaaclab.utils import configclass
 
 from . import mdp
 from tasks.common_config import CameraPresets, G1RobotPresets
-from tasks.common_scene.base_scene_indoor_trolley import IndoorTrolleySceneCfg
+from tasks.common_scene.base_scene_pickplace_small_trolley import (
+    PickPlaceSmallTrolleySceneCfg,
+)
 
 ROBOT_INIT_POS = (0.0, -2.2, 0.8)
 ROBOT_INIT_ROT = (1.0, 0.0, 0.0, 0.0)
 
 
 @configclass
-class IndoorTrolleyTerrainSceneCfg(IndoorTrolleySceneCfg):
+class PickPlaceSmallTrolleyTaskSceneCfg(PickPlaceSmallTrolleySceneCfg):
     robot: ArticulationCfg = G1RobotPresets.g1_29dof_dex3_wholebody(
         init_pos=ROBOT_INIT_POS,
         init_rot=ROBOT_INIT_ROT,
@@ -64,7 +66,7 @@ class TerminationsCfg:
 
 @configclass
 class RewardsCfg:
-    reward = RewTerm(func=mdp.compute_reward_indoor_trolley, weight=1.0)
+    reward = RewTerm(func=mdp.compute_reward_pickplace_small_trolley, weight=1.0)
 
 
 @configclass
@@ -73,8 +75,8 @@ class EventCfg:
 
 
 @configclass
-class MoveIndoorTrolleyG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
-    scene: IndoorTrolleyTerrainSceneCfg = IndoorTrolleyTerrainSceneCfg(
+class MovePickPlaceSmallTrolleyG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
+    scene: PickPlaceSmallTrolleyTaskSceneCfg = PickPlaceSmallTrolleyTaskSceneCfg(
         num_envs=1,
         env_spacing=2.5,
         replicate_physics=True,

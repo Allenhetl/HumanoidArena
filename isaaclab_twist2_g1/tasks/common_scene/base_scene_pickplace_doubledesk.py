@@ -27,6 +27,7 @@ class DoubleTableSceneCfg(InteractiveSceneCfg): # inherit from the interactive s
         ),
         spawn=UsdFileCfg(
             usd_path=f"{project_root}/assets/objects/small_warehouse/small_doubledesk.usd",
+            # usd_path=f"{project_root}/assets/objects/small_warehouse/small_cart.usd",
             # small_doubledesk.usd is authored 100x smaller than the warehouse scenes
             # already used elsewhere in this repo (it lacks the top-level /Lab scale=100).
             scale=ROOM_SCALE,

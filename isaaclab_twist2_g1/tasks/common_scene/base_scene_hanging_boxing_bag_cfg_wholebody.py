@@ -9,10 +9,9 @@ import os
 import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg, ArticulationCfg, RigidObjectCfg
 from isaaclab.actuators import ImplicitActuatorCfg
+from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 from isaaclab.utils import configclass
-
-from tasks.common_scene.base_scene_pickplace_cylindercfg_wholebody import TableCylinderSceneCfgWH
 
 project_root = os.environ.get("PROJECT_ROOT")
 
@@ -39,7 +38,7 @@ HANGING_ANCHOR_Z = 1.6
 
 
 @configclass
-class TableHangingBoxingBagSceneCfgWH(TableCylinderSceneCfgWH):
+class TableHangingBoxingBagSceneCfgWH(InteractiveSceneCfg):
     """Hanging boxing bag scene: fixed anchor + revolute joint + bag."""
 
     room_walls = AssetBaseCfg(
@@ -94,4 +93,12 @@ class TableHangingBoxingBagSceneCfgWH(TableCylinderSceneCfgWH):
                 damping=0.3,
             ),
         },
+    )
+
+    light = AssetBaseCfg(
+        prim_path="/World/light",
+        spawn=sim_utils.DomeLightCfg(
+            color=(0.75, 0.75, 0.75),
+            intensity=3000.0,
+        ),
     )

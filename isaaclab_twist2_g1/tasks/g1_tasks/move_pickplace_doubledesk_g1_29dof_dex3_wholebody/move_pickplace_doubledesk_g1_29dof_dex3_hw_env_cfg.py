@@ -19,7 +19,8 @@ from tasks.common_scene.base_scene_pickplace_doubledesk import DoubleTableSceneC
 @configclass
 class PickPlaceDoubleDeskSceneCfg(DoubleTableSceneCfg):
     robot: ArticulationCfg = G1RobotPresets.g1_29dof_dex3_wholebody(
-        init_pos=(-3.0, -2.5, 0.8),
+        # init_pos=(-3.0, -2.5, 0.8),
+        init_pos=(-1.8, -6.0, 0.8),
         init_rot=(1, 0.0, 0.0, 0.0),
     )
 

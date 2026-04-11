@@ -36,6 +36,36 @@ def resolve_env_config_yaml_path(config_path: str | None) -> Path | None:
     )
 
 
+def _load_raw_env_config(config_path: str | None) -> tuple[Path | None, dict[str, Any]]:
+    resolved_path = resolve_env_config_yaml_path(config_path)
+    if resolved_path is None:
+        return None, {}
+
+    with resolved_path.open("r", encoding="utf-8") as file:
+        raw_cfg = yaml.safe_load(file) or {}
+    if not isinstance(raw_cfg, dict):
+        raise ValueError(f"Environment config YAML must contain a mapping: {resolved_path}")
+
+    return resolved_path, raw_cfg
+
+
+def get_env_config_task_name(config_path: str | None) -> str | None:
+    """Read the target Isaac task name from top-level YAML metadata."""
+
+    resolved_path, raw_cfg = _load_raw_env_config(config_path)
+    if resolved_path is None:
+        return None
+
+    task_name = raw_cfg.get("task_name", raw_cfg.get("task"))
+    if task_name is None:
+        return None
+    if not isinstance(task_name, str) or not task_name.strip():
+        raise ValueError(
+            f"Environment config YAML field 'task_name' must be a non-empty string: {resolved_path}"
+        )
+    return task_name.strip()
+
+
 def _deep_merge_dict(base: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
     merged = deepcopy(base)
     for key, value in update.items():
@@ -163,14 +193,9 @@ def apply_env_config_yaml(
 ) -> Path | None:
     """Apply YAML overrides to an IsaacLab env cfg before env creation."""
 
-    resolved_path = resolve_env_config_yaml_path(config_path)
+    resolved_path, raw_cfg = _load_raw_env_config(config_path)
     if resolved_path is None:
         return None
-
-    with resolved_path.open("r", encoding="utf-8") as file:
-        raw_cfg = yaml.safe_load(file) or {}
-    if not isinstance(raw_cfg, dict):
-        raise ValueError(f"Environment config YAML must contain a mapping: {resolved_path}")
 
     merged_overrides = _collect_yaml_overrides(
         raw_cfg,

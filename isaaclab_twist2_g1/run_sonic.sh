@@ -8,15 +8,14 @@ cd "${SCRIPT_DIR}" || exit 1
 # User config: edit here
 # ------------------------------------------------------------------
 PYTHON_BIN="python"
-TASK_NAME="Isaac-Move-Football-Single-G129-Dex3-Wholebody"
-ENV_CONFIG_YAML="tasks/common_env_config/football_single_sonic.yaml"
+ENV_CONFIG_YAML="tasks/common_env_config/livingroom_sitsofa_sonic.yaml"
 RUN_DEVICE="cpu"
 ROBOT_TYPE="g129"
 ROBOT_COLLIDER_MODE="box"   # box | fourpoints
 SEED="42"
 ENABLE_CAMERAS=1
 ENABLE_DEX3_DDS=1
-HEADLESS=1
+HEADLESS=0
 SONIC_REDIS_HOST="localhost"
 SONIC_REDIS_PORT="6379"
 SONIC_ENCODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_encoder.onnx"
@@ -27,10 +26,34 @@ IMAGE_XROBOT_PORT="12345"
 IMAGE_XROBOT_BITRATE="2097152"
 IMAGE_FPS="30"
 IMAGE_XROBOT_FFMPEG="/usr/bin/ffmpeg"
-RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HOI_football_v2/sonic/yb"
+RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/test/sonic"
 
 export PROJECT_ROOT="${SCRIPT_DIR}"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
+
+load_task_name_from_yaml() {
+  "${PYTHON_BIN}" - "${SCRIPT_DIR}/tasks/common_env_config/loader.py" "${1}" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+loader_path = pathlib.Path(sys.argv[1])
+config_path = sys.argv[2]
+spec = importlib.util.spec_from_file_location("common_env_config_loader", loader_path)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+task_name = module.get_env_config_task_name(config_path)
+if not task_name:
+    raise SystemExit(
+        f"Error: env config YAML must define a top-level 'task_name': {config_path}"
+    )
+print(task_name)
+PY
+}
+
+TASK_NAME="${TASK_NAME:-$(load_task_name_from_yaml "${ENV_CONFIG_YAML}")}"
 
 if [ ! -f "${SONIC_ENCODER_PATH}" ]; then
   echo "Error: SONIC encoder not found: ${SONIC_ENCODER_PATH}"
@@ -105,20 +128,13 @@ fi
 exec "${cmd[@]}"
 
 # 可切换：
-#一般沙袋: Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody
-#吊挂沙袋: Isaac-Move-Boxing-Bag-Hanging-G129-Dex3-Wholebody
-#足球: Isaac-Move-Football-G129-Dex3-Wholebody
-#双桌面拾放: Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody
-#Push-T: Isaac-Push-T-G129-Dex3-Wholebody
-#客厅交互：Isaac-Move-ArtVIP-Livingroom-G129-Dex3-Wholebody
-#客厅抓杯：Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody
-#三级台阶平台：Isaac-Move-Three-Step-Platform-G129-Dex3-Wholebody
-#ready
-#TASK_NAME="${TASK_NAME:-Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody}"
-#TASK_NAME="${TASK_NAME:-Isaac-Move-Football-G129-Dex3-Wholebody}"
-#TASK_NAME="${TASK_NAME:-Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody}"
-#TASK_NAME="${TASK_NAME:-Isaac-Move-Three-Step-Platform-G129-Dex3-Wholebody}"
-#TASK_NAME="${TASK_NAME:-Isaac-Move-ArtVIP-Livingroom-G129-Dex3-Wholebody}"
-#TASK_NAME="${TASK_NAME:-Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody}"
-#TASK_NAME="${TASK_NAME:-Isaac-Move-Football-G129-Dex3-Wholebody}"
-#TASK_NAME="${TASK_NAME:-Isaac-Move-Football-Single-G129-Dex3-Wholebody}"
+#一般沙袋: tasks/common_env_config/boxing_bag_sonic.yaml
+#吊挂沙袋: tasks/common_env_config/boxing_bag_hanging_sonic.yaml
+#足球: tasks/common_env_config/football_sonic.yaml
+#单足球: tasks/common_env_config/football_single_sonic.yaml
+#双桌面拾放: tasks/common_env_config/doubledesk_sonic.yaml
+#Push-T: tasks/common_env_config/push_t_sonic.yaml
+#客厅抓杯：tasks/common_env_config/livingroom_grapcup_sonic.yaml
+#三级台阶平台：tasks/common_env_config/three_step_platform_sonic.yaml
+#开门：tasks/common_env_config/opendoor_sonic.yaml
+#小推车：tasks/common_env_config/pickplace_small_trolley_sonic.yaml

@@ -1,5 +1,7 @@
 name: livingroom_grapcup_twist2
 description: TWIST2 env config for Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody.
+task_name: Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody
+backend: twist2
 
 overrides:
   sim:

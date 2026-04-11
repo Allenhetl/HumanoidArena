@@ -14,6 +14,17 @@ import numpy as np
 import torch
 
 
+def _feature_shape_dim(feature) -> tuple[int, ...] | None:
+    if feature is None:
+        return None
+    shape = getattr(feature, "shape", None)
+    if shape is None and isinstance(feature, dict):
+        shape = feature.get("shape")
+    if shape is None:
+        return None
+    return tuple(int(v) for v in shape)
+
+
 def _load_policy(policy_dir: Path, device_name: str):
     lerobot_src = Path(__file__).resolve().parents[1] / "src"
     if not lerobot_src.is_dir():
@@ -55,6 +66,8 @@ class LeRobotServerState:
         self.config, self.policy, self.preprocessor, self.postprocessor, self.predict_action = _load_policy(
             policy_dir, device_name
         )
+        self.expected_state_shape = _feature_shape_dim(self.config.input_features.get("observation.state"))
+        self.expected_action_shape = _feature_shape_dim(self.config.output_features.get("action"))
         self.device = torch.device(device_name)
         self.lock = threading.Lock()
         self.reset()
@@ -114,8 +127,10 @@ def make_handler(state: LeRobotServerState):
                 payload = self._read_json()
                 image = _decode_image(payload["observation"]["images"]["front"])
                 observation_state = np.asarray(payload["observation"]["state"], dtype=np.float32).copy()
-                if observation_state.shape != (92,):
-                    raise ValueError(f"Expected observation.state shape (92,), got {observation_state.shape}")
+                if state.expected_state_shape is not None and observation_state.shape != state.expected_state_shape:
+                    raise ValueError(
+                        f"Expected observation.state shape {state.expected_state_shape}, got {observation_state.shape}"
+                    )
                 robot_type = payload.get("robot_type", "g129")
                 observation = {
                     "observation.images.front": image,
@@ -125,6 +140,10 @@ def make_handler(state: LeRobotServerState):
                 if not isinstance(action, torch.Tensor):
                     action = torch.as_tensor(action)
                 action = action.detach().cpu().to(torch.float32).reshape(-1)
+                if state.expected_action_shape is not None and action.shape != state.expected_action_shape:
+                    raise ValueError(
+                        f"Expected action shape {state.expected_action_shape}, got {tuple(action.shape)}"
+                    )
                 print(f"[lerobot_vla_server] action={action.tolist()}")
                 self._send_json(200, {"action": action.tolist()})
             except Exception as exc:

@@ -14,6 +14,7 @@ if [[ -d "${GMR_ROOT}/general_motion_retargeting" ]]; then
   export PYTHONPATH="${GMR_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 fi
 
+# --target_backend sonic_joint29 \ # twist2 / sonic_joint29
 cd "${SCRIPT_DIR}"
 python pico_server/twist2_teleop_server.py \
   --robot unitree_g1 \

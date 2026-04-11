@@ -52,7 +52,7 @@ parser.add_argument(
     "--gmt_backend",
     type=str,
     default="",
-    choices=["", "twist2", "sonic"],
+    choices=["", "twist2", "sonic", "sonic_joint29"],
     help="Optional GMT backend alias",
 )
 parser.add_argument(
@@ -239,10 +239,12 @@ def _normalize_control_routing(args_cli):
         route_map = {
             ("pico_twist2", "twist2"): "twist2_wholebody",
             ("pico_sonic", "sonic"): "sonic_wholebody",
+            ("pico_twist2", "sonic_joint29"): "sonic_wholebody",
             ("vla", "twist2"): "twist2_wholebody",
             ("vla", "sonic"): "sonic_wholebody",
             ("replay", "twist2"): "twist2_wholebody",
             ("replay", "sonic"): "sonic_wholebody",
+            ("replay", "sonic_joint29"): "sonic_wholebody",
         }
         mapped = route_map.get((args_cli.input_source, args_cli.gmt_backend))
         if mapped is None:
@@ -264,6 +266,8 @@ def _normalize_control_routing(args_cli):
         if args_cli.gmt_backend == "twist2":
             args_cli.action_source = "twist2_wholebody"
         elif args_cli.gmt_backend == "sonic":
+            args_cli.action_source = "sonic_wholebody"
+        elif args_cli.gmt_backend == "sonic_joint29":
             args_cli.action_source = "sonic_wholebody"
 
 
@@ -296,6 +300,8 @@ def _resolve_input_guard_backend(args_cli):
         return "twist2"
     if getattr(args_cli, "gmt_backend", "") == "sonic" or getattr(args_cli, "action_source", "") == "sonic_wholebody":
         return "sonic"
+    if getattr(args_cli, "gmt_backend", "") == "sonic_joint29":
+        return "sonic_joint29"
     return None
 
 
@@ -554,10 +560,13 @@ def main():
         print(f"Input source: {args_cli.input_source or 'legacy'}")
         print(f"GMT backend: {args_cli.gmt_backend or 'legacy'}")
     if args_cli.input_source == "vla":
-        if args_cli.gmt_backend and args_cli.gmt_backend not in {"twist2", "sonic"}:
-            raise ValueError("input_source=vla currently only supports --gmt_backend twist2 or sonic")
+        if args_cli.gmt_backend and args_cli.gmt_backend not in {"twist2", "sonic", "sonic_joint29"}:
+            raise ValueError("input_source=vla currently only supports --gmt_backend twist2, sonic, or sonic_joint29")
         if not args_cli.lerobot_server_url and not args_cli.lerobot_policy_path:
             raise ValueError("--lerobot_server_url or --lerobot_policy_path is required when using input_source=vla")
+        if float(args_cli.human_height) <= 0.0:
+            raise ValueError("--human_height must be positive when using input_source=vla")
+        print("VLA runtime schema: observation.state=64D, action=40D canonical robot output")
     if args_cli.action_source == "openpi":
         if not args_cli.openpi_checkpoint:
             raise ValueError("--openpi_checkpoint is required when using action_source=openpi")

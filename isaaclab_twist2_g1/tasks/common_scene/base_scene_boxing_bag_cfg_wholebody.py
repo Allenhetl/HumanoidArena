@@ -8,10 +8,9 @@ import os
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
+from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 from isaaclab.utils import configclass
-
-from tasks.common_scene.base_scene_pickplace_cylindercfg_wholebody import TableCylinderSceneCfgWH
 
 project_root = os.environ.get("PROJECT_ROOT")
 
@@ -36,9 +35,9 @@ BAG_HEIGHT_APPROX = 1.2  # 沙袋約 1.2m 高，底部貼地時中心 z = half_h
 
 
 @configclass
-class TableBoxingBagSceneCfgWH(TableCylinderSceneCfgWH):
+class TableBoxingBagSceneCfgWH(InteractiveSceneCfg):
     """Boxing bag scene configuration.
-    Extends TableCylinderSceneCfgWH with punching bag instead of ball/goal.
+    Self-contained boxing bag scene without the removed cylinder base scene.
     """
 
     # Override room
@@ -96,5 +95,13 @@ class TableBoxingBagSceneCfgWH(TableCylinderSceneCfgWH):
                 contact_offset=0.005,
                 rest_offset=0.0,
             ),
+        ),
+    )
+
+    light = AssetBaseCfg(
+        prim_path="/World/light",
+        spawn=sim_utils.DomeLightCfg(
+            color=(0.75, 0.75, 0.75),
+            intensity=3000.0,
         ),
     )

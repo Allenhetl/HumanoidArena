@@ -1,0 +1,10 @@
+name: doubledesk_sonic
+description: SONIC env config for Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody.
+task_name: Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody
+backend: sonic
+
+overrides:
+  sim:
+    dt: 0.005
+  decimation: 4
+  object_reset_seed_source: time

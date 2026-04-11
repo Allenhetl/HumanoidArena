@@ -7,10 +7,10 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 
-def compute_reward_indoor_trolley(env: "ManagerBasedRLEnv") -> torch.Tensor:
+def compute_reward_pickplace_small_trolley(env: "ManagerBasedRLEnv") -> torch.Tensor:
     return torch.zeros(env.num_envs, device=env.device, dtype=torch.float)
 
 
 __all__ = [
-    "compute_reward_indoor_trolley",
+    "compute_reward_pickplace_small_trolley",
 ]

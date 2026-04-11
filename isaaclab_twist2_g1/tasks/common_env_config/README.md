@@ -5,6 +5,8 @@
 最简单写法：
 
 ```yaml
+task_name: Isaac-Move-Football-Single-G129-Dex3-Wholebody
+
 overrides:
   sim:
     dt: 0.005
@@ -14,6 +16,9 @@ overrides:
 也支持按路由或任务附加覆盖：
 
 ```yaml
+task_name: Isaac-Move-Football-Single-G129-Dex3-Wholebody
+backend: sonic
+
 overrides:
   sim:
     dt: 0.005
@@ -31,6 +36,10 @@ tasks:
 合并顺序：
 `overrides` -> `routes.<gmt_backend|action_source>` -> `tasks.<task_name>` -> `route_tasks.<route>.<task>`
 
+脚本约定：
+- `run_sonic.sh` / `run_twist2.sh` 会从 yaml 顶层 `task_name` 自动读取 Isaac task id
+- 因此切换任务时，只需要改 `ENV_CONFIG_YAML`
+
 当前会自动同步的派生字段：
 - `scene.contact_forces.update_period <- sim.dt`
 - `sim.render_interval <- decimation`
@@ -38,7 +47,8 @@ tasks:
 推荐做法：
 - 通用默认继续放在 `twist2_default.yaml` / `sonic_default.yaml`
 - 具体任务单独建文件，例如 `football_single_twist2.yaml` / `football_single_sonic.yaml` / `football_single_vla.yaml`
-- run 脚本直接指向对应任务 YAML，避免把 task 特例塞进 default
+- 每个任务 yaml 顶层都带上 `task_name`
+- run 脚本直接指向对应任务 YAML，避免再单独维护 `TASK_NAME`
 
 如果任务里有需要 deterministic reset / recording / replay restore 的环境对象，建议在任务 YAML 中直接配置：
 

@@ -16,10 +16,19 @@ RESET_TRIGGER_KEY = "isaac_reset_trigger"
 RESET_COMPLETE_KEY = "isaac_reset_complete_unitree_g1_with_hands"
 TWIST2_INPUT_READY_KEY = "isaac_input_ready_twist2_unitree_g1_with_hands"
 SONIC_INPUT_READY_KEY = "isaac_input_ready_sonic_unitree_g1_with_hands"
+SONIC_JOINT29_INPUT_READY_KEY = "isaac_input_ready_sonic_joint29_unitree_g1_with_hands"
+
+GMR_FULL_QPOS_KEY = "gmr_full_qpos_unitree_g1_with_hands"
+GMR_JOINT_POS_KEY = "gmr_joint_pos_unitree_g1_with_hands"
+GMR_JOINT_VEL_KEY = "gmr_joint_vel_unitree_g1_with_hands"
+GMR_BODY_POS_KEY = "gmr_body_pos_unitree_g1_with_hands"
+GMR_BODY_QUAT_W_KEY = "gmr_body_quat_w_unitree_g1_with_hands"
+GMR_FRAME_INDEX_KEY = "gmr_frame_index_unitree_g1_with_hands"
 
 _INPUT_READY_KEYS = {
     "twist2": TWIST2_INPUT_READY_KEY,
     "sonic": SONIC_INPUT_READY_KEY,
+    "sonic_joint29": SONIC_JOINT29_INPUT_READY_KEY,
 }
 
 _INPUT_STREAM_KEYS = {
@@ -40,6 +49,23 @@ _INPUT_STREAM_KEYS = {
         "action_hand_right_unitree_g1_with_hands",
         "controller_data",
         "recording_control_unitree_g1_with_hands",
+    ),
+    "sonic_joint29": (
+        "action_body_unitree_g1_with_hands",
+        "action_neck_unitree_g1_with_hands",
+        "human_smplx_data_unitree_g1_with_hands",
+        "human_info_unitree_g1_with_hands",
+        GMR_FULL_QPOS_KEY,
+        GMR_JOINT_POS_KEY,
+        GMR_JOINT_VEL_KEY,
+        GMR_BODY_POS_KEY,
+        GMR_BODY_QUAT_W_KEY,
+        GMR_FRAME_INDEX_KEY,
+        "action_hand_left_unitree_g1_with_hands",
+        "action_hand_right_unitree_g1_with_hands",
+        "controller_data",
+        "recording_control_unitree_g1_with_hands",
+        "t_action",
     ),
 }
 

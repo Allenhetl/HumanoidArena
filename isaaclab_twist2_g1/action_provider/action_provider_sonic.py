@@ -48,7 +48,25 @@ from scipy.spatial.transform import Rotation as R
 from action_provider.action_base import ActionProvider
 from action_provider.lerobot_vla_http_client import LeRobotVLAHttpClient
 from action_provider.recording_common import AsyncEpisodeRecorder
-from action_provider.reset_control import consume_reset_complete, get_input_ready_key, publish_reset_command
+from action_provider.reset_control import (
+    GMR_BODY_POS_KEY,
+    GMR_BODY_QUAT_W_KEY,
+    GMR_FRAME_INDEX_KEY,
+    GMR_FULL_QPOS_KEY,
+    GMR_JOINT_POS_KEY,
+    GMR_JOINT_VEL_KEY,
+    consume_reset_complete,
+    get_input_ready_key,
+    publish_reset_command,
+)
+from action_provider.vla_smpl_runtime import (
+    VLA_SMPL_ACTION_DIM,
+    VLA_SMPL_STATE_DIM,
+    CanonicalPoseActionRecorder,
+    UnifiedSMPLActionRuntime,
+    build_sonic_joint29_payload,
+    build_vla_observation_state,
+)
 from common_env_objects import (
     add_env_object_frame_arrays,
     add_episode_init_env_object_fields,
@@ -90,9 +108,8 @@ except ImportError:
 _HEADER_SIZE = 1280
 project_root = os.environ.get("PROJECT_ROOT")
 
-SONIC_VLA_BODY_DIM = 84
-SONIC_VLA_ACTION_DIM = 86
-SONIC_VLA_STATE_DIM = 95
+SONIC_VLA_ACTION_DIM = VLA_SMPL_ACTION_DIM
+SONIC_VLA_STATE_DIM = VLA_SMPL_STATE_DIM
 SONIC_HAND_POSE_ROBOT_NAME = "unitree_g1_with_hands"
 
 
@@ -219,6 +236,25 @@ def quat_heading_wxyz(quat: np.ndarray) -> np.ndarray:
 def quat_heading_inv_wxyz(quat: np.ndarray) -> np.ndarray:
     """Inverse of yaw-only quaternion in wxyz format."""
     return quat_conjugate_wxyz(quat_heading_wxyz(quat))
+
+
+def compute_anchor_rot6d_wxyz(
+    base_quat_wxyz: np.ndarray,
+    ref_quat_wxyz: np.ndarray,
+    heading_align_quat_wxyz: np.ndarray,
+    use_heading_align: bool,
+) -> np.ndarray:
+    """Match SONIC deploy: compute base-relative anchor from current base and ref root quats."""
+    base_quat_wxyz = quat_normalize_wxyz(base_quat_wxyz)
+    ref_quat_wxyz = quat_normalize_wxyz(ref_quat_wxyz)
+    aligned_ref_quat_wxyz = ref_quat_wxyz.copy()
+    if use_heading_align:
+        aligned_ref_quat_wxyz = quat_mul_wxyz(heading_align_quat_wxyz, ref_quat_wxyz)
+    rel_quat_wxyz = quat_mul_wxyz(
+        quat_conjugate_wxyz(base_quat_wxyz),
+        aligned_ref_quat_wxyz,
+    )
+    return quat_to_rotation_6d(rel_quat_wxyz.reshape(1, 4))[0].astype(np.float32)
 
 
 def gravity_dir_from_base_quat_wxyz(quat: np.ndarray) -> np.ndarray:
@@ -849,6 +885,14 @@ SMPL_MODE_ACTIVE_BLOCKS = [
     "smpl_anchor_orientation_10frame_step1",
     "motion_joint_positions_wrists_10frame_step1",
 ]
+JOINT29_MODE_ACTIVE_BLOCKS = [
+    "encoder_mode_4",
+    "motion_joint_positions_10frame_step5",
+    "motion_joint_velocities_10frame_step5",
+    "motion_anchor_orientation",
+    "motion_anchor_orientation_10frame_step5",
+    "motion_joint_positions_wrists_10frame_step1",
+]
 SMPL_MODE_ZEROED_BLOCKS = [
     "motion_joint_positions_10frame_step5",
     "motion_joint_velocities_10frame_step5",
@@ -894,6 +938,14 @@ def build_future_window(window: np.ndarray, num_frames: int) -> np.ndarray:
         return arr[:num_frames].astype(np.float32)
     pad = np.repeat(arr[-1:], num_frames - arr.shape[0], axis=0)
     return np.concatenate([arr, pad], axis=0).astype(np.float32)
+
+
+def build_latest_hold_window(frame: np.ndarray, num_frames: int) -> np.ndarray:
+    """Build a low-latency current->future window by repeating the latest frame."""
+    arr = np.asarray(frame, dtype=np.float32)
+    if arr.ndim == 0:
+        raise ValueError("build_latest_hold_window expects at least 1D input")
+    return np.repeat(arr[np.newaxis, ...], num_frames, axis=0).astype(np.float32)
 
 
 def sorted_insert_unique(sorted_list: list[int], value: int) -> None:
@@ -985,7 +1037,7 @@ def _organize_sonic_episode(data_buffer: list[dict[str, Any]], timestamp_us: int
         return np.stack(values).astype(dtype) if dtype is not None else np.stack(values)
 
     organized: dict[str, Any] = {
-        "schema_version": np.array("sonic_episode_v1"),
+        "schema_version": np.array("sonic_episode_v2"),
         "task": np.array(meta["task"]),
         "episode_id": np.array(meta["episode_id"], dtype=np.int64),
         "save_timestamp_us": np.array(timestamp_us, dtype=np.int64),
@@ -1098,6 +1150,16 @@ def _organize_sonic_episode(data_buffer: list[dict[str, Any]], timestamp_us: int
         "hand_action_right": _stack(("action", "hand_action_right"), np.float32),
         "vla_action_body_token": _stack(("vla", "action_body_token"), np.float32),
         "vla_action_hand_binary": _stack(("vla", "action_hand_binary"), np.float32),
+        "vla_state": _stack(("vla", "canonical_state"), np.float32),
+        "vla_state_root_rot6d": _stack(("vla", "canonical_state"), np.float32)[:, :6],
+        "vla_state_dof_pos_29": _stack(("vla", "canonical_state"), np.float32)[:, 6:35],
+        "vla_state_dof_vel_29": _stack(("vla", "canonical_state"), np.float32)[:, 35:64],
+        "vla_action": _stack(("vla", "canonical_action"), np.float32),
+        "vla_action_root_xy_delta": _stack(("vla", "canonical_action"), np.float32)[:, :2],
+        "vla_action_root_z": _stack(("vla", "canonical_action"), np.float32)[:, 2:3],
+        "vla_action_root_rot6d": _stack(("vla", "canonical_action"), np.float32)[:, 3:9],
+        "vla_action_joint_pos_29": _stack(("vla", "canonical_action"), np.float32)[:, 9:38],
+        "vla_action_hand_binary_2": _stack(("vla", "canonical_action"), np.float32)[:, 38:40],
         "human_raw_smplx_json": np.array(
             _json_string([frame["human_raw"]["smplx_frame"] for frame in data_buffer])
         ),
@@ -1178,7 +1240,9 @@ class SonicActionProvider(ActionProvider):
         self._replay_loop   = bool(getattr(args_cli, "replay_loop", False))
         self._replay_enabled = bool(self._replay_file)
         self._input_source = getattr(args_cli, "input_source", "") or ""
+        self._gmt_backend = getattr(args_cli, "gmt_backend", "") or ""
         self._use_lerobot_vla = self._input_source == "vla"
+        self._sonic_joint29_mode = self._gmt_backend == "sonic_joint29" or self._use_lerobot_vla
         self._lerobot_server_url = getattr(args_cli, "lerobot_server_url", "") or ""
         self._lerobot_server_timeout = float(getattr(args_cli, "lerobot_server_timeout", 5.0))
         self._lerobot_server_verify_ssl = bool(getattr(args_cli, "lerobot_server_verify_ssl", False))
@@ -1188,7 +1252,10 @@ class SonicActionProvider(ActionProvider):
         self._lerobot_predict_action = None
         self._lerobot_device = None
         self._lerobot_http_client = None
+        self._lerobot_vla_runtime = UnifiedSMPLActionRuntime()
         self._lerobot_hand_binary_threshold = float(getattr(args_cli, "lerobot_gripper_threshold", 0.5))
+        self._canonical_pose_recorder = CanonicalPoseActionRecorder()
+        self._latest_vla_action = None
         if self._replay_enabled:
             self._pose_source = "replay"
         if self._use_lerobot_vla and self._replay_enabled:
@@ -1235,7 +1302,7 @@ class SonicActionProvider(ActionProvider):
         self._save_completion_state = None
         self._waiting_for_reset_complete = False
         self._reset_complete_received = False
-        self._input_ready_key = get_input_ready_key("sonic")
+        self._input_ready_key = get_input_ready_key("sonic_joint29" if self._sonic_joint29_mode else "sonic")
         self._input_ready_epoch_id = -1
         self._input_ready_timestamp_realtime = 0.0
         self._input_ready_timestamp_monotonic = 0.0
@@ -1284,6 +1351,7 @@ class SonicActionProvider(ActionProvider):
 
         print(f"[SonicActionProvider] POSE mode ready  "
               f"pose_source={self._pose_source}  "
+              f"gmt_backend={self._gmt_backend or 'sonic'}  "
               f"(zmq={self.zmq_host}:{self.zmq_port}  redis={self.redis_host}:{self.redis_port})  "
               f"encoder={self.encoder_path}  decoder={self.decoder_path}")
         if self._replay_enabled:
@@ -1422,8 +1490,11 @@ class SonicActionProvider(ActionProvider):
             )
             self._redis_client.ping()
             self._redis_control_client.ping()
+            redis_key = (
+                GMR_JOINT_POS_KEY if self._sonic_joint29_mode else "human_smplx_data_unitree_g1_with_hands"
+            )
             print(f"[SonicActionProvider] Redis connected "
-                  f"{self.redis_host}:{self.redis_port} key=human_smplx_data_unitree_g1_with_hands")
+                  f"{self.redis_host}:{self.redis_port} key={redis_key}")
         except Exception as e:
             print(f"[SonicActionProvider] Redis init failed: {e}")
 
@@ -1444,11 +1515,45 @@ class SonicActionProvider(ActionProvider):
             self._replay_body_targets = _load_array(
                 replay_data,
                 "final_body_action_29dof",
+                "vla_action_joint_pos_29",
                 "decoder_target_action",
-                required=self._replay_mode == "direct_replay",
             )
+            if self._replay_body_targets is None and "vla_action" in replay_data:
+                vla_action = np.asarray(replay_data["vla_action"], dtype=np.float32)
+                if vla_action.ndim == 2 and vla_action.shape[-1] == VLA_SMPL_ACTION_DIM:
+                    self._replay_body_targets = vla_action[:, 9:38].astype(np.float32)
+            if self._replay_mode == "direct_replay" and self._replay_body_targets is None:
+                raise KeyError(
+                    "[SonicActionProvider] replay npz missing keys: "
+                    "('final_body_action_29dof', 'vla_action_joint_pos_29', 'decoder_target_action', 'vla_action')"
+                )
             self._replay_hand_left = _load_array(replay_data, "hand_action_left", "human_left_hand")
             self._replay_hand_right = _load_array(replay_data, "hand_action_right", "human_right_hand")
+            if (
+                self._replay_hand_left is None
+                and self._replay_hand_right is None
+                and (
+                    "vla_action_hand_binary_2" in replay_data
+                    or "vla_action_hand_binary" in replay_data
+                    or "vla_action" in replay_data
+                )
+            ):
+                hand_binary = _load_array(replay_data, "vla_action_hand_binary_2", "vla_action_hand_binary")
+                if hand_binary is None and "vla_action" in replay_data:
+                    vla_action = np.asarray(replay_data["vla_action"], dtype=np.float32)
+                    if vla_action.ndim == 2 and vla_action.shape[-1] == VLA_SMPL_ACTION_DIM:
+                        hand_binary = vla_action[:, 38:40]
+                if hand_binary is not None and hand_binary.ndim == 2 and hand_binary.shape[-1] == 2:
+                    left_open = np.asarray(DEFAULT_HAND_POSE[SONIC_HAND_POSE_ROBOT_NAME]["left"]["open"], dtype=np.float32)
+                    left_close = np.asarray(DEFAULT_HAND_POSE[SONIC_HAND_POSE_ROBOT_NAME]["left"]["close"], dtype=np.float32)
+                    right_open = np.asarray(DEFAULT_HAND_POSE[SONIC_HAND_POSE_ROBOT_NAME]["right"]["open"], dtype=np.float32)
+                    right_close = np.asarray(DEFAULT_HAND_POSE[SONIC_HAND_POSE_ROBOT_NAME]["right"]["close"], dtype=np.float32)
+                    self._replay_hand_left = np.stack(
+                        [left_close if row[0] >= 0.5 else left_open for row in hand_binary], axis=0
+                    ).astype(np.float32)
+                    self._replay_hand_right = np.stack(
+                        [right_close if row[1] >= 0.5 else right_open for row in hand_binary], axis=0
+                    ).astype(np.float32)
             self._replay_smpl_joints = _load_array(replay_data, "human_smpl_joints")
             self._replay_smpl_pose = _load_array(replay_data, "human_smpl_pose")
             self._replay_body_quat_w = _load_array(replay_data, "human_body_quat_w")
@@ -1699,28 +1804,11 @@ class SonicActionProvider(ActionProvider):
         joint_pos = robot.joint_pos[0, self._sonic_idx].cpu().numpy().astype(np.float32)
         joint_vel = robot.joint_vel[0, self._sonic_idx].cpu().numpy().astype(np.float32)
         base_quat_wxyz = robot.root_state_w[0, 3:7].cpu().numpy().astype(np.float32)
-        ang_vel = robot.root_ang_vel_b[0].cpu().numpy().astype(np.float32)
-        gravity_dir = gravity_dir_from_base_quat_wxyz(base_quat_wxyz)
-        joint_pos_delta = joint_pos - self._sonic_default_np
-        last_body_raw_action = self._last_action_hist[-1].astype(np.float32, copy=True)
-        hand_binary = np.array(
-            [
-                float(self._left_hand_binary_state),
-                float(self._right_hand_binary_state),
-            ],
-            dtype=np.float32,
+        state = build_vla_observation_state(
+            root_orientation_wxyz=base_quat_wxyz,
+            joint_pos_canonical_29=joint_pos,
+            joint_vel_canonical_29=joint_vel,
         )
-        state = np.concatenate(
-            [
-                ang_vel,
-                gravity_dir,
-                joint_pos_delta,
-                joint_vel,
-                last_body_raw_action,
-                hand_binary,
-            ],
-            axis=0,
-        ).astype(np.float32)
         if state.shape != (SONIC_VLA_STATE_DIM,):
             raise RuntimeError(
                 f"[SonicActionProvider] expected VLA observation.state shape {(SONIC_VLA_STATE_DIM,)}, got {state.shape}"
@@ -1757,48 +1845,41 @@ class SonicActionProvider(ActionProvider):
         if isinstance(action, torch.Tensor):
             action = action.detach().cpu().numpy()
         action = np.asarray(action, dtype=np.float32).reshape(-1)
-        if action.shape == (SONIC_VLA_BODY_DIM,):
-            action = np.concatenate([action, np.zeros(2, dtype=np.float32)], axis=0)
         if action.shape != (SONIC_VLA_ACTION_DIM,):
             raise ValueError(
-                f"[SonicActionProvider] Expected LeRobot action dim {SONIC_VLA_BODY_DIM} or "
-                f"{SONIC_VLA_ACTION_DIM}, got {action.shape}"
+                f"[SonicActionProvider] Expected canonical VLA action dim {SONIC_VLA_ACTION_DIM}, got {action.shape}"
             )
         return action
 
     def _apply_lerobot_semantic_action(self, action: np.ndarray) -> None:
         action = np.asarray(action, dtype=np.float32).reshape(-1)
-        body = action[:SONIC_VLA_BODY_DIM]
-        hand = action[SONIC_VLA_BODY_DIM:]
+        self._latest_vla_action = action.copy()
+        runtime_frame = self._lerobot_vla_runtime.step(action)
+        control_dt = float(self.env.physics_dt * self._decimation)
+        payload = build_sonic_joint29_payload(
+            runtime_frame=runtime_frame,
+            control_dt=control_dt,
+        )
+        data = {
+            "body_quat_w": payload["body_quat_w"][np.newaxis, :],
+            "adjusted_transl": payload["body_pos"][np.newaxis, :],
+            "joint_pos": payload["joint_pos"][np.newaxis, :],
+            "joint_vel": payload["joint_vel"][np.newaxis, :],
+            "frame_index": np.array([self._latest_frame_index + 1], dtype=np.int64),
+            "timestamp_realtime": np.array([time.time()], dtype=np.float64),
+            "timestamp_monotonic": np.array([time.monotonic()], dtype=np.float64),
+        }
+        self._latest_human_smplx_frame = None
+        self._latest_pose_payload = {
+            "joint_pos": payload["joint_pos"].copy(),
+            "joint_vel": payload["joint_vel"].copy(),
+            "body_pos": payload["body_pos"].copy(),
+            "body_quat_w": payload["body_quat_w"].copy(),
+        }
+        self._apply_pose_data(data, "lerobot_vla_joint29")
 
-        smpl_joints = body[:72].reshape(_N_SMPL_JOINTS, 3)
-        anchor_rot6d = body[72:78]
-        wrist_ref = body[78:84]
-
-        if self._vla_semantic_history_fill == 0:
-            self._smpl_joints_buf[:] = smpl_joints
-            self._body_rot6d_buf[:] = anchor_rot6d
-            self._motion_joint_pos_hist[:] = self._sonic_default_np
-            self._motion_joint_pos_hist[:, OFFICIAL_WRIST_INDICES] = wrist_ref
-            self._motion_anchor_rot6d_hist[:] = anchor_rot6d
-        else:
-            self._smpl_joints_buf = np.roll(self._smpl_joints_buf, -1, axis=0)
-            self._smpl_joints_buf[-1] = smpl_joints
-            self._body_rot6d_buf = np.roll(self._body_rot6d_buf, -1, axis=0)
-            self._body_rot6d_buf[-1] = anchor_rot6d
-            self._motion_joint_pos_hist = np.roll(self._motion_joint_pos_hist, -1, axis=0)
-            self._motion_joint_pos_hist[-1] = self._motion_joint_pos_hist[-2]
-            self._motion_joint_pos_hist[-1, OFFICIAL_WRIST_INDICES] = wrist_ref
-            self._motion_anchor_rot6d_hist = np.roll(self._motion_anchor_rot6d_hist, -1, axis=0)
-            self._motion_anchor_rot6d_hist[-1] = anchor_rot6d
-
-        self._smpl_data_valid = True
-        self._smpl_history_fill = min(_STEP1_FRAMES, self._smpl_history_fill + 1)
-        self._vla_semantic_history_fill = min(_STEP1_FRAMES, self._vla_semantic_history_fill + 1)
-        self._ref_window_valid = False
-
-        left_closed = bool(hand[0] >= self._lerobot_hand_binary_threshold)
-        right_closed = bool(hand[1] >= self._lerobot_hand_binary_threshold)
+        left_closed = bool(runtime_frame.hand_binary[0] >= self._lerobot_hand_binary_threshold)
+        right_closed = bool(runtime_frame.hand_binary[1] >= self._lerobot_hand_binary_threshold)
         self._apply_hand_binary_targets(left_closed=left_closed, right_closed=right_closed)
 
     def _run_gear_sonic_from_vla(self) -> np.ndarray:
@@ -2324,7 +2405,10 @@ class SonicActionProvider(ActionProvider):
         self._left_hand_binary_state = False
         self._right_hand_binary_state = False
         self._vla_semantic_history_fill = 0
+        self._latest_vla_action = None
+        self._canonical_pose_recorder.reset()
         if self._use_lerobot_vla:
+            self._lerobot_vla_runtime.reset()
             self._apply_hand_binary_targets(left_closed=False, right_closed=False)
             if self._lerobot_http_client is not None:
                 self._lerobot_http_client.reset()
@@ -2342,6 +2426,7 @@ class SonicActionProvider(ActionProvider):
             self._replay_object_err_counts = {}
         self._latest_controller_data = None
         self._latest_recording_control = None
+        self._latest_pose_payload = {}
         self._latest_timestamp_realtime = 0.0
         self._latest_timestamp_monotonic = 0.0
         # print(f"[SONIC] on_env_reset: frame_count reset, warmup={self._sonic_warmup_steps}")  # warmup 已注释
@@ -2548,6 +2633,11 @@ class SonicActionProvider(ActionProvider):
         joint_pos = robot.joint_pos[0, self._sonic_idx].cpu().numpy().astype(np.float32)
         joint_vel = robot.joint_vel[0, self._sonic_idx].cpu().numpy().astype(np.float32)
         controller_binary = _extract_controller_binary_signals(self._latest_controller_data)
+        canonical_state = build_vla_observation_state(
+            root_orientation_wxyz=root_state[0, 3:7].cpu().numpy().astype(np.float32),
+            joint_pos_canonical_29=joint_pos,
+            joint_vel_canonical_29=joint_vel,
+        )
         vla_action_body = np.concatenate(
             [
                 self._latest_smpl_joint_window[-1].reshape(-1).astype(np.float32, copy=True),
@@ -2563,6 +2653,31 @@ class SonicActionProvider(ActionProvider):
             ],
             dtype=np.float32,
         )
+        if self._use_lerobot_vla and self._latest_vla_action is not None:
+            canonical_action = np.asarray(self._latest_vla_action, dtype=np.float32).copy()
+        else:
+            pose_payload = self._latest_pose_payload if isinstance(self._latest_pose_payload, dict) else {}
+            body_pos = pose_payload.get("body_pos")
+            body_quat_w = pose_payload.get("body_quat_w")
+            joint_pos_ref = pose_payload.get("joint_pos", sonic_targets)
+            if body_pos is not None and body_quat_w is not None:
+                canonical_action = self._canonical_pose_recorder.step(
+                    body_pos_world=np.asarray(body_pos, dtype=np.float32),
+                    body_quat_wxyz=np.asarray(body_quat_w, dtype=np.float32),
+                    joint_pos_canonical_29=np.asarray(joint_pos_ref, dtype=np.float32),
+                    hand_binary=vla_action_hand_binary,
+                )
+            else:
+                canonical_action = np.concatenate(
+                    [
+                        np.zeros((2,), dtype=np.float32),
+                        root_state[0, 2:3].cpu().numpy().astype(np.float32),
+                        quat_to_rotation_6d(root_state[0, 3:7].cpu().numpy().astype(np.float32).reshape(1, 4))[0],
+                        sonic_targets.astype(np.float32).copy(),
+                        vla_action_hand_binary,
+                    ],
+                    axis=0,
+                ).astype(np.float32)
         return {
             "meta": {
                 "task": self.task_name,
@@ -2653,6 +2768,8 @@ class SonicActionProvider(ActionProvider):
             "vla": {
                 "action_body_token": vla_action_body,
                 "action_hand_binary": vla_action_hand_binary,
+                "canonical_state": canonical_state,
+                "canonical_action": canonical_action,
             },
             "env": {
                 **self._collect_env_state(),
@@ -2689,12 +2806,19 @@ class SonicActionProvider(ActionProvider):
             return None
         return int(self._stream_window_start + self._stream_frame_step * self._stream_current_frame)
 
+    def _get_stream_required_future_span(self) -> int:
+        """Return the global-frame future span required by the active encoder mode."""
+        if self._sonic_joint29_mode:
+            return (_STEP5_FRAMES - 1) * _STEP5_STRIDE * self._stream_frame_step
+        return (_STEP1_FRAMES - 1) * self._stream_frame_step
+
     def _merge_stream_reference_data(
         self,
         frame_indices: np.ndarray,
         smpl_joints: np.ndarray | None,
         body_quat_w: np.ndarray | None,
         joint_pos: np.ndarray | None,
+        joint_vel: np.ndarray | None,
     ) -> None:
         """Merge incoming streamed frames into a sorted reference timeline."""
         frame_indices = np.asarray(frame_indices).reshape(-1)
@@ -2712,6 +2836,13 @@ class SonicActionProvider(ActionProvider):
             positive_diffs = diffs[diffs > 0]
             if positive_diffs.size > 0:
                 self._stream_frame_step = max(1, int(np.min(positive_diffs)))
+        elif had_existing_window:
+            observed_step = incoming_frame_start - old_window_end
+            if observed_step > 0:
+                if self._stream_frame_step <= 1:
+                    self._stream_frame_step = max(1, int(observed_step))
+                else:
+                    self._stream_frame_step = max(1, min(self._stream_frame_step, int(observed_step)))
 
         for i, frame_idx_raw in enumerate(frame_indices):
             frame_idx = int(frame_idx_raw)
@@ -2722,6 +2853,8 @@ class SonicActionProvider(ActionProvider):
                 entry["body_quat_w"] = np.asarray(body_quat_w[i], dtype=np.float32).copy()
             if joint_pos is not None and i < joint_pos.shape[0]:
                 entry["joint_pos"] = np.asarray(joint_pos[i], dtype=np.float32).copy()
+            if joint_vel is not None and i < joint_vel.shape[0]:
+                entry["joint_vel"] = np.asarray(joint_vel[i], dtype=np.float32).copy()
             self._stream_ref_frames[frame_idx] = entry
             sorted_insert_unique(self._stream_ref_indices, frame_idx)
 
@@ -2770,7 +2903,7 @@ class SonicActionProvider(ActionProvider):
                     adjusted_frame = 0
                 self._stream_current_frame = adjusted_frame
 
-        max_cursor_global = newest - (_STEP1_FRAMES - 1) * frame_step
+        max_cursor_global = newest - self._get_stream_required_future_span()
         if max_cursor_global < oldest:
             self._stream_window_start = oldest
             self._stream_current_frame = 0
@@ -2787,7 +2920,10 @@ class SonicActionProvider(ActionProvider):
         """Whether streamed reference timeline has the fields needed by POSE encoder."""
         if self._stream_playback_frame_idx is None or not self._stream_ref_indices:
             return False
-        required = ("smpl_joints", "body_quat_w", "joint_pos")
+        if self._sonic_joint29_mode:
+            required = ("body_quat_w", "joint_pos", "joint_vel")
+        else:
+            required = ("smpl_joints", "body_quat_w", "joint_pos")
         for frame_idx in self._stream_ref_indices:
             entry = self._stream_ref_frames.get(frame_idx, {})
             if all(key in entry for key in required):
@@ -2833,6 +2969,27 @@ class SonicActionProvider(ActionProvider):
 
         return smpl_window, quat_window, joint_window
 
+    def _gather_stream_joint29_window(self, num_frames: int, step_size: int = 1):
+        """Gather current->future joint29 reference window from the merged timeline."""
+        if not self._stream_window_is_available():
+            return None, None, None
+
+        current_frame_idx = self._get_stream_global_playback_frame()
+        assert current_frame_idx is not None
+        joint_pos_window = np.zeros((num_frames, 29), dtype=np.float32)
+        joint_vel_window = np.zeros((num_frames, 29), dtype=np.float32)
+        quat_window = np.zeros((num_frames, 4), dtype=np.float32)
+
+        for i in range(num_frames):
+            desired_frame_idx = current_frame_idx + i * step_size * self._stream_frame_step
+            resolved_frame_idx = self._resolve_stream_frame_idx(desired_frame_idx)
+            entry = self._stream_ref_frames[resolved_frame_idx]
+            joint_pos_window[i] = entry["joint_pos"]
+            joint_vel_window[i] = entry["joint_vel"]
+            quat_window[i] = entry["body_quat_w"]
+
+        return joint_pos_window, joint_vel_window, quat_window
+
     def _advance_stream_playback_cursor(self):
         """Advance streamed-motion playback cursor by one control tick when future context exists."""
         if self._stream_playback_frame_idx is None or not self._stream_ref_indices:
@@ -2840,7 +2997,7 @@ class SonicActionProvider(ActionProvider):
 
         oldest = self._stream_ref_indices[0]
         newest = self._stream_ref_indices[-1]
-        max_cursor = newest - (_STEP1_FRAMES - 1) * self._stream_frame_step
+        max_cursor = newest - self._get_stream_required_future_span()
 
         if max_cursor < oldest:
             self._stream_window_start = oldest
@@ -2938,6 +3095,9 @@ class SonicActionProvider(ActionProvider):
 
     def _fetch_redis_pose(self):
         """从 Redis 读取遥操 pose（human_smplx_data_unitree_g1_with_hands），转成与 ZMQ 同格式后更新缓冲。"""
+        if self._sonic_joint29_mode:
+            self._fetch_redis_joint29_pose()
+            return
         if self._redis_client is None:
             return
         try:
@@ -3164,6 +3324,7 @@ class SonicActionProvider(ActionProvider):
         raw_smpl_joints_window = None
         raw_body_quat_window = None
         raw_joint_pos_window = None
+        raw_joint_vel_window = None
         root_z_value = None
         root_z_source = None
         latest_smpl_joints_frame = None
@@ -3275,7 +3436,14 @@ class SonicActionProvider(ActionProvider):
             self._body_rot6d_buf[-1] = rot6d_latest
             self._motion_anchor_rot6d_hist = np.roll(self._motion_anchor_rot6d_hist, -1, axis=0)
             self._motion_anchor_rot6d_hist[-1] = rot6d_latest
-            if bq.ndim > 1 and bq.shape[0] > 0:
+            if self._sonic_joint29_mode:
+                if self._smpl_history_fill == 0 and not self._ref_window_valid:
+                    self._ref_body_quat_window[:] = ref_quat_wxyz
+                else:
+                    self._ref_body_quat_window = np.roll(self._ref_body_quat_window, -1, axis=0)
+                    self._ref_body_quat_window[-1] = ref_quat_wxyz
+                self._ref_window_valid = True
+            elif bq.ndim > 1 and bq.shape[0] > 0:
                 self._ref_body_quat_window[:] = build_future_window(bq, _STEP1_FRAMES)
                 self._ref_window_valid = True
 
@@ -3335,6 +3503,7 @@ class SonicActionProvider(ActionProvider):
                 )
         if "joint_vel" in data:
             jv = data["joint_vel"].astype(np.float32)
+            raw_joint_vel_window = jv if jv.ndim > 1 else jv[np.newaxis, ...]
             self._robot_joint_vel = jv[-1] if jv.ndim > 1 else jv
             latest_joint_vel_frame = self._robot_joint_vel.copy()
             self._motion_joint_vel_hist = np.roll(self._motion_joint_vel_hist, -1, axis=0)
@@ -3344,6 +3513,27 @@ class SonicActionProvider(ActionProvider):
                     f"[{tag}][REF_JOINT_VEL] "
                     f"range={array_range_str(self._robot_joint_vel)}"
                 )
+
+        if (
+            latest_joint_pos_frame is not None
+            or latest_joint_vel_frame is not None
+            or "body_quat_w" in data
+            or "adjusted_transl" in data
+        ):
+            payload = dict(self._latest_pose_payload) if isinstance(self._latest_pose_payload, dict) else {}
+            if latest_joint_pos_frame is not None:
+                payload["joint_pos"] = latest_joint_pos_frame.astype(np.float32, copy=True)
+            if latest_joint_vel_frame is not None:
+                payload["joint_vel"] = latest_joint_vel_frame.astype(np.float32, copy=True)
+            if "body_quat_w" in data:
+                payload["body_quat_w"] = ref_quat_wxyz.astype(np.float32, copy=True)
+            if "adjusted_transl" in data and latest_transl.shape[0] >= 3:
+                payload["body_pos"] = latest_transl[:3].astype(np.float32, copy=True)
+            elif root_z_value is not None:
+                body_pos = np.asarray(payload.get("body_pos", np.zeros((3,), dtype=np.float32)), dtype=np.float32).reshape(3)
+                body_pos[2] = float(root_z_value)
+                payload["body_pos"] = body_pos
+            self._latest_pose_payload = payload
 
         # 手部关节
         if "left_hand_joints" in data:
@@ -3375,15 +3565,19 @@ class SonicActionProvider(ActionProvider):
 
         if (
             raw_frame_indices is not None
-            and raw_smpl_joints_window is not None
             and raw_body_quat_window is not None
             and raw_joint_pos_window is not None
+            and (
+                (self._sonic_joint29_mode and raw_joint_vel_window is not None)
+                or ((not self._sonic_joint29_mode) and raw_smpl_joints_window is not None)
+            )
         ):
             self._merge_stream_reference_data(
                 frame_indices=raw_frame_indices,
                 smpl_joints=raw_smpl_joints_window,
                 body_quat_w=raw_body_quat_window,
                 joint_pos=raw_joint_pos_window,
+                joint_vel=raw_joint_vel_window,
             )
             if debug_log and self._stream_playback_frame_idx is not None and self._stream_ref_indices:
                 print(
@@ -3411,6 +3605,202 @@ class SonicActionProvider(ActionProvider):
             )
             if debug_log:
                 print(f"[{tag}][HISTORY_BOOTSTRAP] filled startup pose history with first valid frame")
+
+    def _fetch_redis_joint29_pose(self):
+        """Read GMR joint29 Redis stream and adapt it to the shared pose-application path."""
+        if self._redis_client is None:
+            return
+        try:
+            (
+                raw_full_qpos,
+                raw_joint_pos,
+                raw_joint_vel,
+                raw_body_pos,
+                raw_body_quat,
+                raw_frame_index,
+                raw_left,
+                raw_right,
+                controller_raw,
+                recording_control_raw,
+                ready_guard_raw,
+                raw_smplx,
+                t_action_raw,
+            ) = self._redis_client.mget(
+                [
+                    GMR_FULL_QPOS_KEY,
+                    GMR_JOINT_POS_KEY,
+                    GMR_JOINT_VEL_KEY,
+                    GMR_BODY_POS_KEY,
+                    GMR_BODY_QUAT_W_KEY,
+                    GMR_FRAME_INDEX_KEY,
+                    "action_hand_left_unitree_g1_with_hands",
+                    "action_hand_right_unitree_g1_with_hands",
+                    "controller_data",
+                    "recording_control_unitree_g1_with_hands",
+                    self._input_ready_key,
+                    "human_smplx_data_unitree_g1_with_hands",
+                    "t_action",
+                ]
+            )
+        except Exception as e:
+            print(f"[REDIS][JOINT29] Failed to read from Redis: {e}")
+            return
+
+        self._latest_controller_data = None
+        if controller_raw is not None:
+            try:
+                payload = controller_raw.decode("utf-8") if isinstance(controller_raw, bytes) else controller_raw
+                self._latest_controller_data = json.loads(payload)
+            except Exception:
+                self._latest_controller_data = None
+
+        self._update_input_ready_guard(ready_guard_raw)
+        if self._is_stale_controller_payload(self._latest_controller_data):
+            if self._input_ready_epoch_id != self._stale_input_drop_logged_epoch:
+                controller_ts = "n/a"
+                if isinstance(self._latest_controller_data, dict):
+                    controller_ts = self._latest_controller_data.get("timestamp_realtime", "n/a")
+                print(
+                    f"[SonicActionProvider] Ignoring stale SONIC joint29 input: "
+                    f"controller_ts={controller_ts}, "
+                    f"ready_realtime={self._input_ready_timestamp_realtime:.6f}, "
+                    f"ready_monotonic={self._input_ready_timestamp_monotonic:.6f}"
+                )
+                self._stale_input_drop_logged_epoch = self._input_ready_epoch_id
+            self._latest_human_smplx_frame = None
+            self._latest_recording_control = None
+            self._recording_command = "none"
+            return
+
+        self._latest_human_smplx_frame = None
+        if raw_smplx is not None:
+            try:
+                payload = raw_smplx.decode("utf-8") if isinstance(raw_smplx, bytes) else raw_smplx
+                parsed = json.loads(payload)
+                if isinstance(parsed, dict):
+                    self._latest_human_smplx_frame = parsed
+            except Exception:
+                self._latest_human_smplx_frame = None
+
+        self._latest_recording_control = None
+        if recording_control_raw is not None:
+            try:
+                payload = (
+                    recording_control_raw.decode("utf-8")
+                    if isinstance(recording_control_raw, bytes)
+                    else recording_control_raw
+                )
+                self._latest_recording_control = json.loads(payload)
+                sequence = int(self._latest_recording_control.get("sequence", -1))
+                command = str(self._latest_recording_control.get("command", "none"))
+                self._recording_active = bool(self._latest_recording_control.get("active", False))
+                if (
+                    not self._waiting_for_reset_complete
+                    and command != "none"
+                    and sequence != self._latest_recording_control_sequence
+                ):
+                    self._latest_recording_control_sequence = sequence
+                    self._command_edge_this_frame = command
+                    self._recording_command = command
+            except Exception:
+                self._latest_recording_control = None
+
+        def _decode_json_array(raw_value, dtype=np.float32):
+            if raw_value is None:
+                return None
+            payload = raw_value.decode("utf-8") if isinstance(raw_value, bytes) else raw_value
+            return np.asarray(json.loads(payload), dtype=dtype)
+
+        try:
+            joint_pos = _decode_json_array(raw_joint_pos, dtype=np.float32)
+            joint_vel = _decode_json_array(raw_joint_vel, dtype=np.float32)
+            body_pos = _decode_json_array(raw_body_pos, dtype=np.float32)
+            body_quat_w = _decode_json_array(raw_body_quat, dtype=np.float32)
+            full_qpos = _decode_json_array(raw_full_qpos, dtype=np.float32)
+        except Exception as exc:
+            print(f"[REDIS][JOINT29] Failed to decode joint payload: {exc}")
+            return
+
+        if (
+            joint_pos is None
+            or joint_vel is None
+            or body_pos is None
+            or body_quat_w is None
+            or joint_pos.shape != (29,)
+            or joint_vel.shape != (29,)
+            or body_pos.shape != (3,)
+            or body_quat_w.shape != (4,)
+        ):
+            return
+
+        frame_index = self._redis_frame_index
+        if raw_frame_index is not None:
+            try:
+                payload = raw_frame_index.decode("utf-8") if isinstance(raw_frame_index, bytes) else raw_frame_index
+                frame_index = int(payload)
+            except Exception:
+                frame_index = self._redis_frame_index
+        self._redis_frame_index = int(frame_index)
+
+        timestamp_realtime = None
+        timestamp_monotonic = None
+        if isinstance(self._latest_controller_data, dict):
+            try:
+                controller_realtime = self._latest_controller_data.get("timestamp_realtime")
+                if controller_realtime is not None:
+                    timestamp_realtime = float(controller_realtime)
+            except Exception:
+                timestamp_realtime = None
+            try:
+                controller_monotonic = self._latest_controller_data.get("timestamp_monotonic")
+                if controller_monotonic is not None:
+                    timestamp_monotonic = float(controller_monotonic)
+            except Exception:
+                timestamp_monotonic = None
+        if timestamp_realtime is None and t_action_raw is not None:
+            try:
+                payload = t_action_raw.decode("utf-8") if isinstance(t_action_raw, bytes) else t_action_raw
+                timestamp_realtime = float(payload) / 1000.0
+            except Exception:
+                timestamp_realtime = None
+        if timestamp_monotonic is None:
+            timestamp_monotonic = time.monotonic()
+
+        data = {
+            "body_quat_w": body_quat_w[np.newaxis, :],
+            "adjusted_transl": body_pos[np.newaxis, :],
+            "joint_pos": joint_pos[np.newaxis, :],
+            "joint_vel": joint_vel[np.newaxis, :],
+            "frame_index": np.array([frame_index], dtype=np.int64),
+            "timestamp_realtime": np.array([timestamp_realtime or 0.0], dtype=np.float64),
+            "timestamp_monotonic": np.array([timestamp_monotonic], dtype=np.float64),
+        }
+
+        if raw_left is not None:
+            try:
+                left_hand = _decode_json_array(raw_left, dtype=np.float32).reshape(-1)
+                if left_hand.size == 7:
+                    data["left_hand_joints"] = left_hand
+            except Exception:
+                pass
+        if raw_right is not None:
+            try:
+                right_hand = _decode_json_array(raw_right, dtype=np.float32).reshape(-1)
+                if right_hand.size == 7:
+                    data["right_hand_joints"] = right_hand
+            except Exception:
+                pass
+
+        self._latest_pose_payload = {
+            "full_qpos": None if full_qpos is None else full_qpos.astype(np.float32, copy=True),
+            "joint_pos": joint_pos.astype(np.float32, copy=True),
+            "joint_vel": joint_vel.astype(np.float32, copy=True),
+            "body_pos": body_pos.astype(np.float32, copy=True),
+            "body_quat_w": body_quat_w.astype(np.float32, copy=True),
+        }
+        self._latest_heading_increment = 0.0
+        self._smpl_data_valid = True
+        self._apply_pose_data(data, "redis_joint29")
 
     # ------------------------------------------------------------------
     # GEAR-SONIC encoder + decoder 推理
@@ -3447,20 +3837,23 @@ class SonicActionProvider(ActionProvider):
             print(f"[SONIC] Encoder/Decoder not loaded, returning default pose")
             return self._sonic_default_np.copy()
 
-        # 检查历史缓冲区是否有有效数据（即使ZMQ暂时没有新数据）
-        smpl_joints_sum = np.abs(self._smpl_joints_buf).sum()
+        reference_hist_sum = (
+            np.abs(self._motion_joint_pos_hist).sum()
+            if self._sonic_joint29_mode
+            else np.abs(self._smpl_joints_buf).sum()
+        )
         if do_log:
-            print(f"[SONIC] SMPL joints buffer sum: {smpl_joints_sum:.4f}")
+            hist_label = "joint29" if self._sonic_joint29_mode else "SMPL joints"
+            print(f"[SONIC] {hist_label} buffer sum: {reference_hist_sum:.4f}")
 
-        if smpl_joints_sum > 1.0:
-            # 历史缓冲区有有效数据，强制设置标志
-            if not self._smpl_data_valid:
-                print(f"[SONIC] Forcing _smpl_data_valid=True based on buffer data")
-                self._smpl_data_valid = True
+        if reference_hist_sum > 1.0 and not self._smpl_data_valid:
+            hist_label = "joint29" if self._sonic_joint29_mode else "SMPL"
+            print(f"[SONIC] Forcing _smpl_data_valid=True based on {hist_label} buffer data")
+            self._smpl_data_valid = True
 
-        # 如果SMPL数据无效（全0或未接收），直接返回默认站立姿态
         if not self._smpl_data_valid:
-            print(f"[SONIC] SMPL data invalid, returning default pose")
+            invalid_label = "joint29" if self._sonic_joint29_mode else "SMPL"
+            print(f"[SONIC] {invalid_label} data invalid, returning default pose")
             return self._sonic_default_np.copy()
 
         try:
@@ -3477,89 +3870,104 @@ class SonicActionProvider(ActionProvider):
             self._robot_joint_vel_hist = np.roll(self._robot_joint_vel_hist, -1, axis=0)
             self._robot_joint_vel_hist[-1] = joint_vel_sonic
 
-            # 构建完整的1762维encoder输入
-            # 按照observation_config.yaml的顺序
-
-            # 1. encoder_mode_4 (4) - 官方格式不是 one-hot，而是 [mode_id, 0, 0, 0]
-            # 参考 g1_deploy_onnx_ref.cpp: GatherEncoderMode(..., fill_zeros_num=3)
-            encoder_mode = np.array([2., 0., 0., 0.], dtype=np.float32)
-
-            # ============================================================================
-            # SMPL Mode (mode_id=2) Encoder Input Construction
-            # ============================================================================
-            # According to observation_config.yaml, SMPL mode only requires 4 observation blocks:
-            # 1. encoder_mode_4
-            # 2. smpl_joints_10frame_step1
-            # 3. smpl_anchor_orientation_10frame_step1
-            # 4. motion_joint_positions_wrists_10frame_step1
-            #
-            # All other observations must be ZERO to match C++ implementation.
-            # Reference: gear_sonic_deploy/policy/release/observation_config.yaml:74-80
-            # Reference: g1_deploy_onnx_ref.cpp:1920-1942 (mode filtering logic)
-            # ============================================================================
-
-             # These observations are NOT required in SMPL mode → set to ZERO
-            motion_joint_pos_step5_full = np.zeros(290, dtype=np.float32)
-            motion_joint_vel_step5_full = np.zeros(290, dtype=np.float32)
             motion_root_z_step5 = np.zeros(10, dtype=np.float32)
             motion_root_z = np.zeros(1, dtype=np.float32)
             motion_anchor_orient = np.zeros(6, dtype=np.float32)
-            motion_anchor_orient_step5_full = np.zeros(60, dtype=np.float32)
             motion_joint_pos_lowerbody_full = np.zeros(120, dtype=np.float32)
             motion_joint_vel_lowerbody_full = np.zeros(120, dtype=np.float32)
             vr_3pt_pos = np.zeros(9, dtype=np.float32)
             vr_3pt_orn = np.zeros(12, dtype=np.float32)
-
             wrist_indices = OFFICIAL_WRIST_INDICES
-            stream_window = self._gather_stream_reference_window(_STEP1_FRAMES, 1)
-            if stream_window is not None:
-                smpl_joint_window, ref_quat_window, full_joint_window = stream_window
-                wrist_window = full_joint_window[:, wrist_indices]
 
+            if self._sonic_joint29_mode:
+                encoder_mode = np.array([0., 0., 0., 0.], dtype=np.float32)
+                # For live joint29 teleop we want the freshest intent, not a long
+                # trailing history. Repeat the latest sender-resampled reference as
+                # a hold-future window, which is closer to "current -> near future"
+                # than feeding 46 frames of past data.
+                latest_joint_frame = self._motion_joint_pos_hist[-1]
+                latest_joint_vel_frame = self._motion_joint_vel_hist[-1]
                 base_quat_wxyz = robot.root_state_w[0, 3:7].cpu().numpy().astype(np.float32)
-                anchor_window = np.zeros((_STEP1_FRAMES, 6), dtype=np.float32)
-                for i in range(_STEP1_FRAMES):
-                    ref_quat_wxyz = quat_normalize_wxyz(ref_quat_window[i])
-                    aligned_ref_quat_wxyz = ref_quat_wxyz.copy()
-                    if self._anchor_use_heading_align:
-                        aligned_ref_quat_wxyz = quat_mul_wxyz(
-                            self._anchor_heading_align_quat_wxyz,
-                            ref_quat_wxyz,
-                        )
-                    rel_quat_wxyz = quat_mul_wxyz(
-                        quat_conjugate_wxyz(base_quat_wxyz),
-                        aligned_ref_quat_wxyz,
+                latest_ref_quat_wxyz = quat_normalize_wxyz(self._ref_body_quat_window[-1])
+                if np.linalg.norm(latest_ref_quat_wxyz) < 1e-6:
+                    latest_anchor_frame = self._motion_anchor_rot6d_hist[-1]
+                else:
+                    latest_anchor_frame = compute_anchor_rot6d_wxyz(
+                        base_quat_wxyz,
+                        latest_ref_quat_wxyz,
+                        self._anchor_heading_align_quat_wxyz,
+                        self._anchor_use_heading_align,
                     )
-                    anchor_window[i] = quat_to_rotation_6d(rel_quat_wxyz.reshape(1, 4))[0]
-            elif self._ref_window_valid:
-                smpl_joint_window = self._ref_smpl_joints_window
-                ref_quat_window = self._ref_body_quat_window
-                wrist_window = self._ref_joint_pos_window[:, wrist_indices]
+                motion_joint_window = build_latest_hold_window(latest_joint_frame, _STEP5_FRAMES)
+                motion_joint_vel_window = build_latest_hold_window(latest_joint_vel_frame, _STEP5_FRAMES)
+                anchor_window = build_latest_hold_window(latest_anchor_frame, _STEP5_FRAMES)
 
-                base_quat_wxyz = robot.root_state_w[0, 3:7].cpu().numpy().astype(np.float32)
-                anchor_window = np.zeros((_STEP1_FRAMES, 6), dtype=np.float32)
-                for i in range(_STEP1_FRAMES):
-                    ref_quat_wxyz = quat_normalize_wxyz(ref_quat_window[i])
-                    aligned_ref_quat_wxyz = ref_quat_wxyz.copy()
-                    if self._anchor_use_heading_align:
-                        aligned_ref_quat_wxyz = quat_mul_wxyz(
-                            self._anchor_heading_align_quat_wxyz,
-                            ref_quat_wxyz,
-                        )
-                    rel_quat_wxyz = quat_mul_wxyz(
-                        quat_conjugate_wxyz(base_quat_wxyz),
-                        aligned_ref_quat_wxyz,
-                    )
-                    anchor_window[i] = quat_to_rotation_6d(rel_quat_wxyz.reshape(1, 4))[0]
+                motion_joint_pos_step5_full = motion_joint_window.reshape(-1)
+                motion_joint_vel_step5_full = motion_joint_vel_window.reshape(-1)
+                motion_anchor_orient = latest_anchor_frame.astype(np.float32, copy=True)
+                motion_anchor_orient_step5_full = anchor_window.reshape(-1)
+                smpl_joint_window = np.zeros((_STEP1_FRAMES, _N_SMPL_JOINTS, 3), dtype=np.float32)
+                smpl_joints_flat = np.zeros(720, dtype=np.float32)
+                smpl_anchor_orient_flat = np.zeros(60, dtype=np.float32)
+                wrist_window = motion_joint_window[:, wrist_indices]
+                motion_wrist_pos = np.zeros(60, dtype=np.float32)
+                reference_joint_window = motion_joint_window
             else:
-                smpl_joint_window = self._smpl_joints_buf
-                anchor_window = self._body_rot6d_buf
-                motion_wrist_window = gather_temporal_window(self._motion_joint_pos_hist, _STEP1_FRAMES, 1)
-                wrist_window = motion_wrist_window[:, wrist_indices]
+                encoder_mode = np.array([2., 0., 0., 0.], dtype=np.float32)
+                motion_joint_pos_step5_full = np.zeros(290, dtype=np.float32)
+                motion_joint_vel_step5_full = np.zeros(290, dtype=np.float32)
+                motion_anchor_orient_step5_full = np.zeros(60, dtype=np.float32)
 
-            smpl_joints_flat = smpl_joint_window.reshape(-1)  # (10, 24, 3) → (720,)
-            smpl_anchor_orient_flat = anchor_window.reshape(-1)  # (10, 6) → (60,)
-            motion_wrist_pos = wrist_window.reshape(-1)
+                stream_window = self._gather_stream_reference_window(_STEP1_FRAMES, 1)
+                if stream_window is not None:
+                    smpl_joint_window, ref_quat_window, full_joint_window = stream_window
+                    wrist_window = full_joint_window[:, wrist_indices]
+
+                    base_quat_wxyz = robot.root_state_w[0, 3:7].cpu().numpy().astype(np.float32)
+                    anchor_window = np.zeros((_STEP1_FRAMES, 6), dtype=np.float32)
+                    for i in range(_STEP1_FRAMES):
+                        ref_quat_wxyz = quat_normalize_wxyz(ref_quat_window[i])
+                        aligned_ref_quat_wxyz = ref_quat_wxyz.copy()
+                        if self._anchor_use_heading_align:
+                            aligned_ref_quat_wxyz = quat_mul_wxyz(
+                                self._anchor_heading_align_quat_wxyz,
+                                ref_quat_wxyz,
+                            )
+                        rel_quat_wxyz = quat_mul_wxyz(
+                            quat_conjugate_wxyz(base_quat_wxyz),
+                            aligned_ref_quat_wxyz,
+                        )
+                        anchor_window[i] = quat_to_rotation_6d(rel_quat_wxyz.reshape(1, 4))[0]
+                elif self._ref_window_valid:
+                    smpl_joint_window = self._ref_smpl_joints_window
+                    ref_quat_window = self._ref_body_quat_window
+                    wrist_window = self._ref_joint_pos_window[:, wrist_indices]
+
+                    base_quat_wxyz = robot.root_state_w[0, 3:7].cpu().numpy().astype(np.float32)
+                    anchor_window = np.zeros((_STEP1_FRAMES, 6), dtype=np.float32)
+                    for i in range(_STEP1_FRAMES):
+                        ref_quat_wxyz = quat_normalize_wxyz(ref_quat_window[i])
+                        aligned_ref_quat_wxyz = ref_quat_wxyz.copy()
+                        if self._anchor_use_heading_align:
+                            aligned_ref_quat_wxyz = quat_mul_wxyz(
+                                self._anchor_heading_align_quat_wxyz,
+                                ref_quat_wxyz,
+                            )
+                        rel_quat_wxyz = quat_mul_wxyz(
+                            quat_conjugate_wxyz(base_quat_wxyz),
+                            aligned_ref_quat_wxyz,
+                        )
+                        anchor_window[i] = quat_to_rotation_6d(rel_quat_wxyz.reshape(1, 4))[0]
+                else:
+                    smpl_joint_window = self._smpl_joints_buf
+                    anchor_window = self._body_rot6d_buf
+                    motion_wrist_window = gather_temporal_window(self._motion_joint_pos_hist, _STEP1_FRAMES, 1)
+                    wrist_window = motion_wrist_window[:, wrist_indices]
+
+                smpl_joints_flat = smpl_joint_window.reshape(-1)
+                smpl_anchor_orient_flat = anchor_window.reshape(-1)
+                motion_wrist_pos = wrist_window.reshape(-1)
+                reference_joint_window = None
 
             # 拼接所有观察值
             encoder_input = np.concatenate([
@@ -3587,25 +3995,41 @@ class SonicActionProvider(ActionProvider):
                 print(f"[SONIC] Encoder input shape: {encoder_input.shape}, expected: (1, 1762)")
                 print(f"[SONIC] Encoder input dtype: {encoder_input.dtype}")
                 print(f"[SONIC] Encoder input range: [{encoder_input.min():.4f}, {encoder_input.max():.4f}]")
-                print(f"[SONIC] SMPL joints sum: {np.abs(smpl_joints_flat).sum():.4f}")
+                if self._sonic_joint29_mode:
+                    print(f"[SONIC] joint29 motion sum: {np.abs(motion_joint_pos_step5_full).sum():.4f}")
+                else:
+                    print(f"[SONIC] SMPL joints sum: {np.abs(smpl_joints_flat).sum():.4f}")
 
             if do_log or (self._sonic_debug and np.max(np.abs(encoder_input)) > 8.0):
-                print(
-                    "[SONIC][SMPL_MODE] "
-                    f"encoder_mode_vec={encoder_mode.tolist()} "
-                    f"active={SMPL_MODE_ACTIVE_BLOCKS}"
-                )
-                print(
-                    "[SONIC][SMPL_MODE_ACTIVE_BLOCKS] "
-                    f"smpl_joints={array_range_str(smpl_joints_flat)} "
-                    f"smpl_anchor={array_range_str(smpl_anchor_orient_flat)} "
-                    f"wrist_pos={array_range_str(motion_wrist_pos)}"
-                )
-                print(
-                    "[SONIC][SMPL_MODE_ZEROED_BLOCKS] "
-                    f"All zeroed blocks (918 dims) are correctly set to 0.0 "
-                    f"to match C++ implementation"
-                )
+                if self._sonic_joint29_mode:
+                    print(
+                        "[SONIC][JOINT29_MODE] "
+                        f"encoder_mode_vec={encoder_mode.tolist()} "
+                        f"active={JOINT29_MODE_ACTIVE_BLOCKS}"
+                    )
+                    print(
+                        "[SONIC][JOINT29_MODE_ACTIVE_BLOCKS] "
+                        f"joint_pos_step5={array_range_str(motion_joint_pos_step5_full)} "
+                        f"joint_vel_step5={array_range_str(motion_joint_vel_step5_full)} "
+                        f"anchor_step5={array_range_str(motion_anchor_orient_step5_full)}"
+                    )
+                else:
+                    print(
+                        "[SONIC][SMPL_MODE] "
+                        f"encoder_mode_vec={encoder_mode.tolist()} "
+                        f"active={SMPL_MODE_ACTIVE_BLOCKS}"
+                    )
+                    print(
+                        "[SONIC][SMPL_MODE_ACTIVE_BLOCKS] "
+                        f"smpl_joints={array_range_str(smpl_joints_flat)} "
+                        f"smpl_anchor={array_range_str(smpl_anchor_orient_flat)} "
+                        f"wrist_pos={array_range_str(motion_wrist_pos)}"
+                    )
+                    print(
+                        "[SONIC][SMPL_MODE_ZEROED_BLOCKS] "
+                        f"All zeroed blocks (918 dims) are correctly set to 0.0 "
+                        f"to match C++ implementation"
+                    )
 
             # Encoder推理
             enc_inputs = {
@@ -3684,13 +4108,26 @@ class SonicActionProvider(ActionProvider):
                 wrist_window_latest = wrist_window[-1]
                 wrist_window_prev = wrist_window[-2] if wrist_window.shape[0] >= 2 else wrist_window[-1]
                 wrist_delta = wrist_window_latest - wrist_window_prev
-                smpl_joint_latest = smpl_joint_window[-1]
-                smpl_joint_prev = smpl_joint_window[-2] if smpl_joint_window.shape[0] >= 2 else smpl_joint_window[-1]
-                smpl_delta = smpl_joint_latest - smpl_joint_prev
+                if self._sonic_joint29_mode and reference_joint_window is not None:
+                    reference_joint_latest = reference_joint_window[-1]
+                    reference_joint_prev = (
+                        reference_joint_window[-2]
+                        if reference_joint_window.shape[0] >= 2
+                        else reference_joint_window[-1]
+                    )
+                    reference_delta = reference_joint_latest - reference_joint_prev
+                    reference_delta_label = "joint29_delta"
+                else:
+                    smpl_joint_latest = smpl_joint_window[-1]
+                    smpl_joint_prev = (
+                        smpl_joint_window[-2] if smpl_joint_window.shape[0] >= 2 else smpl_joint_window[-1]
+                    )
+                    reference_delta = smpl_joint_latest - smpl_joint_prev
+                    reference_delta_label = "smpl_delta"
 
                 ref_is_static = (
                     np.max(np.abs(wrist_delta)) < 0.01
-                    and np.max(np.abs(smpl_delta)) < 0.01
+                    and np.max(np.abs(reference_delta)) < 0.01
                     and np.max(np.abs(ang_vel)) < 0.3
                 )
 
@@ -3708,7 +4145,7 @@ class SonicActionProvider(ActionProvider):
                     f"raw={array_range_str(raw_sonic_unclipped)} "
                     f"target_delta={array_range_str(target_sonic - self._sonic_default_np)} "
                     f"wrist_delta={array_range_str(wrist_delta)} "
-                    f"smpl_delta={array_range_str(smpl_delta)}"
+                    f"{reference_delta_label}={array_range_str(reference_delta)}"
                 )
                 print(
                     "[SONIC][STAND_DIAG_TOPK] "
