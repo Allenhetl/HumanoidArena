@@ -5,7 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}" || exit 1
 
 PYTHON_BIN="python"
-TASK_NAME="Isaac-Move-Football-Single-G129-Dex3-Wholebody"
+# ENV_CONFIG_YAML="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/tasks/common_env_config/opendoor_sonic.yaml"
+# ENV_CONFIG_YAML="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/tasks/common_env_config/doubledesk_sonic.yaml"
 ENV_CONFIG_YAML="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/tasks/common_env_config/football_single_sonic.yaml"
 RUN_DEVICE="cpu"
 ROBOT_TYPE="g129"
@@ -24,10 +25,38 @@ IMAGE_XROBOT_PORT="12345"
 IMAGE_XROBOT_BITRATE="2097152"
 IMAGE_FPS="30"
 IMAGE_XROBOT_FFMPEG="/usr/bin/ffmpeg"
-RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HOI_football_v2/sonic/tw"
+# RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HOI_double_desk/sonic/yb"
+RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HOI_football_v2/sonic_v3/zk"
+# RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HOI_double_desk/sonic/zk"
+# RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HOI_open_door/sonic/zk"
+LOG_DIR="${SCRIPT_DIR}/logs"
 
 export PROJECT_ROOT="${SCRIPT_DIR}"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
+
+load_task_name_from_yaml() {
+  "${PYTHON_BIN}" - "${SCRIPT_DIR}/tasks/common_env_config/loader.py" "${1}" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+loader_path = pathlib.Path(sys.argv[1])
+config_path = sys.argv[2]
+spec = importlib.util.spec_from_file_location("common_env_config_loader", loader_path)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+task_name = module.get_env_config_task_name(config_path)
+if not task_name:
+    raise SystemExit(
+        f"Error: env config YAML must define a top-level 'task_name': {config_path}"
+    )
+print(task_name)
+PY
+}
+
+TASK_NAME="${TASK_NAME:-$(load_task_name_from_yaml "${ENV_CONFIG_YAML}")}"
 
 if [ ! -f "${SONIC_ENCODER_PATH}" ]; then
   echo "Error: SONIC encoder not found: ${SONIC_ENCODER_PATH}"
@@ -37,7 +66,6 @@ if [ ! -f "${SONIC_DECODER_PATH}" ]; then
   echo "Error: SONIC decoder not found: ${SONIC_DECODER_PATH}"
   exit 1
 fi
-
 redis-cli DEL \
   action_body_unitree_g1_with_hands \
   action_hand_left_unitree_g1_with_hands \
@@ -58,11 +86,9 @@ redis-cli DEL \
   controller_data \
   t_action >/dev/null 2>&1 || true
 
-if [ "${ROBOT_COLLIDER_MODE}" = "fourpoints" ]; then
-  export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/temp/g1_29dof_with_dex3_rev_1_0_fourpoints.usd"
-else
-  export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2.usd"
-fi
+
+export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2.usd"
+
 
 echo "[robot_usd] mode=${ROBOT_COLLIDER_MODE}"
 echo "[robot_usd] path=${ROBOT_USD_OVERRIDE}"
@@ -72,6 +98,12 @@ echo "[sonic_joint29] seed=${SEED}"
 echo "[sonic_joint29] encoder=${SONIC_ENCODER_PATH}"
 echo "[sonic_joint29] decoder=${SONIC_DECODER_PATH}"
 echo "[recording] save_dir=${RECORDING_SAVE_DIR}"
+
+mkdir -p "${RECORDING_SAVE_DIR}"
+mkdir -p "${LOG_DIR}"
+RUN_TS="$(date +%Y%m%d_%H%M%S)"
+SIM_LOG="${LOG_DIR}/sim_main_joint29_${RUN_TS}.log"
+echo "[log] file=${SIM_LOG}"
 
 cmd=(
   "${PYTHON_BIN}" "${SCRIPT_DIR}/sim_main.py"
@@ -110,4 +142,12 @@ if [ "$#" -gt 0 ]; then
   cmd+=("$@")
 fi
 
-exec "${cmd[@]}"
+{
+  echo "[$(date '+%F %T')] Starting SONIC joint29 run"
+  echo "[$(date '+%F %T')] task=${TASK_NAME}"
+  echo "[$(date '+%F %T')] env_config=${ENV_CONFIG_YAML}"
+  echo "[$(date '+%F %T')] recording_save_dir=${RECORDING_SAVE_DIR}"
+  echo "[$(date '+%F %T')] log_file=${SIM_LOG}"
+} | tee -a "${SIM_LOG}"
+
+exec "${cmd[@]}" 2>&1 | tee -a "${SIM_LOG}"

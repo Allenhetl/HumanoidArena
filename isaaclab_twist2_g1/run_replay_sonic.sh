@@ -9,10 +9,32 @@ cd "${SCRIPT_DIR}" || exit 1
 # ------------------------------------------------------------------
 PYTHON_BIN="python"
 DEFAULT_ISAACLAB_PY="/home/dreams/miniconda3/envs/unitree_sim_env_isaaclab5_0/bin/python"
-REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/test0411/sonic/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775894715603602.npz"
+# Double-desk HOI recording (edit REPLAY_FILE for other runs)
+REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic_v3/zk/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1776167470033014.npz"
+  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775894660832965.npz
+  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775894789682027.npz
+  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775894841888126.npz
+  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775894979774767.npz
+  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775895024789299.npz
+  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775912992795677.npz
+  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775913318734262.npz
+  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775913369100656.npz
+  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775913586857113.npz
+  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775914283717499.npz
+  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775914526205379.npz
+  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775914801537965.npz
+  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775914895501671.npz
+  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/zk/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775907447485753.npz
+  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/zk/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775908196051364.npz
+  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/zk/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775908368386789.npz
+  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/zk/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775908558332072.npz
+  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/zk/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775908638445975.npz
+  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/zk/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775909094537531.npz
+# REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_open_door/sonic/zk/Isaac-Move-Open-Door-G129-Dex3-Wholebody_sonic_1775975894226796.npz"
 REPLAY_MODE="direct_replay"   # inference_replay | direct_replay
 REPLAY_LOOP=0                    # 1 | 0
-TASK_NAME="Isaac-Move-Football-Single-G129-Dex3-Wholebody"                     # 留空则从 replay 文件读取
+# ENV_CONFIG_YAML="tasks/common_env_config/opendoor_sonic.yaml"
+# ENV_CONFIG_YAML="tasks/common_env_config/doubledesk_sonic.yaml"
 ENV_CONFIG_YAML="tasks/common_env_config/football_single_sonic.yaml"
 RUN_DEVICE="cpu"
 ROBOT_TYPE="g129"
@@ -30,6 +52,30 @@ SEED="42"
 
 export PROJECT_ROOT="${SCRIPT_DIR}"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
+
+load_task_name_from_yaml() {
+  "${PYTHON_BIN}" - "${SCRIPT_DIR}/tasks/common_env_config/loader.py" "${1}" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+loader_path = pathlib.Path(sys.argv[1])
+config_path = sys.argv[2]
+spec = importlib.util.spec_from_file_location("common_env_config_loader", loader_path)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+task_name = module.get_env_config_task_name(config_path)
+if not task_name:
+    raise SystemExit(
+        f"Error: env config YAML must define a top-level 'task_name': {config_path}"
+    )
+print(task_name)
+PY
+}
+
+TASK_NAME="${TASK_NAME:-$(load_task_name_from_yaml "${ENV_CONFIG_YAML}")}"
 
 if [ ! -f "${REPLAY_FILE}" ]; then
   echo "Error: replay file not found: ${REPLAY_FILE}"
@@ -76,11 +122,9 @@ PY
 )"
 fi
 
-if [ "${ROBOT_COLLIDER_MODE}" = "fourpoints" ]; then
-  export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/temp/g1_29dof_with_dex3_rev_1_0_fourpoints.usd"
-else
-  export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2.usd"
-fi
+
+export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2.usd"
+
 
 redis-cli DEL \
   action_body_unitree_g1_with_hands \

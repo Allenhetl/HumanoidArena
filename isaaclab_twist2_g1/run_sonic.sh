@@ -8,7 +8,7 @@ cd "${SCRIPT_DIR}" || exit 1
 # User config: edit here
 # ------------------------------------------------------------------
 PYTHON_BIN="python"
-ENV_CONFIG_YAML="tasks/common_env_config/livingroom_sitsofa_sonic.yaml"
+ENV_CONFIG_YAML="tasks/common_env_config/doubledesk_sonic.yaml"
 RUN_DEVICE="cpu"
 ROBOT_TYPE="g129"
 ROBOT_COLLIDER_MODE="box"   # box | fourpoints

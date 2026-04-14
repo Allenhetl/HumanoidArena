@@ -1,9 +1,12 @@
 import base64
 import json
+import os
 import ssl
+import time
 import urllib.parse
 import urllib.request
 import urllib.error
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -16,6 +19,16 @@ class LeRobotVLAHttpClient:
         self.base_url = base_url.rstrip("/")
         self.timeout_s = float(timeout_s)
         self.verify_ssl = bool(verify_ssl)
+        self._trace_path = os.environ.get("LEROBOT_VLA_TRACE_PATH", "").strip()
+        self._trace_step_idx = 0
+
+    def _append_trace(self, payload: dict[str, Any]) -> None:
+        if not self._trace_path:
+            return
+        trace_path = Path(self._trace_path).expanduser().resolve()
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(trace_path, "a", encoding="utf-8") as fp:
+            fp.write(json.dumps(payload, ensure_ascii=True) + "\n")
 
     def _build_url(self, path: str) -> str:
         return urllib.parse.urljoin(self.base_url + "/", path.lstrip("/"))
@@ -69,7 +82,27 @@ class LeRobotVLAHttpClient:
         action = np.asarray(response["action"], dtype=np.float32)
         if action.ndim != 1:
             action = action.reshape(-1)
+        self._append_trace(
+            {
+                "event": "infer",
+                "timestamp": time.time(),
+                "step_idx": self._trace_step_idx,
+                "robot_type": robot_type,
+                "front_rgb_shape": list(rgb.shape),
+                "observation_state": state.tolist(),
+                "action": action.tolist(),
+            }
+        )
+        self._trace_step_idx += 1
         return action
 
     def reset(self) -> None:
         self._post_json("/reset", {})
+        self._append_trace(
+            {
+                "event": "reset",
+                "timestamp": time.time(),
+                "step_idx": self._trace_step_idx,
+            }
+        )
+        self._trace_step_idx = 0

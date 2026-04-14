@@ -20,6 +20,7 @@ import copy
 import numpy as np
 from pathlib import Path
 from action_provider.lerobot_vla_http_client import LeRobotVLAHttpClient
+from action_provider.vision_video import write_rgb_video_mp4
 from action_provider.vla_smpl_runtime import (
     VLA_SMPL_ACTION_DIM,
     VLA_SMPL_STATE_DIM,
@@ -102,7 +103,14 @@ class RecordingManager:
     - File naming with timestamps
     """
 
-    def __init__(self, save_dir: str, task_name: str, max_frames: int = 10000):
+    def __init__(
+        self,
+        save_dir: str,
+        task_name: str,
+        max_frames: int = 10000,
+        max_save_workers: int = 1,
+        max_queue_size: int = 10,
+    ):
         """Initialize the recording manager.
 
         Args:
@@ -113,6 +121,7 @@ class RecordingManager:
         self.save_dir = save_dir
         self.task_name = task_name
         self.max_frames = max_frames
+        self.max_save_workers = max(1, int(max_save_workers))
 
         # Create save directory if it doesn't exist
         os.makedirs(save_dir, exist_ok=True)
@@ -123,9 +132,11 @@ class RecordingManager:
         self.frame_count = 0
 
         # Async save queue and thread
-        self.save_queue = queue.Queue(maxsize=10)  # Limit queue size to prevent memory overflow
-        self.save_thread = None
+        self.save_queue = queue.Queue(maxsize=max(1, int(max_queue_size)))  # Limit queue size to prevent memory overflow
+        self.save_threads = []
         self.thread_running = False
+        self._state_lock = threading.Lock()
+        self._active_workers = 0
 
         # Start the save worker thread
         self._start_save_worker()
@@ -135,9 +146,15 @@ class RecordingManager:
     def _start_save_worker(self):
         """Start the background save worker thread."""
         self.thread_running = True
-        self.save_thread = threading.Thread(target=self._save_worker, daemon=False)
-        self.save_thread.start()
-        print(f"[RecordingManager] Save worker thread started")
+        for worker_idx in range(self.max_save_workers):
+            save_thread = threading.Thread(
+                target=self._save_worker,
+                name=f"twist2-save-{worker_idx}",
+                daemon=False,
+            )
+            save_thread.start()
+            self.save_threads.append(save_thread)
+        print(f"[RecordingManager] Save worker threads started: {len(self.save_threads)}")
 
     def _save_worker(self):
         """Background worker thread that saves data to disk."""
@@ -152,6 +169,8 @@ class RecordingManager:
                 # Unpack task
                 data_buffer, timestamp_us, callback = task
 
+                with self._state_lock:
+                    self._active_workers += 1
                 # Save to disk
                 success = self._save_to_disk(data_buffer, timestamp_us)
 
@@ -160,6 +179,8 @@ class RecordingManager:
                     callback(success)
 
                 # Mark task as done
+                with self._state_lock:
+                    self._active_workers = max(0, self._active_workers - 1)
                 self.save_queue.task_done()
 
             except queue.Empty:
@@ -194,7 +215,7 @@ class RecordingManager:
             # Organize data for npz format
             # Convert list of dicts to dict of lists
             print(f"[RecordingManager] Organizing data...")
-            organized_data = self._organize_data_for_save(data_buffer)
+            organized_data = self._organize_data_for_save(data_buffer, timestamp_us)
 
             # Save to temporary file first
             # np.savez_compressed will automatically add .npz extension
@@ -246,7 +267,7 @@ class RecordingManager:
 
             return False
 
-    def _organize_data_for_save(self, data_buffer: list) -> dict:
+    def _organize_data_for_save(self, data_buffer: list, timestamp_us: int) -> dict:
         """Organize list of frame data into arrays for npz format.
 
         Args:
@@ -422,9 +443,18 @@ class RecordingManager:
 
         # Add vision data
         if vision_rgb_list:
-            organized['vision_rgb'] = np.array(vision_rgb_list)
-            organized['vision_depth'] = np.array(vision_depth_list)
+            fps = float(np.clip(np.nanmedian(organized["system_control_frequency"]), 1.0, 240.0))
+            video_basename = f"{self.task_name}_{timestamp_us}_front_rgb.mp4"
+            video_relpath = os.path.join("videos", video_basename)
+            video_abspath = os.path.join(self.save_dir, video_relpath)
+            written = write_rgb_video_mp4(vision_rgb_list, video_abspath, fps=fps)
+            organized['vision_storage_format'] = np.array("video_v1")
+            organized['vision_rgb_video_path'] = np.array(video_relpath)
+            organized['vision_rgb_video_fps'] = np.array(fps, dtype=np.float32)
+            organized['vision_rgb_video_num_frames'] = np.array(written, dtype=np.int32)
             organized['vision_frame_indices'] = np.array(vision_frame_indices, dtype=np.int32)
+            if vision_depth_list:
+                organized['vision_depth'] = np.asarray(vision_depth_list, dtype=np.float16)
 
         return organized
 
@@ -507,6 +537,13 @@ class RecordingManager:
 
         print(f"[RecordingManager] ❌ Recording cancelled ({frame_count} frames discarded)")
 
+    def get_active_worker_count(self) -> int:
+        with self._state_lock:
+            return int(self._active_workers)
+
+    def get_pending_save_count(self) -> int:
+        return int(self.save_queue.qsize() + self.get_active_worker_count())
+
     def shutdown(self):
         """Shutdown the recording manager and wait for pending saves."""
         print(f"[RecordingManager] Shutting down...")
@@ -523,14 +560,14 @@ class RecordingManager:
 
         # Stop worker thread
         self.thread_running = False
-        self.save_queue.put(None)  # Poison pill
+        for _ in self.save_threads:
+            self.save_queue.put(None)  # Poison pill
 
-        if self.save_thread and self.save_thread.is_alive():
-            self.save_thread.join(timeout=10.0)
-            if self.save_thread.is_alive():
-                print(f"[RecordingManager] ⚠️ Save thread did not stop gracefully")
-            else:
-                print(f"[RecordingManager] Save thread stopped")
+        for save_thread in self.save_threads:
+            if save_thread.is_alive():
+                save_thread.join(timeout=10.0)
+                if save_thread.is_alive():
+                    print(f"[RecordingManager] ⚠️ Save thread did not stop gracefully")
 
         print(f"[RecordingManager] Shutdown complete")
 
@@ -595,7 +632,9 @@ class TWIST2ActionProvider(ActionProvider):
         self.recording_manager = RecordingManager(
             save_dir=args_cli.recording_save_dir,
             task_name=args_cli.task,
-            max_frames=10000  # ~5 minutes @ 30Hz
+            max_frames=10000,  # ~5 minutes @ 30Hz
+            max_save_workers=int(getattr(args_cli, "recording_save_workers", 1)),
+            max_queue_size=int(getattr(args_cli, "recording_save_queue_size", 10)),
         )
 
         # Recording will start on first get_action() call (after env.reset())
@@ -687,6 +726,7 @@ class TWIST2ActionProvider(ActionProvider):
 
         # Thread-safe flag for save completion (set by background thread, read by main thread)
         self._save_completion_state = None  # None, "success", or "failure"
+        self._pending_save_jobs = 0
 
         self._replay_data_qpos = None
         self._replay_recorded_joint_pos = None
@@ -1971,6 +2011,9 @@ class TWIST2ActionProvider(ActionProvider):
         """
         return self._recording_command
 
+    def get_pending_save_jobs(self) -> int:
+        return int(self._pending_save_jobs)
+
     def _twist2_roll_pitch_from_quaternion(self, quat: torch.Tensor) -> torch.Tensor:
         """Compute (roll, pitch) from quaternion (w, x, y, z)."""
         w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
@@ -2252,8 +2295,12 @@ class TWIST2ActionProvider(ActionProvider):
                 self.recording_manager.save_recording(completion_callback=on_save_complete)
                 self._recording_display_state = "saving"  # Show "saving" while in progress
                 self._save_in_progress = True
+                self._pending_save_jobs = self.recording_manager.get_pending_save_count()
                 self._save_completion_state = None  # Reset completion state
-                print(f"[{self.name}] 🔍 After save command: display_state={self._recording_display_state}, save_in_progress={self._save_in_progress}")
+                print(
+                    f"[{self.name}] 🔍 After save command: display_state={self._recording_display_state}, "
+                    f"save_in_progress={self._save_in_progress}, pending={self._pending_save_jobs}"
+                )
                 # Reset command after processing
                 self._recording_command = "none"
 
@@ -2261,22 +2308,25 @@ class TWIST2ActionProvider(ActionProvider):
                 self.recording_manager.cancel_recording()
                 self._recording_display_state = "discard"
                 self._recording_display_counter = 0
-                self._save_in_progress = False
+                self._pending_save_jobs = self.recording_manager.get_pending_save_count()
+                self._save_in_progress = self._pending_save_jobs > 0
                 # Reset command after processing
                 self._recording_command = "none"
 
             elif self._recording_command == "save_and_reset":
-                # Save recording, wait for completion, then trigger reset
+                # Save recording asynchronously, then trigger reset immediately
                 print(f"[{self.name}] 💾 save_and_reset command received")
 
-                # Start save and block until complete
-                print(f"[{self.name}] 💾 Saving recording...")
-                self.recording_manager.save_recording(completion_callback=None)
+                def on_save_complete(success: bool):
+                    self._save_completion_state = "success" if success else "failure"
+                    print(f"[{self.name}] 📝 save_and_reset completed: {self._save_completion_state}")
 
-                # Block and wait for save to complete
-                print(f"[{self.name}] ⏳ Waiting for save to complete...")
-                self.recording_manager.save_queue.join()  # Block until all saves are done
-                print(f"[{self.name}] ✅ Save completed")
+                print(f"[{self.name}] 💾 Saving recording...")
+                self.recording_manager.save_recording(completion_callback=on_save_complete)
+                self._recording_display_state = "saving"
+                self._save_in_progress = True
+                self._pending_save_jobs = self.recording_manager.get_pending_save_count()
+                print(f"[{self.name}] 📦 Save queued, pending={self._pending_save_jobs}")
 
                 # Trigger complete reset via Redis
                 print(f"[{self.name}] 🔄 Triggering complete reset...")
@@ -2298,6 +2348,8 @@ class TWIST2ActionProvider(ActionProvider):
                 print(f"[{self.name}] ❌ Discarding recording...")
                 self.recording_manager.cancel_recording()
                 print(f"[{self.name}] ✅ Recording discarded")
+                self._pending_save_jobs = self.recording_manager.get_pending_save_count()
+                self._save_in_progress = self._pending_save_jobs > 0
 
                 # Trigger complete reset via Redis
                 print(f"[{self.name}] 🔄 Triggering complete reset...")
@@ -2337,13 +2389,14 @@ class TWIST2ActionProvider(ActionProvider):
                 print(f"[{self.name}] 🔍 State check (step {self.sim_step_counter}): display={self._recording_display_state}, save_in_progress={self._save_in_progress}, is_recording={self.recording_manager.is_recording}, completion={self._save_completion_state}")
 
             # Check if save completed (set by background thread callback)
+            self._pending_save_jobs = self.recording_manager.get_pending_save_count()
+            self._save_in_progress = self._pending_save_jobs > 0
             if self._save_completion_state is not None:
                 if self._save_completion_state == "success":
                     self._recording_display_state = "saved"
                 else:  # "failure"
                     self._recording_display_state = "discard"
                 self._recording_display_counter = 0
-                self._save_in_progress = False
                 self._save_completion_state = None  # Clear the flag
                 print(f"[{self.name}] 🔄 Display state updated to: {self._recording_display_state}")
             # Normal state transitions (only if save didn't just complete)

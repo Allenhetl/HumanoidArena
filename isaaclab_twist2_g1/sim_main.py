@@ -182,6 +182,18 @@ parser.add_argument("--setpgrp", action="store_true", default=False, help="detac
 # recording parameters
 parser.add_argument("--recording_save_dir", type=str, default="./recording_data", help="directory to save recording data")
 parser.add_argument("--auto_start_recording", action="store_true", default=False, help="automatically start recording on startup (for testing from-reset reproducibility)")
+parser.add_argument(
+    "--recording_save_workers",
+    type=int,
+    default=10,
+    help="max concurrent background save workers (keep low to avoid CPU contention)",
+)
+parser.add_argument(
+    "--recording_save_queue_size",
+    type=int,
+    default=10,
+    help="max queued save jobs before producer blocks",
+)
 
 # random seed for reproducibility
 parser.add_argument("--seed", type=int, default=None, help="random seed for reproducibility (default: None)")
@@ -224,7 +236,7 @@ from action_provider.reset_control import (
     publish_reset_complete,
     read_reset_trigger,
 )
-from common_env_objects import resolve_env_object_scene_key
+from common_env_objects import apply_explicit_env_object_states as _apply_explicit_env_object_states_common
 from tasks.common_env_config import apply_env_config_yaml
 from tasks.common_runtime import apply_optional_runtime_augments
 from tools.get_stiffness import get_robot_stiffness_from_env
@@ -384,59 +396,8 @@ def _load_replay_initial_env_object_states(args_cli):
     setattr(args_cli, "_replay_initial_env_object_states_cache", object_states)
     return object_states
 
-
 def _apply_explicit_env_object_states(env, env_cfg, object_states, *, log_prefix="replay_env_init"):
-    if not object_states:
-        return False
-
-    env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
-    applied_objects = []
-
-    def _broadcast_field(value, width):
-        tensor = torch.as_tensor(np.asarray(value), device=env.device, dtype=torch.float32)
-        if tensor.ndim == 1:
-            tensor = tensor.unsqueeze(0).repeat(env.num_envs, 1)
-        elif tensor.ndim == 2 and tensor.shape[0] == env.num_envs:
-            pass
-        else:
-            tensor = tensor.reshape(1, -1).repeat(env.num_envs, 1)
-        return tensor[:, :width]
-
-    for object_name, state in object_states.items():
-        scene_name = resolve_env_object_scene_key(env, env_cfg, object_name)
-        if scene_name is None:
-            continue
-
-        asset = env.scene[scene_name]
-        try:
-            root_state = asset.data.default_root_state.clone()
-        except Exception:
-            root_state = asset.data.root_state_w.clone()
-
-        if "position" in state:
-            root_state[:, 0:3] = _broadcast_field(state["position"], 3)
-        if "orientation" in state:
-            root_state[:, 3:7] = _broadcast_field(state["orientation"], 4)
-        if "linear_velocity" in state:
-            root_state[:, 7:10] = _broadcast_field(state["linear_velocity"], 3)
-        else:
-            root_state[:, 7:10] = 0.0
-        if "angular_velocity" in state:
-            root_state[:, 10:13] = _broadcast_field(state["angular_velocity"], 3)
-        else:
-            root_state[:, 10:13] = 0.0
-
-        asset.write_root_state_to_sim(root_state, env_ids=env_ids)
-        applied_objects.append(
-            f"{object_name}->{scene_name}:pos={root_state[0, 0:3].detach().cpu().numpy().tolist()}"
-        )
-
-    if not applied_objects:
-        return False
-
-    env.scene.write_data_to_sim()
-    print(f"[{log_prefix}] applied initial env object state: " + ", ".join(applied_objects))
-    return True
+    return _apply_explicit_env_object_states_common(env, env_cfg, object_states, log_prefix=log_prefix)
 
 
 def _restore_replay_initial_env_state_if_needed(env, args_cli):
@@ -526,8 +487,6 @@ def setup_signal_handlers(controller, dds_manager=None, image_servers=None, simu
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-
-
 
 def main():
     """main function"""
@@ -1185,7 +1144,6 @@ def main():
         # clean up resources
         print("\nclean up resources...")
         controller.cleanup()
-        
         env.close()
         print("cleanup completed")
 
@@ -1207,7 +1165,7 @@ if __name__ == "__main__":
         
         try:
             # Find all related Python processes
-            result = subprocess.run(['pgrep', '-f', 'sim_main.py'], 
+            result = subprocess.run(['pgrep', '-f', 'sim_main.py'],
                                   capture_output=True, text=True)
             if result.returncode == 0:
                 pids = result.stdout.strip().split('\n')
@@ -1227,7 +1185,7 @@ if __name__ == "__main__":
                 time.sleep(2)
                 
                 # Check if there are any remaining processes, force kill them
-                result2 = subprocess.run(['pgrep', '-f', 'sim_main.py'], 
+                result2 = subprocess.run(['pgrep', '-f', 'sim_main.py'],
                                        capture_output=True, text=True)
                 if result2.returncode == 0:
                     remaining_pids = result2.stdout.strip().split('\n')

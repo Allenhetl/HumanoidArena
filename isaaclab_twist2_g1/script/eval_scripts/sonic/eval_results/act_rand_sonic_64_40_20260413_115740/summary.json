@@ -1,0 +1,13 @@
+{
+  "total_episodes": 8,
+  "total_successes": 0,
+  "overall_success_rate": 0.0,
+  "per_model": {
+    "checkpoints__040000": {
+      "model_path": "/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/train/act_sonic_football_rand_0411_64_40/checkpoints/040000/pretrained_model",
+      "episodes": 8,
+      "successes": 0,
+      "success_rate": 0.0
+    }
+  }
+}

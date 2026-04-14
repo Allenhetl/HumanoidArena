@@ -23,11 +23,14 @@ class AsyncEpisodeRecorder:
         task_name: str,
         organize_fn: Callable[[list[dict[str, Any]], int], dict[str, Any]],
         max_frames: int = 10000,
+        max_save_workers: int = 1,
+        max_queue_size: int = 10,
     ) -> None:
         self.save_dir = save_dir
         self.task_name = task_name
         self.organize_fn = organize_fn
         self.max_frames = max_frames
+        self.max_save_workers = max(1, int(max_save_workers))
 
         os.makedirs(save_dir, exist_ok=True)
 
@@ -35,10 +38,19 @@ class AsyncEpisodeRecorder:
         self.recording_buffer: list[dict[str, Any]] = []
         self.frame_count = 0
 
-        self.save_queue: queue.Queue[Any] = queue.Queue(maxsize=10)
+        self.save_queue: queue.Queue[Any] = queue.Queue(maxsize=max(1, int(max_queue_size)))
         self.thread_running = True
-        self.save_thread = threading.Thread(target=self._save_worker, daemon=False)
-        self.save_thread.start()
+        self._lock = threading.Lock()
+        self._active_workers = 0
+        self.save_threads: list[threading.Thread] = []
+        for worker_idx in range(self.max_save_workers):
+            thread = threading.Thread(
+                target=self._save_worker,
+                name=f"episode-save-{worker_idx}",
+                daemon=False,
+            )
+            thread.start()
+            self.save_threads.append(thread)
 
     def _save_worker(self) -> None:
         while self.thread_running:
@@ -49,9 +61,13 @@ class AsyncEpisodeRecorder:
             if task is None:
                 break
             data_buffer, timestamp_us, callback = task
+            with self._lock:
+                self._active_workers += 1
             success = self._save_to_disk(data_buffer, timestamp_us)
             if callback is not None:
                 callback(success)
+            with self._lock:
+                self._active_workers = max(0, self._active_workers - 1)
             self.save_queue.task_done()
 
     def _save_to_disk(self, data_buffer: list[dict[str, Any]], timestamp_us: int) -> bool:
@@ -60,7 +76,15 @@ class AsyncEpisodeRecorder:
         temp_filepath = os.path.join(self.save_dir, temp_basename)
         final_filepath = os.path.join(self.save_dir, filename)
         try:
-            organized_data = self.organize_fn(data_buffer, timestamp_us)
+            try:
+                organized_data = self.organize_fn(
+                    data_buffer,
+                    timestamp_us,
+                    self.save_dir,
+                    self.task_name,
+                )
+            except TypeError:
+                organized_data = self.organize_fn(data_buffer, timestamp_us)
             np.savez_compressed(temp_filepath, **organized_data)
             os.rename(temp_filepath + ".npz", final_filepath)
             print(
@@ -110,12 +134,21 @@ class AsyncEpisodeRecorder:
         self.recording_buffer = []
         self.frame_count = 0
 
+    def get_active_worker_count(self) -> int:
+        with self._lock:
+            return int(self._active_workers)
+
+    def get_pending_save_count(self) -> int:
+        return int(self.save_queue.qsize() + self.get_active_worker_count())
+
     def shutdown(self) -> None:
         if self.is_recording:
             self.cancel_recording()
         if not self.save_queue.empty():
             self.save_queue.join()
         self.thread_running = False
-        self.save_queue.put(None)
-        if self.save_thread.is_alive():
-            self.save_thread.join(timeout=10.0)
+        for _ in self.save_threads:
+            self.save_queue.put(None)
+        for thread in self.save_threads:
+            if thread.is_alive():
+                thread.join(timeout=10.0)

@@ -1,0 +1,20 @@
+{
+  "task": "Isaac-Move-Football-Single-G129-Dex3-Wholebody",
+  "model_path": "/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/train/diffusion_twist2_0401/checkpoints/last/pretrained_model",
+  "model_label": "checkpoints__last",
+  "seed": 7,
+  "episode_index": 7,
+  "success": false,
+  "failure_reason": "timeout",
+  "episode_steps": 1000,
+  "max_steps": 1000,
+  "final_reward": -1.0,
+  "final_reward_scaled": -0.019999999552965164,
+  "max_reward": -1.0,
+  "max_reward_scaled": -0.019999999552965164,
+  "video_path": "/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/script/eval_scripts/sonic/eval_results/act_rand_sonic_64_40_20260413_105801/videos/failure/checkpoints__last__seed_7__episode_7__timeout.mp4",
+  "server_url": "http://127.0.0.1:8443",
+  "started_at": 1776049358.4472342,
+  "finished_at": 1776049387.1346078,
+  "duration_sec": 28.687373876571655
+}

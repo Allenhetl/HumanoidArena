@@ -10,13 +10,15 @@ import yaml
 
 
 COMMON_ENV_CONFIG_DIR = Path(__file__).resolve().parent
+ISAACLAB_ROOT = COMMON_ENV_CONFIG_DIR.parents[1]
 
 
 def resolve_env_config_yaml_path(config_path: str | None) -> Path | None:
     """Resolve a YAML path from CLI input.
 
     If ``config_path`` is relative, this first checks it relative to the current
-    working directory and then relative to ``tasks/common_env_config``.
+    working directory, then relative to the IsaacLab package root, and finally
+    relative to ``tasks/common_env_config``.
     """
 
     if not config_path:
@@ -26,13 +28,26 @@ def resolve_env_config_yaml_path(config_path: str | None) -> Path | None:
     if candidate.is_file():
         return candidate.resolve()
 
-    common_candidate = COMMON_ENV_CONFIG_DIR / config_path
-    if common_candidate.is_file():
-        return common_candidate.resolve()
+    tried_paths = [candidate]
+
+    isaaclab_candidate = ISAACLAB_ROOT / config_path
+    tried_paths.append(isaaclab_candidate)
+    if isaaclab_candidate.is_file():
+        return isaaclab_candidate.resolve()
+
+    if not candidate.is_absolute():
+        common_rel_parts = candidate.parts
+        common_prefix = COMMON_ENV_CONFIG_DIR.parts[-2:]
+        if common_rel_parts[: len(common_prefix)] == common_prefix:
+            common_rel_parts = common_rel_parts[len(common_prefix) :]
+        common_candidate = COMMON_ENV_CONFIG_DIR.joinpath(*common_rel_parts)
+        tried_paths.append(common_candidate)
+        if common_candidate.is_file():
+            return common_candidate.resolve()
 
     raise FileNotFoundError(
         f"Environment config YAML not found: {config_path}. "
-        f"Tried '{candidate}' and '{common_candidate}'."
+        f"Tried {', '.join(repr(str(path)) for path in tried_paths)}."
     )
 
 

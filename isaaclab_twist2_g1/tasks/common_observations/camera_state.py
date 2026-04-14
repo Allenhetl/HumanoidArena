@@ -55,12 +55,13 @@ atexit.register(_cleanup_shared_memory)
 _camera_update_count = 0
 _camera_last_report_time = None
 
-def _add_recording_status_overlay(rgb_image, recording_display_state):
+def _add_recording_status_overlay(rgb_image, recording_display_state, pending_save_jobs: int = 0):
     """Add recording status overlay to RGB image for VR display.
 
     Args:
         rgb_image: numpy array [H, W, 3] in range [0, 1] (float) or [0, 255] (uint8)
         recording_display_state: str, display state ("idle", "recording", "saved", "discard")
+        pending_save_jobs: int, number of active + queued save jobs
 
     Returns:
         numpy array with recording status overlay
@@ -110,6 +111,11 @@ def _add_recording_status_overlay(rgb_image, recording_display_state):
     # Draw text next to circle
     text_pos = (padding + circle_radius * 2 + 10, padding + circle_radius + 8)
     cv2.putText(img, text, text_pos, font, font_scale, color, thickness, cv2.LINE_AA)
+
+    # Draw pending save jobs on a second line for operator pacing decisions.
+    pending_text = f"SAVE JOBS: {max(0, int(pending_save_jobs))}"
+    pending_pos = (padding + circle_radius * 2 + 10, padding + circle_radius + 38)
+    cv2.putText(img, pending_text, pending_pos, font, 0.75, (255, 255, 255), 2, cv2.LINE_AA)
 
     # Convert back to float if original was float
     if rgb_image.dtype == np.float32 or rgb_image.dtype == np.float64:
@@ -297,14 +303,21 @@ def get_camera_image(
     if "head" in images:
         # Try to get recording display state from action provider
         recording_display_state = "idle"  # Default
+        pending_save_jobs = 0
         try:
             # Access action provider through env if available
             if hasattr(env, 'action_provider') and hasattr(env.action_provider, '_recording_display_state'):
                 recording_display_state = env.action_provider._recording_display_state
+            if hasattr(env, 'action_provider') and hasattr(env.action_provider, 'get_pending_save_jobs'):
+                pending_save_jobs = int(env.action_provider.get_pending_save_jobs())
         except Exception as e:
             pass  # Silently fall back to default
 
-        images["head"] = _add_recording_status_overlay(images["head"], recording_display_state)
+        images["head"] = _add_recording_status_overlay(
+            images["head"],
+            recording_display_state,
+            pending_save_jobs=pending_save_jobs,
+        )
 
     # write the multi-image data (RGB + depth) to shared memory
     if images:
@@ -320,4 +333,3 @@ def get_camera_image(
     #     print("[camera_state] No camera images found in the environment")
 
     return torch.zeros((1, 480, 640, 3))
-

@@ -111,6 +111,13 @@ class RobotController:
             action = self.action_provider.get_action(self.env)
             if action is not None:
                 self._last_action = action
+            # Replay / wholebody: physics runs inside the action provider (env.sim.step) and
+            # env.step() is skipped below — reward_manager.compute must run here or sparse rewards
+            # never update in sync with simulation.
+            if self.config.replay_mode or self.config.use_rl_action_mode:
+                from tools.get_reward import sync_reward_after_physics_step
+
+                sync_reward_after_physics_step(self.env)
 
         # if no action is obtained, use the pre-calculated fallback strategy
         if action is None:

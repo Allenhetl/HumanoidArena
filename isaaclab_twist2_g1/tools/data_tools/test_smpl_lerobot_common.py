@@ -142,3 +142,62 @@ def test_build_sonic_actions_supports_split_canonical_fields(tmp_path: Path) -> 
     np.testing.assert_allclose(action[:, 3:9], root_rot6d)
     np.testing.assert_allclose(action[:, 9:38], joint_pos)
     np.testing.assert_allclose(action[:, 38:40], hand_binary)
+
+
+def test_build_sonic_actions_applies_heading_alignment_to_root(tmp_path: Path) -> None:
+    num_frames = 1
+    root_xy_delta = np.array([[1.0, 0.0]], dtype=np.float32)
+    root_z = np.array([[0.82]], dtype=np.float32)
+    # identity rotation: x=[1,0,0], y=[0,1,0]
+    root_rot6d = np.array([[1.0, 0.0, 0.0, 1.0, 0.0, 0.0]], dtype=np.float32)
+    joint_pos = np.zeros((num_frames, 29), dtype=np.float32)
+    hand_binary = np.zeros((num_frames, 2), dtype=np.float32)
+    # +90deg yaw align quaternion in wxyz.
+    heading_align = np.array([[0.70710677, 0.0, 0.0, 0.70710677]], dtype=np.float32)
+
+    with _open_npz(
+        tmp_path,
+        vla_action_root_xy_delta=root_xy_delta,
+        vla_action_root_z=root_z,
+        vla_action_root_rot6d=root_rot6d,
+        vla_action_joint_pos_29=joint_pos,
+        vla_action_hand_binary_2=hand_binary,
+        anchor_heading_align_quat_wxyz=heading_align,
+        anchor_use_heading_align=np.array([[True]], dtype=np.bool_),
+    ) as data:
+        action = build_sonic_actions_from_recording(
+            data,
+            num_frames=num_frames,
+            align_heading_targets=True,
+        )
+
+    np.testing.assert_allclose(action[:, :2], np.array([[0.0, 1.0]], dtype=np.float32), atol=1e-5)
+    np.testing.assert_allclose(
+        action[:, 3:9],
+        np.array([[0.0, -1.0, 1.0, 0.0, 0.0, 0.0]], dtype=np.float32),
+        atol=1e-5,
+    )
+
+
+def test_build_sonic_actions_does_not_double_align_prealigned_vla_action(tmp_path: Path) -> None:
+    num_frames = 1
+    aligned_action = np.zeros((num_frames, VLA_ACTION_DIM), dtype=np.float32)
+    aligned_action[:, :2] = np.array([[0.0, 1.0]], dtype=np.float32)
+    aligned_action[:, 2:3] = np.array([[0.82]], dtype=np.float32)
+    aligned_action[:, 3:9] = np.array([[0.0, -1.0, 1.0, 0.0, 0.0, 0.0]], dtype=np.float32)
+    heading_align = np.array([[0.70710677, 0.0, 0.0, 0.70710677]], dtype=np.float32)
+
+    with _open_npz(
+        tmp_path,
+        vla_action=aligned_action,
+        vla_action_heading_aligned=np.array(True, dtype=np.bool_),
+        anchor_heading_align_quat_wxyz=heading_align,
+        anchor_use_heading_align=np.array([[True]], dtype=np.bool_),
+    ) as data:
+        action = build_sonic_actions_from_recording(
+            data,
+            num_frames=num_frames,
+            align_heading_targets=True,
+        )
+
+    np.testing.assert_allclose(action, aligned_action, atol=1e-5)

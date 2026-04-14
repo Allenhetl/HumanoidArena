@@ -1,9 +1,8 @@
 import isaaclab.sim as sim_utils
 from isaaclab.assets import  AssetBaseCfg, RigidObjectCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
+from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 import os
 project_root = os.environ.get("PROJECT_ROOT")
 PACKING_TABLE_L_POS = [-0.1, -3.2, -0.2]
@@ -13,6 +12,8 @@ CONTAINER_R_POS_OFFSET = [0.3, 0.0, 1.00]
 ROOM_SCALE = (100.0, 100.0, 100.0)
 HAMMER_INIT_POS = [-3.137042543141045, -3.0097883381183254, 1.0106319452873727]
 HAMMER_INIT_ROT = [0.7139050960540771, 0.0, 0.0, -0.7002424597740173]
+CRATE_INIT_POS = [-2.8, -0.1, 0.745]
+CRATE_INIT_ROT = [1.0, 0.0, 0.0, 0.0]
 @configclass
 class DoubleTableSceneCfg(InteractiveSceneCfg): # inherit from the interactive scene configuration class
     """object table scene configuration class
@@ -58,6 +59,18 @@ class DoubleTableSceneCfg(InteractiveSceneCfg): # inherit from the interactive s
         ),
     )
 
+    basket = AssetBaseCfg(
+        prim_path="/World/envs/env_.*/Basket",
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=CRATE_INIT_POS,
+            rot=CRATE_INIT_ROT,
+        ),
+        spawn=UsdFileCfg(
+            usd_path=f"{project_root}/assets/objects/small_warehouse/SM_Crate_A14_Gray_01/SM_Crate_A14_Gray_01_physics.usd",
+            activate_contact_sensors=False,
+        ),
+    )
+
     # Lights
     # 4. light configuration
     # light = AssetBaseCfg(
@@ -70,7 +83,7 @@ class DoubleTableSceneCfg(InteractiveSceneCfg): # inherit from the interactive s
       prim_path="/World/light",
       init_state=AssetBaseCfg.InitialStateCfg(
           pos=[-4, -1, 18],
-          rot=[0.9239, 0.3827, 0.0, 0.0],  # 示例四元数，表示一个倾斜方向
+          rot=[1.0, 0.0, 0.0, 0.0],  # 示例四元数，表示一个倾斜方向
       ),
       spawn=sim_utils.DistantLightCfg(
           color=(0.75, 0.75, 0.75),

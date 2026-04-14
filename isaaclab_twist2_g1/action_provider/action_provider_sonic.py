@@ -48,6 +48,7 @@ from scipy.spatial.transform import Rotation as R
 from action_provider.action_base import ActionProvider
 from action_provider.lerobot_vla_http_client import LeRobotVLAHttpClient
 from action_provider.recording_common import AsyncEpisodeRecorder
+from action_provider.vision_video import write_rgb_video_mp4
 from action_provider.reset_control import (
     GMR_BODY_POS_KEY,
     GMR_BODY_QUAT_W_KEY,
@@ -66,6 +67,7 @@ from action_provider.vla_smpl_runtime import (
     UnifiedSMPLActionRuntime,
     build_sonic_joint29_payload,
     build_vla_observation_state,
+    rot6d_to_quat_wxyz_with_layout,
 )
 from common_env_objects import (
     add_env_object_frame_arrays,
@@ -218,6 +220,14 @@ def quat_angle_deg_wxyz(quat: np.ndarray) -> float:
     quat = quat_normalize_wxyz(quat)
     w = float(np.clip(np.abs(quat[..., 0]), -1.0, 1.0))
     return float(np.degrees(2.0 * np.arccos(w)))
+
+
+def quat_delta_deg_wxyz(prev_quat_wxyz: np.ndarray, curr_quat_wxyz: np.ndarray) -> float:
+    """Return shortest rotation delta in degrees between two wxyz quaternions."""
+    prev = quat_normalize_wxyz(np.asarray(prev_quat_wxyz, dtype=np.float32).reshape(4))
+    curr = quat_normalize_wxyz(np.asarray(curr_quat_wxyz, dtype=np.float32).reshape(4))
+    rel = quat_mul_wxyz(quat_conjugate_wxyz(prev), curr)
+    return quat_angle_deg_wxyz(rel)
 
 
 def quat_heading_wxyz(quat: np.ndarray) -> np.ndarray:
@@ -1019,7 +1029,42 @@ def _extract_controller_binary_signals(controller_data: dict | None) -> dict[str
     }
 
 
-def _organize_sonic_episode(data_buffer: list[dict[str, Any]], timestamp_us: int) -> dict[str, Any]:
+def _default_vla_action() -> np.ndarray:
+    action = np.zeros((SONIC_VLA_ACTION_DIM,), dtype=np.float32)
+    action[3:9] = np.array([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=np.float32)
+    return action
+
+
+def _apply_heading_align_to_vla_action(
+    action: np.ndarray,
+    *,
+    align_quat_wxyz: np.ndarray,
+    use_heading_align: bool,
+) -> np.ndarray:
+    out = np.asarray(action, dtype=np.float32).reshape(-1).copy()
+    if out.shape != (SONIC_VLA_ACTION_DIM,):
+        raise ValueError(f"Unexpected VLA action shape {out.shape}, expected {(SONIC_VLA_ACTION_DIM,)}")
+    if not use_heading_align:
+        return out
+
+    align_quat_wxyz = quat_normalize_wxyz(np.asarray(align_quat_wxyz, dtype=np.float32).reshape(4))
+    root_quat_wxyz = rot6d_to_quat_wxyz_with_layout(out[3:9], layout="row").reshape(4).astype(np.float32)
+    aligned_root_quat_wxyz = quat_mul_wxyz(align_quat_wxyz, root_quat_wxyz)
+    out[3:9] = quat_to_rotation_6d(aligned_root_quat_wxyz.reshape(1, 4))[0]
+
+    rot_mat = R.from_quat(align_quat_wxyz[[1, 2, 3, 0]]).as_matrix().astype(np.float32)
+    xy_delta = np.array([out[0], out[1], 0.0], dtype=np.float32)
+    rotated_xy_delta = rot_mat @ xy_delta
+    out[0:2] = rotated_xy_delta[:2]
+    return out.astype(np.float32)
+
+
+def _organize_sonic_episode(
+    data_buffer: list[dict[str, Any]],
+    timestamp_us: int,
+    save_dir: str | None = None,
+    task_name: str | None = None,
+) -> dict[str, Any]:
     if not data_buffer:
         raise ValueError("empty sonic recording buffer")
 
@@ -1037,7 +1082,7 @@ def _organize_sonic_episode(data_buffer: list[dict[str, Any]], timestamp_us: int
         return np.stack(values).astype(dtype) if dtype is not None else np.stack(values)
 
     organized: dict[str, Any] = {
-        "schema_version": np.array("sonic_episode_v2"),
+        "schema_version": np.array("sonic_episode_v3"),
         "task": np.array(meta["task"]),
         "episode_id": np.array(meta["episode_id"], dtype=np.int64),
         "save_timestamp_us": np.array(timestamp_us, dtype=np.int64),
@@ -1049,10 +1094,22 @@ def _organize_sonic_episode(data_buffer: list[dict[str, Any]], timestamp_us: int
         "meta_encoder_path": np.array(meta["encoder_path"]),
         "meta_decoder_path": np.array(meta["decoder_path"]),
         "frame_index": _stack(("markers", "frame_index"), np.int64),
+        "raw_frame_index": _stack(("markers", "raw_frame_index"), np.int64),
+        "consumed_frame_index": _stack(("markers", "consumed_frame_index"), np.int64),
         "episode_step": _stack(("markers", "episode_step"), np.int64),
         "timestamp_wall": _stack(("markers", "timestamp_wall"), np.float64),
         "timestamp_monotonic": _stack(("markers", "timestamp_monotonic"), np.float64),
         "timestamp_realtime": _stack(("markers", "timestamp_realtime"), np.float64),
+        "raw_timestamp_monotonic": _stack(("markers", "raw_timestamp_monotonic"), np.float64),
+        "raw_timestamp_realtime": _stack(("markers", "raw_timestamp_realtime"), np.float64),
+        "consumed_timestamp_monotonic": _stack(("markers", "consumed_timestamp_monotonic"), np.float64),
+        "consumed_timestamp_realtime": _stack(("markers", "consumed_timestamp_realtime"), np.float64),
+        "consumed_new_this_step": _stack(("markers", "consumed_new_this_step"), np.bool_),
+        "consumed_control_step": _stack(("markers", "consumed_control_step"), np.int64),
+        "executed_source_frame_index": _stack(("markers", "executed_source_frame_index"), np.int64),
+        "executed_source_timestamp_realtime": _stack(("markers", "executed_source_timestamp_realtime"), np.float64),
+        "executed_source_timestamp_monotonic": _stack(("markers", "executed_source_timestamp_monotonic"), np.float64),
+        "executed_source_control_step": _stack(("markers", "executed_source_control_step"), np.int64),
         "recording_command": np.array(
             [frame["markers"]["recording_command"] for frame in data_buffer]
         ),
@@ -1061,6 +1118,8 @@ def _organize_sonic_episode(data_buffer: list[dict[str, Any]], timestamp_us: int
         "save_triggered": _stack(("markers", "save_triggered"), np.bool_),
         "human_left_hand": _stack(("human_raw", "left_hand"), np.float32),
         "human_right_hand": _stack(("human_raw", "right_hand"), np.float32),
+        "human_raw_body_quat_w": _stack(("human_raw", "body_quat_w"), np.float32),
+        "human_raw_body_pos": _stack(("human_raw", "body_pos"), np.float32),
         "pico_left_grip_binary": _stack(
             ("human_raw", "controller_binary", "left_grip_binary"), np.bool_
         ),
@@ -1082,6 +1141,10 @@ def _organize_sonic_episode(data_buffer: list[dict[str, Any]], timestamp_us: int
         "human_smpl_joints": _stack(("human_processed", "smpl_joints"), np.float32),
         "human_smpl_pose": _stack(("human_processed", "smpl_pose"), np.float32),
         "human_body_quat_w": _stack(("human_processed", "body_quat_w"), np.float32),
+        "human_body_quat_w_aligned": _stack(("human_processed", "body_quat_w_aligned"), np.float32),
+        "human_body_pos": _stack(("human_processed", "body_pos"), np.float32),
+        "human_joint_pos": _stack(("human_processed", "joint_pos"), np.float32),
+        "consumed_anchor_rot6d": _stack(("human_processed", "anchor_rot6d"), np.float32),
         "human_vr_position": _stack(("human_processed", "vr_position"), np.float32),
         "human_vr_orientation": _stack(("human_processed", "vr_orientation"), np.float32),
         "human_heading_increment": _stack(("human_processed", "heading_increment"), np.float32),
@@ -1144,6 +1207,7 @@ def _organize_sonic_episode(data_buffer: list[dict[str, Any]], timestamp_us: int
         "robot_root_lin_vel_world": _stack(("robot", "root_lin_vel_world"), np.float32),
         "robot_root_ang_vel_world": _stack(("robot", "root_ang_vel_world"), np.float32),
         "final_body_action_29dof": _stack(("action", "body_action_29dof"), np.float32),
+        "final_body_action_29dof_pre_delay": _stack(("action", "body_action_29dof_pre_delay"), np.float32),
         "final_full_action": _stack(("action", "full_action"), np.float32),
         "body_effort_target": _stack(("action", "body_effort_target"), np.float32),
         "hand_action_left": _stack(("action", "hand_action_left"), np.float32),
@@ -1154,12 +1218,22 @@ def _organize_sonic_episode(data_buffer: list[dict[str, Any]], timestamp_us: int
         "vla_state_root_rot6d": _stack(("vla", "canonical_state"), np.float32)[:, :6],
         "vla_state_dof_pos_29": _stack(("vla", "canonical_state"), np.float32)[:, 6:35],
         "vla_state_dof_vel_29": _stack(("vla", "canonical_state"), np.float32)[:, 35:64],
+        "vla_action_raw": _stack(("vla", "canonical_action_raw"), np.float32),
         "vla_action": _stack(("vla", "canonical_action"), np.float32),
+        "vla_action_executed_raw": _stack(("vla", "canonical_action_executed_raw"), np.float32),
+        "vla_action_executed": _stack(("vla", "canonical_action_executed"), np.float32),
         "vla_action_root_xy_delta": _stack(("vla", "canonical_action"), np.float32)[:, :2],
         "vla_action_root_z": _stack(("vla", "canonical_action"), np.float32)[:, 2:3],
         "vla_action_root_rot6d": _stack(("vla", "canonical_action"), np.float32)[:, 3:9],
         "vla_action_joint_pos_29": _stack(("vla", "canonical_action"), np.float32)[:, 9:38],
         "vla_action_hand_binary_2": _stack(("vla", "canonical_action"), np.float32)[:, 38:40],
+        "vla_action_semantics": np.array(
+            str(np.asarray(first["vla"]["canonical_action_semantics"]).reshape(-1)[0])
+        ),
+        "vla_action_heading_aligned": np.array(
+            bool(np.asarray(first["vla"]["canonical_action_heading_aligned"]).reshape(-1)[0]),
+            dtype=np.bool_,
+        ),
         "human_raw_smplx_json": np.array(
             _json_string([frame["human_raw"]["smplx_frame"] for frame in data_buffer])
         ),
@@ -1189,10 +1263,22 @@ def _organize_sonic_episode(data_buffer: list[dict[str, Any]], timestamp_us: int
         if depth is not None:
             depth_frames.append(depth)
     if rgb_frames:
-        organized["vision_rgb"] = np.array(rgb_frames)
         organized["vision_frame_indices"] = np.array(vision_indices, dtype=np.int32)
+        organized["vision_storage_format"] = np.array("video_v1")
+        control_dt = float(meta.get("control_dt", 0.0) or 0.0)
+        video_fps = float(1.0 / control_dt) if control_dt > 1e-6 else 30.0
+        organized["vision_rgb_video_fps"] = np.array(video_fps, dtype=np.float32)
+        if save_dir:
+            basename = f"{task_name or meta['task']}_{timestamp_us}_front_rgb.mp4"
+            video_relpath = os.path.join("videos", basename)
+            video_abspath = os.path.join(save_dir, video_relpath)
+            written = write_rgb_video_mp4(rgb_frames, video_abspath, fps=video_fps)
+            organized["vision_rgb_video_path"] = np.array(video_relpath)
+            organized["vision_rgb_video_num_frames"] = np.array(written, dtype=np.int32)
+        else:
+            organized["vision_rgb"] = np.array(rgb_frames, dtype=np.uint8)
     if depth_frames:
-        organized["vision_depth"] = np.array(depth_frames)
+        organized["vision_depth"] = np.asarray(depth_frames, dtype=np.float16)
 
     add_env_object_frame_arrays(organized, data_buffer)
     add_episode_init_env_object_fields(organized, first.get("episode_init_env"))
@@ -1252,8 +1338,66 @@ class SonicActionProvider(ActionProvider):
         self._lerobot_predict_action = None
         self._lerobot_device = None
         self._lerobot_http_client = None
-        self._lerobot_vla_runtime = UnifiedSMPLActionRuntime()
+        self._vla_root_rot6d_layout = str(
+            getattr(
+                args_cli,
+                "sonic_vla_root_rot6d_layout",
+                os.environ.get("SONIC_VLA_ROOT_ROT6D_LAYOUT", "auto"),
+            )
+            or "auto"
+        ).strip().lower()
+        if self._vla_root_rot6d_layout not in {"auto", "row", "col"}:
+            print(
+                f"[SonicActionProvider] Unsupported sonic_vla_root_rot6d_layout="
+                f"{self._vla_root_rot6d_layout}, fallback to 'auto'"
+            )
+            self._vla_root_rot6d_layout = "auto"
+        raw_root_max_delta_deg = getattr(
+            args_cli,
+            "sonic_vla_root_max_delta_deg",
+            os.environ.get("SONIC_VLA_ROOT_MAX_DELTA_DEG", "26.0"),
+        )
+        try:
+            self._vla_root_max_delta_deg = float(raw_root_max_delta_deg)
+        except Exception:
+            self._vla_root_max_delta_deg = 26.0
+        if not np.isfinite(self._vla_root_max_delta_deg) or self._vla_root_max_delta_deg <= 0.0:
+            self._vla_root_max_delta_deg = None
+        self._lerobot_vla_runtime = UnifiedSMPLActionRuntime(
+            root_rot6d_layout=self._vla_root_rot6d_layout,
+            max_root_delta_deg=self._vla_root_max_delta_deg,
+        )
         self._lerobot_hand_binary_threshold = float(getattr(args_cli, "lerobot_gripper_threshold", 0.5))
+        self._vla_root_debug = bool(
+            getattr(
+                args_cli,
+                "sonic_vla_root_debug",
+                bool(int(os.environ.get("SONIC_VLA_ROOT_DEBUG", "0") or "0")),
+            )
+        )
+        self._vla_root_jump_l2_threshold = float(
+            getattr(
+                args_cli,
+                "sonic_vla_root_jump_l2_threshold",
+                os.environ.get("SONIC_VLA_ROOT_JUMP_L2_THRESHOLD", "0.20"),
+            )
+            or 0.20
+        )
+        self._vla_root_jump_deg_threshold = float(
+            getattr(
+                args_cli,
+                "sonic_vla_root_jump_deg_threshold",
+                os.environ.get("SONIC_VLA_ROOT_JUMP_DEG_THRESHOLD", "15.0"),
+            )
+            or 15.0
+        )
+        self._vla_prev_root_rot6d_action: np.ndarray | None = None
+        raw_vla_use_heading_align = getattr(
+            args_cli,
+            "sonic_vla_use_heading_align",
+            os.environ.get("SONIC_VLA_USE_HEADING_ALIGN", "1"),
+        )
+        self._vla_use_heading_align = bool(int(raw_vla_use_heading_align or "1"))
         self._canonical_pose_recorder = CanonicalPoseActionRecorder()
         self._latest_vla_action = None
         if self._replay_enabled:
@@ -1280,6 +1424,8 @@ class SonicActionProvider(ActionProvider):
         self._replay_decoder_gravity_dir_hist = None
         self._replay_decoder_last_action_hist = None
         self._replay_object_states = {}
+        self._replay_initial_object_states = {}
+        self._replay_initial_object_state_compared = False
         self._replay_joint_mae_sum = 0.0
         self._replay_joint_mae_count = 0
         self._replay_joint_err_log_interval = 10
@@ -1291,6 +1437,8 @@ class SonicActionProvider(ActionProvider):
             task_name=f"{self.task_name}_sonic",
             organize_fn=_organize_sonic_episode,
             max_frames=10000,
+            max_save_workers=int(getattr(args_cli, "recording_save_workers", 1)),
+            max_queue_size=int(getattr(args_cli, "recording_save_queue_size", 10)),
         )
         self._should_start_recording_on_first_call = not self._replay_enabled
         self._recording_command = "none"
@@ -1300,6 +1448,7 @@ class SonicActionProvider(ActionProvider):
         self._recording_display_duration = 10
         self._save_in_progress = False
         self._save_completion_state = None
+        self._pending_save_jobs = 0
         self._waiting_for_reset_complete = False
         self._reset_complete_received = False
         self._input_ready_key = get_input_ready_key("sonic_joint29" if self._sonic_joint29_mode else "sonic")
@@ -1309,9 +1458,12 @@ class SonicActionProvider(ActionProvider):
         self._stale_input_drop_logged_epoch = -1
         self._episode_id = 0
         self._latest_human_smplx_frame = None
+        self._raw_controller_data = None
         self._latest_controller_data = None
+        self._consumed_controller_data = None
         self._latest_recording_control = None
         self._latest_recording_control_sequence = -1
+        self._raw_pose_payload = {}
         self._latest_pose_payload = {}
         self._latest_encoder_input = np.zeros((1762,), dtype=np.float32)
         self._latest_smpl_joint_window = np.zeros((_STEP1_FRAMES, _N_SMPL_JOINTS, 3), dtype=np.float32)
@@ -1321,14 +1473,50 @@ class SonicActionProvider(ActionProvider):
         self._latest_decoder_raw_action = np.zeros((29,), dtype=np.float32)
         self._latest_decoder_target = self._sonic_default_np.copy() if hasattr(self, "_sonic_default_np") else np.zeros((29,), dtype=np.float32)
         self._latest_decoder_body_effort = np.zeros(29, dtype=np.float32)
+        self._raw_input_frame_index = -1
+        self._raw_input_timestamp_realtime = 0.0
+        self._raw_input_timestamp_monotonic = 0.0
         self._latest_frame_index = -1
         self._latest_timestamp_realtime = 0.0
         self._latest_timestamp_monotonic = 0.0
         self._latest_heading_increment = 0.0
+        self._latest_consumed_new_this_step = False
+        self._latest_consumed_control_step = -1
+        self._latest_aligned_body_quat_wxyz = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        self._latest_consumed_anchor_rot6d = np.array([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=np.float32)
+        self._latest_canonical_action_raw = _default_vla_action()
+        self._latest_canonical_action = _default_vla_action()
+        self._latest_executed_canonical_action_raw = _default_vla_action()
+        self._latest_executed_canonical_action = _default_vla_action()
+        self._latest_executed_source_frame_index = -1
+        self._latest_executed_source_timestamp_realtime = 0.0
+        self._latest_executed_source_timestamp_monotonic = 0.0
+        self._latest_executed_source_control_step = -1
+        self._last_raw_frame_index = -1
         self._command_edge_this_frame = "none"
         # self._sonic_warmup_steps = int(getattr(args_cli, "sonic_warmup_steps", 50))  # warmup 已注释，仅用 history_ready
         self._sonic_warmup_steps = 0
         self._sonic_smooth_steps = int(getattr(args_cli, "sonic_smooth_steps", 20))
+        raw_output_delay_steps = getattr(
+            args_cli,
+            "sonic_output_delay_steps",
+            os.environ.get("SONIC_OUTPUT_DELAY_STEPS", "0"),
+        )
+        try:
+            self._sonic_output_delay_steps = max(0, int(raw_output_delay_steps))
+        except Exception:
+            self._sonic_output_delay_steps = 0
+        self._sonic_output_delay_queue: list[dict[str, Any]] = []
+        self._sonic_last_executed_target = np.zeros((29,), dtype=np.float32)
+        self._sonic_last_executed_bundle: dict[str, Any] = {
+            "body_action_29dof": self._sonic_default_np.copy() if hasattr(self, "_sonic_default_np") else np.zeros((29,), dtype=np.float32),
+            "canonical_action_raw": _default_vla_action(),
+            "canonical_action_aligned": _default_vla_action(),
+            "source_frame_index": -1,
+            "source_timestamp_realtime": 0.0,
+            "source_timestamp_monotonic": 0.0,
+            "source_control_step": -1,
+        }
         cfg = getattr(env, "cfg", None)
         self._decimation    = int(getattr(cfg, "decimation", 4))
 
@@ -1344,6 +1532,20 @@ class SonicActionProvider(ActionProvider):
             self._setup_zmq()
         self._setup_policy()
         self._setup_buffers()
+        self._sonic_last_executed_target = self._sonic_default_np.copy()
+        if self._sonic_output_delay_steps > 0:
+            self._sonic_output_delay_queue = [
+                {
+                    "body_action_29dof": self._sonic_default_np.copy(),
+                    "canonical_action_raw": _default_vla_action(),
+                    "canonical_action_aligned": _default_vla_action(),
+                    "source_frame_index": -1,
+                    "source_timestamp_realtime": 0.0,
+                    "source_timestamp_monotonic": 0.0,
+                    "source_control_step": -1,
+                }
+                for _ in range(self._sonic_output_delay_steps)
+            ]
         self._latest_decoder_target = self._sonic_default_np.copy()
         if self._use_lerobot_vla:
             self._setup_lerobot_vla(args_cli)
@@ -1354,6 +1556,25 @@ class SonicActionProvider(ActionProvider):
               f"gmt_backend={self._gmt_backend or 'sonic'}  "
               f"(zmq={self.zmq_host}:{self.zmq_port}  redis={self.redis_host}:{self.redis_port})  "
               f"encoder={self.encoder_path}  decoder={self.decoder_path}")
+        if self._use_lerobot_vla:
+            print(
+                f"[SonicActionProvider] VLA root_rot6d layout mode="
+                f"{self._vla_root_rot6d_layout}"
+            )
+            print(
+                f"[SonicActionProvider] VLA root delta clamp (deg/step)="
+                f"{self._vla_root_max_delta_deg if self._vla_root_max_delta_deg is not None else 'disabled'}"
+            )
+            print(
+                f"[SonicActionProvider] VLA heading align="
+                f"{'enabled' if self._vla_use_heading_align else 'disabled'} "
+                f"(env SONIC_VLA_USE_HEADING_ALIGN)"
+            )
+        if self._sonic_output_delay_steps > 0:
+            print(
+                f"[SonicActionProvider] SONIC output delay enabled: "
+                f"delay_steps={self._sonic_output_delay_steps}"
+            )
         if self._replay_enabled:
             print(
                 f"[SonicActionProvider] replay enabled  "
@@ -1608,6 +1829,7 @@ class SonicActionProvider(ActionProvider):
             self._replay_decoder_gravity_dir_hist = _load_array(replay_data, "decoder_gravity_dir_hist")
             self._replay_decoder_last_action_hist = _load_array(replay_data, "decoder_last_action_hist")
             self._replay_object_states = {}
+            self._replay_initial_object_states = {}
             replay_object_suffixes = {
                 "_position": "position",
                 "_linear_velocity": "linear_velocity",
@@ -1620,6 +1842,22 @@ class SonicActionProvider(ActionProvider):
                     if key.endswith(suffix):
                         object_name = key[len("env_obj_") : -len(suffix)]
                         self._replay_object_states.setdefault(object_name, {})[field_name] = np.asarray(
+                            replay_data[key]
+                        ).copy()
+                        break
+            replay_initial_object_suffixes = {
+                "_position": "position",
+                "_orientation": "orientation",
+                "_linear_velocity": "linear_velocity",
+                "_angular_velocity": "angular_velocity",
+            }
+            for key in replay_data.files:
+                if not key.startswith("episode_init_env_obj_"):
+                    continue
+                for suffix, field_name in replay_initial_object_suffixes.items():
+                    if key.endswith(suffix):
+                        object_name = key[len("episode_init_env_obj_") : -len(suffix)]
+                        self._replay_initial_object_states.setdefault(object_name, {})[field_name] = np.asarray(
                             replay_data[key]
                         ).copy()
                         break
@@ -1655,6 +1893,11 @@ class SonicActionProvider(ActionProvider):
             f"[SonicActionProvider] loaded replay npz: {replay_path}  "
             f"frames={self._replay_num_frames}"
         )
+        if self._replay_initial_object_states and not self._replay_object_states:
+            print(
+                "[SonicActionProvider] replay file has episode_init_env_obj_* but no frame-wise env_obj_*; "
+                "object replay diff will fall back to init-state-only comparison. Re-record to get per-frame object errors."
+            )
 
     def _normalize_replay_mode(self, replay_mode: str) -> str:
         if replay_mode in ("direct", "direct_replay"):
@@ -1854,7 +2097,82 @@ class SonicActionProvider(ActionProvider):
     def _apply_lerobot_semantic_action(self, action: np.ndarray) -> None:
         action = np.asarray(action, dtype=np.float32).reshape(-1)
         self._latest_vla_action = action.copy()
+        root_rot6d_action = action[3:9].astype(np.float32, copy=True)
+        prev_root_rot6d_action = (
+            None
+            if self._vla_prev_root_rot6d_action is None
+            else self._vla_prev_root_rot6d_action.astype(np.float32, copy=False)
+        )
+        jump_l2 = (
+            0.0
+            if prev_root_rot6d_action is None
+            else float(np.linalg.norm(root_rot6d_action - prev_root_rot6d_action))
+        )
+        if (
+            self._vla_root_rot6d_layout == "auto"
+            and getattr(self._lerobot_vla_runtime, "_prev_root_quat_wxyz", None) is None
+        ):
+            try:
+                base_quat_wxyz = self.env.scene["robot"].data.root_state_w[0, 3:7].cpu().numpy().astype(np.float32)
+                self._lerobot_vla_runtime.prime_root_quat(base_quat_wxyz)
+            except Exception:
+                pass
+        prev_runtime_root_quat = getattr(self._lerobot_vla_runtime, "_prev_root_quat_wxyz", None)
+        row_delta_deg = 0.0
+        col_delta_deg = 0.0
+        if prev_runtime_root_quat is not None:
+            try:
+                quat_row = rot6d_to_quat_wxyz_with_layout(root_rot6d_action, layout="row").reshape(4)
+                quat_col = rot6d_to_quat_wxyz_with_layout(root_rot6d_action, layout="col").reshape(4)
+                row_delta_deg = quat_delta_deg_wxyz(prev_runtime_root_quat, quat_row)
+                col_delta_deg = quat_delta_deg_wxyz(prev_runtime_root_quat, quat_col)
+            except Exception:
+                row_delta_deg = 0.0
+                col_delta_deg = 0.0
         runtime_frame = self._lerobot_vla_runtime.step(action)
+        root_delta_deg = 0.0
+        if runtime_frame.prev_root_quat_wxyz is not None:
+            root_delta_deg = quat_delta_deg_wxyz(
+                runtime_frame.prev_root_quat_wxyz,
+                runtime_frame.root_quat_wxyz,
+            )
+        if self._vla_root_debug:
+            selected_layout = getattr(self._lerobot_vla_runtime, "_last_selected_root_rot6d_layout", "row")
+            active_layout_delta_deg = row_delta_deg if selected_layout == "row" else col_delta_deg
+            print(
+                "[SONIC][VLA_ROOT_DEBUG] "
+                f"frame={self._frame_count + 1} "
+                f"xy=({runtime_frame.root_xy_delta_world[0]:+0.4f},{runtime_frame.root_xy_delta_world[1]:+0.4f}) "
+                f"z={runtime_frame.root_z:+0.4f} "
+                f"rot6d={np.array2string(root_rot6d_action, precision=4, separator=',')} "
+                f"jump_l2={jump_l2:0.6f} "
+                f"jump_deg={root_delta_deg:0.3f} "
+                f"jump_row_deg={row_delta_deg:0.3f} "
+                f"jump_col_deg={col_delta_deg:0.3f} "
+                f"hand=({runtime_frame.hand_binary[0]:0.3f},{runtime_frame.hand_binary[1]:0.3f})"
+            )
+            root_jump_detected = (
+                (jump_l2 >= self._vla_root_jump_l2_threshold)
+                or (root_delta_deg >= self._vla_root_jump_deg_threshold)
+                or (active_layout_delta_deg >= self._vla_root_jump_deg_threshold)
+            )
+            if root_jump_detected:
+                print(
+                    "[SONIC][VLA_ROOT_JUMP] "
+                    f"frame={self._frame_count + 1} "
+                    f"layout={selected_layout} "
+                    f"jump_l2={jump_l2:0.6f} "
+                    f"jump_deg={root_delta_deg:0.3f} "
+                    f"jump_layout_deg={active_layout_delta_deg:0.3f} "
+                    f"jump_row_deg={row_delta_deg:0.3f} "
+                    f"jump_col_deg={col_delta_deg:0.3f} "
+                    f"thresholds(l2={self._vla_root_jump_l2_threshold:0.3f},deg={self._vla_root_jump_deg_threshold:0.3f})"
+                )
+        self._vla_prev_root_rot6d_action = root_rot6d_action.copy()
+        if self._sonic_debug and self._vla_root_rot6d_layout == "auto":
+            selected_layout = getattr(self._lerobot_vla_runtime, "_last_selected_root_rot6d_layout", "row")
+            if self._frame_count <= 3 or self._frame_count % self._sonic_log_every == 0:
+                print(f"[SONIC][VLA_ROT6D] auto-selected layout={selected_layout}")
         control_dt = float(self.env.physics_dt * self._decimation)
         payload = build_sonic_joint29_payload(
             runtime_frame=runtime_frame,
@@ -1868,9 +2186,10 @@ class SonicActionProvider(ActionProvider):
             "frame_index": np.array([self._latest_frame_index + 1], dtype=np.int64),
             "timestamp_realtime": np.array([time.time()], dtype=np.float64),
             "timestamp_monotonic": np.array([time.monotonic()], dtype=np.float64),
+            "heading_increment": np.array([0.0], dtype=np.float32),
         }
         self._latest_human_smplx_frame = None
-        self._latest_pose_payload = {
+        self._raw_pose_payload = {
             "joint_pos": payload["joint_pos"].copy(),
             "joint_vel": payload["joint_vel"].copy(),
             "body_pos": payload["body_pos"].copy(),
@@ -2058,7 +2377,6 @@ class SonicActionProvider(ActionProvider):
             self._latest_frame_index = frame_idx
         if self._replay_heading_increment is not None and frame_idx < len(self._replay_heading_increment):
             self._latest_heading_increment = float(np.asarray(self._replay_heading_increment[frame_idx]).reshape(-1)[-1])
-
         if self._replay_mode == "direct_replay":
             if self._replay_body_targets is None or frame_idx >= len(self._replay_body_targets):
                 return None
@@ -2068,12 +2386,8 @@ class SonicActionProvider(ActionProvider):
                     f"[SonicActionProvider] direct_replay target must have 29 dims, got {sonic_targets.shape}"
                 )
             self._latest_decoder_target = sonic_targets.copy()
-            return sonic_targets
+            return sonic_targets.copy()
 
-        # For inference replay, restore the exact recorded model inputs and history
-        # buffers. Do not call _apply_pose_data() here: that path rolls temporal
-        # windows forward once more and turns replay into a reconstructed history
-        # instead of an exact restore of the recorded model state.
         restored_current_frame = False
         if self._replay_encoder_smpl_joint_window is not None and frame_idx < len(self._replay_encoder_smpl_joint_window):
             self._latest_smpl_joint_window = np.asarray(
@@ -2292,14 +2606,61 @@ class SonicActionProvider(ActionProvider):
             root_state = obj.data.root_state_w
             return {
                 "position": root_state[0, 0:3].detach().cpu().numpy().astype(np.float32),
+                "orientation": root_state[0, 3:7].detach().cpu().numpy().astype(np.float32),
                 "linear_velocity": root_state[0, 7:10].detach().cpu().numpy().astype(np.float32),
                 "angular_velocity": root_state[0, 10:13].detach().cpu().numpy().astype(np.float32),
             }
         except Exception:
             return None
 
+    def _log_replay_initial_object_state_error(self) -> None:
+        if self._replay_initial_object_state_compared:
+            return
+        self._replay_initial_object_state_compared = True
+        if not self._replay_initial_object_states:
+            return
+
+        field_units = {
+            "position": "m",
+            "linear_velocity": "m/s",
+            "angular_velocity": "rad/s",
+        }
+        field_labels = {
+            "position": "init_pos",
+            "linear_velocity": "init_lin_vel",
+            "angular_velocity": "init_ang_vel",
+        }
+
+        for object_name, recorded_fields in self._replay_initial_object_states.items():
+            current_state = self._get_current_replay_object_state(object_name)
+            if current_state is None:
+                continue
+
+            parts = []
+            for field_name in ("position", "linear_velocity", "angular_velocity"):
+                recorded = recorded_fields.get(field_name)
+                if recorded is None:
+                    continue
+                recorded_arr = np.asarray(recorded, dtype=np.float32).reshape(-1)
+                current_arr = np.asarray(current_state[field_name], dtype=np.float32).reshape(-1)
+                dims = min(current_arr.shape[0], recorded_arr.shape[0])
+                if dims <= 0:
+                    continue
+                err = np.abs(current_arr[:dims] - recorded_arr[:dims])
+                parts.append(
+                    f"{field_labels[field_name]}_mae={float(err.mean()):.6f} {field_units[field_name]} "
+                    f"max={float(err.max()):.6f} {field_units[field_name]}"
+                )
+
+            if parts:
+                print(
+                    f"[SonicActionProvider] Replay env init err: object={object_name} "
+                    + " ".join(parts)
+                )
+
     def _log_replay_object_state_error(self, frame_idx: int) -> None:
         if not self._replay_object_states:
+            self._log_replay_initial_object_state_error()
             return
         if not (frame_idx < 3 or frame_idx % self._replay_joint_err_log_interval == 0):
             return
@@ -2357,14 +2718,15 @@ class SonicActionProvider(ActionProvider):
     def on_env_reset(self):
         try:
             robot = self.env.scene["robot"].data
-            joint_pos_sonic = robot.joint_pos[0, self._sonic_idx].cpu().numpy().astype(np.float32)
+            joint_pos_sonic_abs = robot.joint_pos[0, self._sonic_idx].cpu().numpy().astype(np.float32)
             joint_vel_sonic = robot.joint_vel[0, self._sonic_idx].cpu().numpy().astype(np.float32)
         except Exception:
-            joint_pos_sonic = np.zeros(29, dtype=np.float32)
+            joint_pos_sonic_abs = self._sonic_default_np.copy()
+            joint_pos_sonic_delta = np.zeros(29, dtype=np.float32)
             joint_vel_sonic = np.zeros(29, dtype=np.float32)
             root_z = 0.0
         else:
-            joint_pos_sonic = joint_pos_sonic - self._sonic_default_np
+            joint_pos_sonic_delta = joint_pos_sonic_abs - self._sonic_default_np
             root_z = float(robot.root_state_w[0, 2].cpu().numpy())
 
         self._episode_init_env_state = self._collect_env_state()
@@ -2385,9 +2747,9 @@ class SonicActionProvider(ActionProvider):
         self._ref_body_quat_window[:] = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
         self._ref_joint_pos_window[:] = self._sonic_default_np
         self._ref_window_valid = False
-        self._robot_joint_pos_hist[:] = joint_pos_sonic
+        self._robot_joint_pos_hist[:] = joint_pos_sonic_delta
         self._robot_joint_vel_hist[:] = joint_vel_sonic
-        self._motion_joint_pos_hist[:] = joint_pos_sonic
+        self._motion_joint_pos_hist[:] = joint_pos_sonic_abs
         self._motion_joint_vel_hist[:] = joint_vel_sonic
         self._motion_root_z_hist[:] = root_z
         self._motion_anchor_rot6d_hist[:] = self._body_rot6d_buf[-1]
@@ -2404,8 +2766,25 @@ class SonicActionProvider(ActionProvider):
         self._stream_frame_step = 1
         self._left_hand_binary_state = False
         self._right_hand_binary_state = False
+        self._sonic_last_executed_target = self._sonic_default_np.copy()
+        if self._sonic_output_delay_steps > 0:
+            self._sonic_output_delay_queue = [
+                {
+                    "body_action_29dof": self._sonic_default_np.copy(),
+                    "canonical_action_raw": _default_vla_action(),
+                    "canonical_action_aligned": _default_vla_action(),
+                    "source_frame_index": -1,
+                    "source_timestamp_realtime": 0.0,
+                    "source_timestamp_monotonic": 0.0,
+                    "source_control_step": -1,
+                }
+                for _ in range(self._sonic_output_delay_steps)
+            ]
+        else:
+            self._sonic_output_delay_queue = []
         self._vla_semantic_history_fill = 0
         self._latest_vla_action = None
+        self._vla_prev_root_rot6d_action = None
         self._canonical_pose_recorder.reset()
         if self._use_lerobot_vla:
             self._lerobot_vla_runtime.reset()
@@ -2421,14 +2800,44 @@ class SonicActionProvider(ActionProvider):
         if self._replay_enabled:
             self._replay_cursor = 0
             self._replay_joint_mae_sum = 0.0
-            self._replay_joint_mae_count = 0
-            self._replay_object_err_sums = {}
-            self._replay_object_err_counts = {}
+        self._replay_joint_mae_count = 0
+        self._replay_object_err_sums = {}
+        self._replay_object_err_counts = {}
+        self._replay_initial_object_state_compared = False
         self._latest_controller_data = None
+        self._raw_controller_data = None
+        self._consumed_controller_data = None
         self._latest_recording_control = None
+        self._raw_pose_payload = {}
         self._latest_pose_payload = {}
+        self._raw_input_frame_index = -1
+        self._raw_input_timestamp_realtime = 0.0
+        self._raw_input_timestamp_monotonic = 0.0
         self._latest_timestamp_realtime = 0.0
         self._latest_timestamp_monotonic = 0.0
+        self._latest_frame_index = -1
+        self._latest_consumed_new_this_step = False
+        self._latest_consumed_control_step = -1
+        self._latest_aligned_body_quat_wxyz[:] = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        self._latest_consumed_anchor_rot6d[:] = np.array([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=np.float32)
+        self._latest_canonical_action_raw = _default_vla_action()
+        self._latest_canonical_action = _default_vla_action()
+        self._latest_executed_canonical_action_raw = _default_vla_action()
+        self._latest_executed_canonical_action = _default_vla_action()
+        self._latest_executed_source_frame_index = -1
+        self._latest_executed_source_timestamp_realtime = 0.0
+        self._latest_executed_source_timestamp_monotonic = 0.0
+        self._latest_executed_source_control_step = -1
+        self._sonic_last_executed_bundle = {
+            "body_action_29dof": self._sonic_default_np.copy(),
+            "canonical_action_raw": _default_vla_action(),
+            "canonical_action_aligned": _default_vla_action(),
+            "source_frame_index": -1,
+            "source_timestamp_realtime": 0.0,
+            "source_timestamp_monotonic": 0.0,
+            "source_control_step": -1,
+        }
+        self._last_raw_frame_index = -1
         # print(f"[SONIC] on_env_reset: frame_count reset, warmup={self._sonic_warmup_steps}")  # warmup 已注释
         print(f"[SONIC] on_env_reset: frame_count and history reset")
 
@@ -2442,12 +2851,16 @@ class SonicActionProvider(ActionProvider):
         self._recording_display_state = "recording"
         self._recording_display_counter = 0
         self._save_in_progress = False
+        self._pending_save_jobs = self.recording_manager.get_pending_save_count()
 
     def is_recording_active(self):
         return self._recording_active
 
     def get_recording_command(self):
         return self._recording_command
+
+    def get_pending_save_jobs(self) -> int:
+        return int(self._pending_save_jobs)
 
     def _update_input_ready_guard(self, raw_guard) -> None:
         guard = None
@@ -2495,13 +2908,14 @@ class SonicActionProvider(ActionProvider):
         return True
 
     def _update_recording_display_state(self) -> None:
+        self._pending_save_jobs = self.recording_manager.get_pending_save_count()
+        self._save_in_progress = self._pending_save_jobs > 0
         if self._save_completion_state is not None:
             if self._save_completion_state == "success":
                 self._recording_display_state = "saved"
             else:
                 self._recording_display_state = "discard"
             self._recording_display_counter = 0
-            self._save_in_progress = False
             self._save_completion_state = None
         elif self._save_in_progress:
             return
@@ -2547,6 +2961,9 @@ class SonicActionProvider(ActionProvider):
             return
         print(f"[SONIC] recording command received: {command}")
 
+        def on_save_complete(success: bool) -> None:
+            self._save_completion_state = "success" if success else "failure"
+
         if command == "start":
             self._begin_episode_recording()
 
@@ -2556,14 +2973,10 @@ class SonicActionProvider(ActionProvider):
                 self._recording_display_state = "saving"
                 self._recording_display_counter = 0
                 self._save_in_progress = True
-                self.recording_manager.save_recording(completion_callback=None)
-                self.recording_manager.save_queue.join()
-                print("[SONIC] save completed")
-                self._save_in_progress = False
+                self.recording_manager.save_recording(completion_callback=on_save_complete)
+                self._pending_save_jobs = self.recording_manager.get_pending_save_count()
+                print(f"[SONIC] save queued (pending={self._pending_save_jobs})")
                 self._recording_active = False
-                self._recording_display_state = "saved"
-                self._recording_display_counter = 0
-                self._save_completion_state = None
                 self._episode_id += 1
 
         elif command == "cancel":
@@ -2571,7 +2984,8 @@ class SonicActionProvider(ActionProvider):
             self._recording_active = False
             self._recording_display_state = "discard"
             self._recording_display_counter = 0
-            self._save_in_progress = False
+            self._pending_save_jobs = self.recording_manager.get_pending_save_count()
+            self._save_in_progress = self._pending_save_jobs > 0
 
         elif command == "save_and_reset":
             if self.recording_manager.is_recording:
@@ -2580,10 +2994,9 @@ class SonicActionProvider(ActionProvider):
                 self._recording_display_counter = 0
                 self._save_in_progress = True
                 print("[SONIC] saving recording...")
-                self.recording_manager.save_recording(completion_callback=None)
-                self.recording_manager.save_queue.join()
-                print("[SONIC] save completed")
-                self._save_in_progress = False
+                self.recording_manager.save_recording(completion_callback=on_save_complete)
+                self._pending_save_jobs = self.recording_manager.get_pending_save_count()
+                print(f"[SONIC] save queued (pending={self._pending_save_jobs})")
             self._recording_active = False
             print("[SONIC] triggering complete reset...")
             self._trigger_complete_reset()
@@ -2596,13 +3009,89 @@ class SonicActionProvider(ActionProvider):
             self._recording_active = False
             self._recording_display_state = "discard"
             self._recording_display_counter = 0
-            self._save_in_progress = False
+            self._pending_save_jobs = self.recording_manager.get_pending_save_count()
+            self._save_in_progress = self._pending_save_jobs > 0
             print("[SONIC] triggering complete reset...")
             self._trigger_complete_reset()
             self._waiting_for_reset_complete = True
             self._reset_complete_received = False
 
         self._recording_command = "none"
+
+    def _build_current_canonical_actions(
+        self,
+        *,
+        sonic_targets: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, dict[str, bool]]:
+        controller_data_for_action = self._consumed_controller_data
+        if controller_data_for_action is None:
+            controller_data_for_action = self._raw_controller_data
+        controller_binary = _extract_controller_binary_signals(controller_data_for_action)
+        vla_action_hand_binary = np.array(
+            [
+                float(self._left_hand_binary_state) if self._use_lerobot_vla else float(controller_binary["left_grip_binary"]),
+                float(self._right_hand_binary_state) if self._use_lerobot_vla else float(controller_binary["right_grip_binary"]),
+            ],
+            dtype=np.float32,
+        )
+
+        if self._use_lerobot_vla and self._latest_vla_action is not None:
+            canonical_action_raw = np.asarray(self._latest_vla_action, dtype=np.float32).copy()
+            canonical_action_aligned = canonical_action_raw.copy()
+            return canonical_action_raw, canonical_action_aligned, controller_binary
+
+        pose_payload = self._latest_pose_payload if isinstance(self._latest_pose_payload, dict) else {}
+        body_pos = pose_payload.get("body_pos")
+        body_quat_w = pose_payload.get("body_quat_w")
+        joint_pos_ref = pose_payload.get("joint_pos", sonic_targets)
+
+        if body_pos is not None and body_quat_w is not None:
+            canonical_action_raw = self._canonical_pose_recorder.step(
+                body_pos_world=np.asarray(body_pos, dtype=np.float32),
+                body_quat_wxyz=np.asarray(body_quat_w, dtype=np.float32),
+                joint_pos_canonical_29=np.asarray(joint_pos_ref, dtype=np.float32),
+                hand_binary=vla_action_hand_binary,
+            )
+        else:
+            robot = self.env.scene["robot"].data
+            root_state = robot.root_state_w
+            canonical_action_raw = np.concatenate(
+                [
+                    np.zeros((2,), dtype=np.float32),
+                    root_state[0, 2:3].cpu().numpy().astype(np.float32),
+                    quat_to_rotation_6d(root_state[0, 3:7].cpu().numpy().astype(np.float32).reshape(1, 4))[0],
+                    np.asarray(joint_pos_ref, dtype=np.float32).reshape(29),
+                    vla_action_hand_binary,
+                ],
+                axis=0,
+            ).astype(np.float32)
+
+        canonical_action_aligned = _apply_heading_align_to_vla_action(
+            canonical_action_raw,
+            align_quat_wxyz=self._anchor_heading_align_quat_wxyz,
+            use_heading_align=self._anchor_use_heading_align,
+        )
+        return canonical_action_raw, canonical_action_aligned, controller_binary
+
+    def _copy_action_bundle(self, bundle: dict[str, Any]) -> dict[str, Any]:
+        copied: dict[str, Any] = {}
+        for key, value in bundle.items():
+            if isinstance(value, np.ndarray):
+                copied[key] = value.astype(np.float32, copy=True)
+            else:
+                copied[key] = value
+        return copied
+
+    def _build_action_execution_bundle(self, target_sonic: np.ndarray) -> dict[str, Any]:
+        return {
+            "body_action_29dof": np.asarray(target_sonic, dtype=np.float32).reshape(29).copy(),
+            "canonical_action_raw": self._latest_canonical_action_raw.astype(np.float32, copy=True),
+            "canonical_action_aligned": self._latest_canonical_action.astype(np.float32, copy=True),
+            "source_frame_index": int(self._latest_frame_index),
+            "source_timestamp_realtime": float(self._latest_timestamp_realtime),
+            "source_timestamp_monotonic": float(self._latest_timestamp_monotonic),
+            "source_control_step": int(self._latest_consumed_control_step),
+        }
 
     def _collect_env_state(self) -> dict[str, Any]:
         return collect_recordable_env_object_states(self.env, self.env.cfg)
@@ -2632,7 +3121,10 @@ class SonicActionProvider(ActionProvider):
         root_state = robot.root_state_w
         joint_pos = robot.joint_pos[0, self._sonic_idx].cpu().numpy().astype(np.float32)
         joint_vel = robot.joint_vel[0, self._sonic_idx].cpu().numpy().astype(np.float32)
-        controller_binary = _extract_controller_binary_signals(self._latest_controller_data)
+        raw_controller_binary = _extract_controller_binary_signals(self._raw_controller_data)
+        consumed_controller_binary = _extract_controller_binary_signals(
+            self._consumed_controller_data if self._consumed_controller_data is not None else self._raw_controller_data
+        )
         canonical_state = build_vla_observation_state(
             root_orientation_wxyz=root_state[0, 3:7].cpu().numpy().astype(np.float32),
             joint_pos_canonical_29=joint_pos,
@@ -2646,38 +3138,33 @@ class SonicActionProvider(ActionProvider):
             ],
             axis=0,
         )
-        vla_action_hand_binary = np.array(
-            [
-                float(self._left_hand_binary_state) if self._use_lerobot_vla else float(controller_binary["left_grip_binary"]),
-                float(self._right_hand_binary_state) if self._use_lerobot_vla else float(controller_binary["right_grip_binary"]),
-            ],
+        vla_action_hand_binary = self._latest_canonical_action[38:40].astype(np.float32, copy=True)
+        canonical_action_raw = self._latest_canonical_action_raw.astype(np.float32, copy=True)
+        canonical_action = self._latest_canonical_action.astype(np.float32, copy=True)
+        canonical_action_executed_raw = self._latest_executed_canonical_action_raw.astype(np.float32, copy=True)
+        canonical_action_executed = self._latest_executed_canonical_action.astype(np.float32, copy=True)
+        pose_payload_raw = self._raw_pose_payload if isinstance(self._raw_pose_payload, dict) else {}
+        pose_payload_consumed = self._latest_pose_payload if isinstance(self._latest_pose_payload, dict) else {}
+        raw_body_quat_w = np.asarray(
+            pose_payload_raw.get("body_quat_w", np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)),
             dtype=np.float32,
-        )
-        if self._use_lerobot_vla and self._latest_vla_action is not None:
-            canonical_action = np.asarray(self._latest_vla_action, dtype=np.float32).copy()
-        else:
-            pose_payload = self._latest_pose_payload if isinstance(self._latest_pose_payload, dict) else {}
-            body_pos = pose_payload.get("body_pos")
-            body_quat_w = pose_payload.get("body_quat_w")
-            joint_pos_ref = pose_payload.get("joint_pos", sonic_targets)
-            if body_pos is not None and body_quat_w is not None:
-                canonical_action = self._canonical_pose_recorder.step(
-                    body_pos_world=np.asarray(body_pos, dtype=np.float32),
-                    body_quat_wxyz=np.asarray(body_quat_w, dtype=np.float32),
-                    joint_pos_canonical_29=np.asarray(joint_pos_ref, dtype=np.float32),
-                    hand_binary=vla_action_hand_binary,
-                )
-            else:
-                canonical_action = np.concatenate(
-                    [
-                        np.zeros((2,), dtype=np.float32),
-                        root_state[0, 2:3].cpu().numpy().astype(np.float32),
-                        quat_to_rotation_6d(root_state[0, 3:7].cpu().numpy().astype(np.float32).reshape(1, 4))[0],
-                        sonic_targets.astype(np.float32).copy(),
-                        vla_action_hand_binary,
-                    ],
-                    axis=0,
-                ).astype(np.float32)
+        ).reshape(4)
+        consumed_body_quat_w = np.asarray(
+            pose_payload_consumed.get("body_quat_w", raw_body_quat_w),
+            dtype=np.float32,
+        ).reshape(4)
+        consumed_body_pos = np.asarray(
+            pose_payload_consumed.get("body_pos", np.zeros((3,), dtype=np.float32)),
+            dtype=np.float32,
+        ).reshape(3)
+        raw_body_pos = np.asarray(
+            pose_payload_raw.get("body_pos", consumed_body_pos),
+            dtype=np.float32,
+        ).reshape(3)
+        consumed_joint_pos = np.asarray(
+            pose_payload_consumed.get("joint_pos", sonic_targets),
+            dtype=np.float32,
+        ).reshape(29)
         return {
             "meta": {
                 "task": self.task_name,
@@ -2694,10 +3181,22 @@ class SonicActionProvider(ActionProvider):
             "episode_init_env": self._episode_init_env_state,
             "markers": {
                 "frame_index": int(self._latest_frame_index),
+                "raw_frame_index": int(self._raw_input_frame_index),
+                "consumed_frame_index": int(self._latest_frame_index),
                 "episode_step": int(self.recording_manager.frame_count),
                 "timestamp_wall": float(time.time()),
                 "timestamp_monotonic": float(self._latest_timestamp_monotonic),
                 "timestamp_realtime": float(self._latest_timestamp_realtime),
+                "raw_timestamp_monotonic": float(self._raw_input_timestamp_monotonic),
+                "raw_timestamp_realtime": float(self._raw_input_timestamp_realtime),
+                "consumed_timestamp_monotonic": float(self._latest_timestamp_monotonic),
+                "consumed_timestamp_realtime": float(self._latest_timestamp_realtime),
+                "consumed_new_this_step": bool(self._latest_consumed_new_this_step),
+                "consumed_control_step": int(self._latest_consumed_control_step),
+                "executed_source_frame_index": int(self._latest_executed_source_frame_index),
+                "executed_source_timestamp_realtime": float(self._latest_executed_source_timestamp_realtime),
+                "executed_source_timestamp_monotonic": float(self._latest_executed_source_timestamp_monotonic),
+                "executed_source_control_step": int(self._latest_executed_source_control_step),
                 "recording_command": self._command_edge_this_frame,
                 "reset_requested": bool(
                     self._waiting_for_reset_complete
@@ -2710,14 +3209,20 @@ class SonicActionProvider(ActionProvider):
                 "smplx_frame": self._latest_human_smplx_frame,
                 "left_hand": self._left_hand_target.copy(),
                 "right_hand": self._right_hand_target.copy(),
-                "controller_data": self._latest_controller_data,
-                "controller_binary": controller_binary,
+                "controller_data": self._raw_controller_data,
+                "controller_binary": raw_controller_binary,
                 "recording_control": self._latest_recording_control,
+                "body_quat_w": raw_body_quat_w.copy(),
+                "body_pos": raw_body_pos.copy(),
             },
             "human_processed": {
                 "smpl_joints": self._smpl_joints_buf[-1].copy(),
                 "smpl_pose": self._smpl_pose_buf[-1].copy(),
-                "body_quat_w": self._ref_body_quat_window[-1].copy(),
+                "body_quat_w": consumed_body_quat_w.copy(),
+                "body_quat_w_aligned": self._latest_aligned_body_quat_wxyz.copy(),
+                "body_pos": consumed_body_pos.copy(),
+                "joint_pos": consumed_joint_pos.copy(),
+                "anchor_rot6d": self._latest_consumed_anchor_rot6d.copy(),
                 "vr_position": self._vr_3pt_position.copy(),
                 "vr_orientation": self._vr_3pt_orientation.copy(),
                 "heading_increment": np.array([self._latest_heading_increment], dtype=np.float32),
@@ -2760,6 +3265,7 @@ class SonicActionProvider(ActionProvider):
             },
             "action": {
                 "body_action_29dof": sonic_targets.astype(np.float32).copy(),
+                "body_action_29dof_pre_delay": self._latest_decoder_target.astype(np.float32, copy=True),
                 "full_action": full_action.detach().cpu().numpy().astype(np.float32),
                 "body_effort_target": body_effort_target.astype(np.float32).copy(),
                 "hand_action_left": self._left_hand_target.copy(),
@@ -2769,7 +3275,12 @@ class SonicActionProvider(ActionProvider):
                 "action_body_token": vla_action_body,
                 "action_hand_binary": vla_action_hand_binary,
                 "canonical_state": canonical_state,
+                "canonical_action_raw": canonical_action_raw,
                 "canonical_action": canonical_action,
+                "canonical_action_executed_raw": canonical_action_executed_raw,
+                "canonical_action_executed": canonical_action_executed,
+                "canonical_action_semantics": np.array("consumed_aligned"),
+                "canonical_action_heading_aligned": np.array(True, dtype=np.bool_),
             },
             "env": {
                 **self._collect_env_state(),
@@ -3121,19 +3632,20 @@ class SonicActionProvider(ActionProvider):
         except Exception as e:
             print(f"[REDIS] Failed to read from Redis: {e}")
             return
-        self._latest_controller_data = None
+        controller_data = None
         if controller_raw is not None:
             try:
                 payload = controller_raw.decode("utf-8") if isinstance(controller_raw, bytes) else controller_raw
-                self._latest_controller_data = json.loads(payload)
+                controller_data = json.loads(payload)
             except Exception:
-                self._latest_controller_data = None
+                controller_data = None
+        self._raw_controller_data = controller_data
         self._update_input_ready_guard(ready_guard_raw)
-        if self._is_stale_controller_payload(self._latest_controller_data):
+        if self._is_stale_controller_payload(controller_data):
             if self._input_ready_epoch_id != self._stale_input_drop_logged_epoch:
                 controller_ts = "n/a"
-                if isinstance(self._latest_controller_data, dict):
-                    controller_ts = self._latest_controller_data.get("timestamp_realtime", "n/a")
+                if isinstance(controller_data, dict):
+                    controller_ts = controller_data.get("timestamp_realtime", "n/a")
                 print(
                     f"[SonicActionProvider] Ignoring stale SONIC input: "
                     f"controller_ts={controller_ts}, "
@@ -3254,24 +3766,20 @@ class SonicActionProvider(ActionProvider):
         except Exception as e:
             print(f"[REDIS] Failed to convert frame to pose fields: {e}")
             return
-        self._latest_frame_index = int(np.asarray(data.get("frame_index", [self._redis_frame_index])).reshape(-1)[-1])
-        if "timestamp_realtime" in data:
-            self._latest_timestamp_realtime = float(np.asarray(data["timestamp_realtime"]).reshape(-1)[-1])
-        if "timestamp_monotonic" in data:
-            self._latest_timestamp_monotonic = float(np.asarray(data["timestamp_monotonic"]).reshape(-1)[-1])
-        if "heading_increment" in data:
-            self._latest_heading_increment = float(np.asarray(data["heading_increment"]).reshape(-1)[-1])
         self._apply_pose_data(data, "redis")
 
-    def _apply_pose_data(self, data: dict, source: str = "zmq"):
+    def _apply_pose_data(self, data: dict, source: str = "zmq") -> bool:
         debug_log = self._sonic_debug and (
             self._frame_count <= 3 or self._frame_count % self._sonic_log_every == 0
         )
-        # 在函数开头添加
+        is_vla_joint29_source = source == "lerobot_vla_joint29"
+        self._latest_consumed_new_this_step = False
+        consume_pose_frame = True
+        current_frame_index = None
         if "timestamp_realtime" in data:
             current_ts = float(data["timestamp_realtime"][0] if data["timestamp_realtime"].ndim > 0
                                else data["timestamp_realtime"])
-            self._latest_timestamp_realtime = current_ts
+            self._raw_input_timestamp_realtime = current_ts
 
             if not hasattr(self, "_smpl_ts_history"):
                 self._smpl_ts_history = []
@@ -3289,7 +3797,7 @@ class SonicActionProvider(ActionProvider):
                       f"intervals_ms={[f'{x:.1f}' for x in intervals]} "
                       f"mean={np.mean(intervals):.1f}ms")
         if "timestamp_monotonic" in data:
-            self._latest_timestamp_monotonic = float(
+            self._raw_input_timestamp_monotonic = float(
                 data["timestamp_monotonic"][0]
                 if np.asarray(data["timestamp_monotonic"]).ndim > 0
                 else data["timestamp_monotonic"]
@@ -3299,23 +3807,35 @@ class SonicActionProvider(ActionProvider):
         if "frame_index" in data:
             raw_frame_indices = np.asarray(data["frame_index"], dtype=np.int64).reshape(-1)
             if raw_frame_indices.size > 0:
-                self._latest_frame_index = int(raw_frame_indices[-1])
+                current_frame_index = int(raw_frame_indices[-1])
+                self._raw_input_frame_index = current_frame_index
+
             current_idx = int(data["frame_index"][0] if hasattr(data["frame_index"], '__len__')
                               else data["frame_index"])
+            current_frame_index = int(current_frame_index if current_frame_index is not None else current_idx)
 
-            if not hasattr(self, "_last_frame_index"):
-                self._last_frame_index = current_idx - 1
+            if self._last_raw_frame_index < 0:
+                self._last_raw_frame_index = current_frame_index - 1
 
-            expected_idx = self._last_frame_index + 1
-            skip_count = current_idx - expected_idx
+            expected_idx = self._last_raw_frame_index + 1
+            skip_count = current_frame_index - expected_idx
 
             if debug_log and skip_count > 0:
                 print(f"[FRAME_SKIP_TEST] frame={self._frame_count} "
-                      f"expected={expected_idx} got={current_idx} skipped={skip_count}")
+                      f"expected={expected_idx} got={current_frame_index} skipped={skip_count}")
 
-            self._last_frame_index = current_idx
+            self._last_raw_frame_index = current_frame_index
+            consume_pose_frame = current_frame_index > self._latest_frame_index
 
-
+        if consume_pose_frame:
+            if current_frame_index is not None:
+                self._latest_frame_index = int(current_frame_index)
+            self._latest_timestamp_realtime = float(self._raw_input_timestamp_realtime)
+            self._latest_timestamp_monotonic = float(self._raw_input_timestamp_monotonic)
+            self._latest_consumed_new_this_step = True
+            self._latest_consumed_control_step = int(self._frame_count)
+            self._latest_controller_data = self._raw_controller_data
+            self._consumed_controller_data = self._raw_controller_data
 
         """用解析后的 pose 字典更新 SMPL/机器人/手部缓冲。data 格式与 ZMQ v3 一致。"""
         tag = source.upper()
@@ -3332,6 +3852,9 @@ class SonicActionProvider(ActionProvider):
         latest_anchor_rot6d_frame = None
         latest_joint_pos_frame = None
         latest_joint_vel_frame = None
+        latest_transl = None
+        ref_quat_wxyz = None
+        aligned_ref_quat_wxyz = None
 
         # smpl_joints: (N, 24, 3) - 本地 provider 采用最新帧滚动历史
         if "smpl_joints" in data:
@@ -3339,15 +3862,17 @@ class SonicActionProvider(ActionProvider):
             raw_smpl_joints_window = sj if sj.ndim > 2 else sj[np.newaxis, ...]
             frame = sj[-1] if sj.ndim > 2 else sj
             if np.abs(frame).sum() > 0.01:
-                self._smpl_data_valid = True
-                if debug_log:
+                if consume_pose_frame:
+                    self._smpl_data_valid = True
+                if debug_log and consume_pose_frame:
                     print(f"[{tag}] SMPL data marked as VALID")
                 latest_smpl_joints_frame = frame.copy()
-            self._smpl_joints_buf = np.roll(self._smpl_joints_buf, -1, axis=0)
-            self._smpl_joints_buf[-1] = frame
-            if sj.ndim > 2 and sj.shape[0] > 0:
-                self._ref_smpl_joints_window[:] = build_future_window(sj, _STEP1_FRAMES)
-                self._ref_window_valid = True
+            if consume_pose_frame:
+                self._smpl_joints_buf = np.roll(self._smpl_joints_buf, -1, axis=0)
+                self._smpl_joints_buf[-1] = frame
+                if sj.ndim > 2 and sj.shape[0] > 0:
+                    self._ref_smpl_joints_window[:] = build_future_window(sj, _STEP1_FRAMES)
+                    self._ref_window_valid = True
             got_pose_frame = True
 
         # smpl_pose: (N, 21, 3) - 本地 provider 采用最新帧滚动历史
@@ -3355,8 +3880,9 @@ class SonicActionProvider(ActionProvider):
             sp = data["smpl_pose"].astype(np.float32)    # (N, 21, 3)
             frame = sp[-1] if sp.ndim > 2 else sp
             latest_smpl_pose_frame = frame.copy()
-            self._smpl_pose_buf = np.roll(self._smpl_pose_buf, -1, axis=0)
-            self._smpl_pose_buf[-1] = frame
+            if consume_pose_frame:
+                self._smpl_pose_buf = np.roll(self._smpl_pose_buf, -1, axis=0)
+                self._smpl_pose_buf[-1] = frame
 
         # body_quat_w: (N, 4) → 转换为6D旋转表示
         # 本地 provider 采用最新参考帧滚动历史；直接覆盖整窗会破坏本地时间基准
@@ -3374,15 +3900,22 @@ class SonicActionProvider(ActionProvider):
             robot = self.env.scene["robot"].data
             base_quat_wxyz = robot.root_state_w[0, 3:7].cpu().numpy().astype(np.float32)  # [w,x,y,z]
 
-            if not self._anchor_heading_initialized:
+            if consume_pose_frame and (not self._anchor_heading_initialized):
                 self._anchor_init_base_quat_wxyz[:] = quat_normalize_wxyz(base_quat_wxyz)
                 self._anchor_init_ref_quat_wxyz[:] = ref_quat_wxyz
-                self._anchor_heading_align_quat_wxyz[:] = quat_mul_wxyz(
-                    quat_heading_wxyz(self._anchor_init_base_quat_wxyz),
-                    quat_conjugate_wxyz(quat_heading_wxyz(self._anchor_init_ref_quat_wxyz)),
-                )
+                if is_vla_joint29_source and (not self._vla_use_heading_align):
+                    # Optional: disable heading align for VLA path to compare behavior.
+                    self._anchor_heading_align_quat_wxyz[:] = np.array(
+                        [1.0, 0.0, 0.0, 0.0], dtype=np.float32
+                    )
+                    self._anchor_use_heading_align = False
+                else:
+                    self._anchor_heading_align_quat_wxyz[:] = quat_mul_wxyz(
+                        quat_heading_wxyz(self._anchor_init_base_quat_wxyz),
+                        quat_conjugate_wxyz(quat_heading_wxyz(self._anchor_init_ref_quat_wxyz)),
+                    )
+                    self._anchor_use_heading_align = True
                 self._anchor_heading_initialized = True
-                self._anchor_use_heading_align = True
                 raw_init_angle_deg = quat_angle_deg_wxyz(
                     quat_mul_wxyz(
                         quat_conjugate_wxyz(self._anchor_init_base_quat_wxyz),
@@ -3432,20 +3965,23 @@ class SonicActionProvider(ActionProvider):
             if debug_log:
                 print(f"[{tag}] converted to rot6d latest: {rot6d_latest}")
             latest_anchor_rot6d_frame = rot6d_latest.copy()
-            self._body_rot6d_buf = np.roll(self._body_rot6d_buf, -1, axis=0)
-            self._body_rot6d_buf[-1] = rot6d_latest
-            self._motion_anchor_rot6d_hist = np.roll(self._motion_anchor_rot6d_hist, -1, axis=0)
-            self._motion_anchor_rot6d_hist[-1] = rot6d_latest
-            if self._sonic_joint29_mode:
-                if self._smpl_history_fill == 0 and not self._ref_window_valid:
-                    self._ref_body_quat_window[:] = ref_quat_wxyz
-                else:
-                    self._ref_body_quat_window = np.roll(self._ref_body_quat_window, -1, axis=0)
-                    self._ref_body_quat_window[-1] = ref_quat_wxyz
-                self._ref_window_valid = True
-            elif bq.ndim > 1 and bq.shape[0] > 0:
-                self._ref_body_quat_window[:] = build_future_window(bq, _STEP1_FRAMES)
-                self._ref_window_valid = True
+            if consume_pose_frame:
+                self._latest_aligned_body_quat_wxyz[:] = aligned_ref_quat_wxyz.astype(np.float32, copy=False)
+                self._latest_consumed_anchor_rot6d[:] = rot6d_latest.astype(np.float32, copy=False)
+                self._body_rot6d_buf = np.roll(self._body_rot6d_buf, -1, axis=0)
+                self._body_rot6d_buf[-1] = rot6d_latest
+                self._motion_anchor_rot6d_hist = np.roll(self._motion_anchor_rot6d_hist, -1, axis=0)
+                self._motion_anchor_rot6d_hist[-1] = rot6d_latest
+                if self._sonic_joint29_mode:
+                    if self._smpl_history_fill == 0 and not self._ref_window_valid:
+                        self._ref_body_quat_window[:] = ref_quat_wxyz
+                    else:
+                        self._ref_body_quat_window = np.roll(self._ref_body_quat_window, -1, axis=0)
+                        self._ref_body_quat_window[-1] = ref_quat_wxyz
+                    self._ref_window_valid = True
+                elif bq.ndim > 1 and bq.shape[0] > 0:
+                    self._ref_body_quat_window[:] = build_future_window(bq, _STEP1_FRAMES)
+                    self._ref_window_valid = True
 
         if "adjusted_transl" in data:
             adjusted_transl = data["adjusted_transl"].astype(np.float32)
@@ -3463,7 +3999,7 @@ class SonicActionProvider(ActionProvider):
                 root_z_value = None
                 root_z_source = None
 
-        if root_z_value is not None:
+        if root_z_value is not None and consume_pose_frame:
             self._motion_root_z_hist = np.roll(self._motion_root_z_hist, -1, axis=0)
             self._motion_root_z_hist[-1] = root_z_value
             if debug_log:
@@ -3473,7 +4009,7 @@ class SonicActionProvider(ActionProvider):
                     f"value={root_z_value:.4f}"
                 )
 
-        if got_pose_frame:
+        if got_pose_frame and consume_pose_frame:
             self._smpl_history_fill = min(_STEP1_FRAMES, self._smpl_history_fill + 1)
             if debug_log:
                 print(
@@ -3486,14 +4022,18 @@ class SonicActionProvider(ActionProvider):
         if "joint_pos" in data:
             jp = data["joint_pos"].astype(np.float32)
             raw_joint_pos_window = jp if jp.ndim > 1 else jp[np.newaxis, ...]
-            self._robot_joint_pos = jp[-1] if jp.ndim > 1 else jp
-            latest_joint_pos_frame = self._robot_joint_pos.copy()
-            self._motion_joint_pos_hist = np.roll(self._motion_joint_pos_hist, -1, axis=0)
-            self._motion_joint_pos_hist[-1] = self._robot_joint_pos
-            if jp.ndim > 1 and jp.shape[0] > 0:
-                self._ref_joint_pos_window[:] = build_future_window(jp, _STEP1_FRAMES)
-                self._ref_window_valid = True
-            if debug_log:
+            joint_pos_latest = jp[-1] if jp.ndim > 1 else jp
+            latest_joint_pos_frame = joint_pos_latest.copy()
+            motion_joint_pos_frame = joint_pos_latest
+            if consume_pose_frame:
+                self._robot_joint_pos = joint_pos_latest
+                self._motion_joint_pos_hist = np.roll(self._motion_joint_pos_hist, -1, axis=0)
+                self._motion_joint_pos_hist[-1] = motion_joint_pos_frame
+                if jp.ndim > 1 and jp.shape[0] > 0:
+                    ref_joint_pos_window = build_future_window(jp, _STEP1_FRAMES)
+                    self._ref_joint_pos_window[:] = ref_joint_pos_window
+                    self._ref_window_valid = True
+            if debug_log and consume_pose_frame:
                 wrist_ref = self._motion_joint_pos_hist[-1, OFFICIAL_WRIST_INDICES]
                 print(
                     f"[{tag}][REF_JOINT_POS] "
@@ -3504,11 +4044,13 @@ class SonicActionProvider(ActionProvider):
         if "joint_vel" in data:
             jv = data["joint_vel"].astype(np.float32)
             raw_joint_vel_window = jv if jv.ndim > 1 else jv[np.newaxis, ...]
-            self._robot_joint_vel = jv[-1] if jv.ndim > 1 else jv
-            latest_joint_vel_frame = self._robot_joint_vel.copy()
-            self._motion_joint_vel_hist = np.roll(self._motion_joint_vel_hist, -1, axis=0)
-            self._motion_joint_vel_hist[-1] = self._robot_joint_vel
-            if debug_log:
+            joint_vel_latest = jv[-1] if jv.ndim > 1 else jv
+            latest_joint_vel_frame = joint_vel_latest.copy()
+            if consume_pose_frame:
+                self._robot_joint_vel = joint_vel_latest
+                self._motion_joint_vel_hist = np.roll(self._motion_joint_vel_hist, -1, axis=0)
+                self._motion_joint_vel_hist[-1] = self._robot_joint_vel
+            if debug_log and consume_pose_frame:
                 print(
                     f"[{tag}][REF_JOINT_VEL] "
                     f"range={array_range_str(self._robot_joint_vel)}"
@@ -3520,31 +4062,36 @@ class SonicActionProvider(ActionProvider):
             or "body_quat_w" in data
             or "adjusted_transl" in data
         ):
-            payload = dict(self._latest_pose_payload) if isinstance(self._latest_pose_payload, dict) else {}
+            payload = dict(self._raw_pose_payload) if isinstance(self._raw_pose_payload, dict) else {}
             if latest_joint_pos_frame is not None:
                 payload["joint_pos"] = latest_joint_pos_frame.astype(np.float32, copy=True)
             if latest_joint_vel_frame is not None:
                 payload["joint_vel"] = latest_joint_vel_frame.astype(np.float32, copy=True)
-            if "body_quat_w" in data:
+            if ref_quat_wxyz is not None:
                 payload["body_quat_w"] = ref_quat_wxyz.astype(np.float32, copy=True)
-            if "adjusted_transl" in data and latest_transl.shape[0] >= 3:
+            if latest_transl is not None and latest_transl.shape[0] >= 3:
                 payload["body_pos"] = latest_transl[:3].astype(np.float32, copy=True)
             elif root_z_value is not None:
                 body_pos = np.asarray(payload.get("body_pos", np.zeros((3,), dtype=np.float32)), dtype=np.float32).reshape(3)
                 body_pos[2] = float(root_z_value)
                 payload["body_pos"] = body_pos
-            self._latest_pose_payload = payload
+            self._raw_pose_payload = payload
+            if consume_pose_frame:
+                self._latest_pose_payload = {
+                    key: np.asarray(value, dtype=np.float32).copy()
+                    for key, value in payload.items()
+                }
 
         # 手部关节
-        if "left_hand_joints" in data:
+        if "left_hand_joints" in data and consume_pose_frame:
             lh = data["left_hand_joints"].flatten().astype(np.float32)
             self._left_hand_target[:len(lh)] = lh[:7]
-        if "right_hand_joints" in data:
+        if "right_hand_joints" in data and consume_pose_frame:
             rh = data["right_hand_joints"].flatten().astype(np.float32)
             self._right_hand_target[:len(rh)] = rh[:7]
 
         # VR 3点姿态（来自 SMPL，用于 encoder 输入）
-        if "vr_position" in data:
+        if "vr_position" in data and consume_pose_frame:
             vr_pos = data["vr_position"].astype(np.float32)  # (9,)
             self._vr_3pt_position = vr_pos.flatten()
             if debug_log:
@@ -3552,7 +4099,7 @@ class SonicActionProvider(ActionProvider):
                     f"[{tag}][VR_3PT_POS] "
                     f"range={array_range_str(self._vr_3pt_position)}"
                 )
-        if "vr_orientation" in data:
+        if "vr_orientation" in data and consume_pose_frame:
             vr_orn = data["vr_orientation"].astype(np.float32)  # (12,)
             self._vr_3pt_orientation = vr_orn.flatten()
             if debug_log:
@@ -3560,7 +4107,7 @@ class SonicActionProvider(ActionProvider):
                     f"[{tag}][VR_3PT_ORN] "
                     f"range={array_range_str(self._vr_3pt_orientation)}"
                 )
-        if "heading_increment" in data:
+        if "heading_increment" in data and consume_pose_frame:
             self._latest_heading_increment = float(np.asarray(data["heading_increment"]).reshape(-1)[-1])
 
         if (
@@ -3594,6 +4141,7 @@ class SonicActionProvider(ActionProvider):
             and self._smpl_data_valid
             and self._smpl_history_fill == 0
             and latest_smpl_joints_frame is not None
+            and consume_pose_frame
         ):
             self._bootstrap_pose_histories(
                 smpl_joints_frame=latest_smpl_joints_frame,
@@ -3605,6 +4153,7 @@ class SonicActionProvider(ActionProvider):
             )
             if debug_log:
                 print(f"[{tag}][HISTORY_BOOTSTRAP] filled startup pose history with first valid frame")
+        return consume_pose_frame
 
     def _fetch_redis_joint29_pose(self):
         """Read GMR joint29 Redis stream and adapt it to the shared pose-application path."""
@@ -3646,20 +4195,21 @@ class SonicActionProvider(ActionProvider):
             print(f"[REDIS][JOINT29] Failed to read from Redis: {e}")
             return
 
-        self._latest_controller_data = None
+        controller_data = None
         if controller_raw is not None:
             try:
                 payload = controller_raw.decode("utf-8") if isinstance(controller_raw, bytes) else controller_raw
-                self._latest_controller_data = json.loads(payload)
+                controller_data = json.loads(payload)
             except Exception:
-                self._latest_controller_data = None
+                controller_data = None
+        self._raw_controller_data = controller_data
 
         self._update_input_ready_guard(ready_guard_raw)
-        if self._is_stale_controller_payload(self._latest_controller_data):
+        if self._is_stale_controller_payload(controller_data):
             if self._input_ready_epoch_id != self._stale_input_drop_logged_epoch:
                 controller_ts = "n/a"
-                if isinstance(self._latest_controller_data, dict):
-                    controller_ts = self._latest_controller_data.get("timestamp_realtime", "n/a")
+                if isinstance(controller_data, dict):
+                    controller_ts = controller_data.get("timestamp_realtime", "n/a")
                 print(
                     f"[SonicActionProvider] Ignoring stale SONIC joint29 input: "
                     f"controller_ts={controller_ts}, "
@@ -3744,15 +4294,15 @@ class SonicActionProvider(ActionProvider):
 
         timestamp_realtime = None
         timestamp_monotonic = None
-        if isinstance(self._latest_controller_data, dict):
+        if isinstance(controller_data, dict):
             try:
-                controller_realtime = self._latest_controller_data.get("timestamp_realtime")
+                controller_realtime = controller_data.get("timestamp_realtime")
                 if controller_realtime is not None:
                     timestamp_realtime = float(controller_realtime)
             except Exception:
                 timestamp_realtime = None
             try:
-                controller_monotonic = self._latest_controller_data.get("timestamp_monotonic")
+                controller_monotonic = controller_data.get("timestamp_monotonic")
                 if controller_monotonic is not None:
                     timestamp_monotonic = float(controller_monotonic)
             except Exception:
@@ -3774,6 +4324,7 @@ class SonicActionProvider(ActionProvider):
             "frame_index": np.array([frame_index], dtype=np.int64),
             "timestamp_realtime": np.array([timestamp_realtime or 0.0], dtype=np.float64),
             "timestamp_monotonic": np.array([timestamp_monotonic], dtype=np.float64),
+            "heading_increment": np.array([0.0], dtype=np.float32),
         }
 
         if raw_left is not None:
@@ -3791,14 +4342,13 @@ class SonicActionProvider(ActionProvider):
             except Exception:
                 pass
 
-        self._latest_pose_payload = {
+        self._raw_pose_payload = {
             "full_qpos": None if full_qpos is None else full_qpos.astype(np.float32, copy=True),
             "joint_pos": joint_pos.astype(np.float32, copy=True),
             "joint_vel": joint_vel.astype(np.float32, copy=True),
             "body_pos": body_pos.astype(np.float32, copy=True),
             "body_quat_w": body_quat_w.astype(np.float32, copy=True),
         }
-        self._latest_heading_increment = 0.0
         self._smpl_data_valid = True
         self._apply_pose_data(data, "redis_joint29")
 
@@ -4183,6 +4733,41 @@ class SonicActionProvider(ActionProvider):
             return self._sonic_default_np.copy()
 
 
+    def _apply_sonic_output_delay(self, target_sonic: np.ndarray) -> dict[str, Any]:
+        """Apply optional control-step output delay to SONIC 29DoF targets."""
+        target = np.asarray(target_sonic, dtype=np.float32).reshape(-1)
+        if target.shape != (29,):
+            bundle = self._build_action_execution_bundle(self._sonic_default_np)
+            self._sonic_last_executed_target = bundle["body_action_29dof"].astype(np.float32, copy=True)
+            self._sonic_last_executed_bundle = self._copy_action_bundle(bundle)
+            self._latest_executed_canonical_action_raw = bundle["canonical_action_raw"].astype(np.float32, copy=True)
+            self._latest_executed_canonical_action = bundle["canonical_action_aligned"].astype(np.float32, copy=True)
+            self._latest_executed_source_frame_index = int(bundle["source_frame_index"])
+            self._latest_executed_source_timestamp_realtime = float(bundle["source_timestamp_realtime"])
+            self._latest_executed_source_timestamp_monotonic = float(bundle["source_timestamp_monotonic"])
+            self._latest_executed_source_control_step = int(bundle["source_control_step"])
+            return bundle
+        current_bundle = self._build_action_execution_bundle(target)
+        if self._sonic_output_delay_steps <= 0:
+            exec_bundle = current_bundle
+        else:
+            self._sonic_output_delay_queue.append(self._copy_action_bundle(current_bundle))
+            if len(self._sonic_output_delay_queue) > self._sonic_output_delay_steps:
+                exec_bundle = self._copy_action_bundle(self._sonic_output_delay_queue.pop(0))
+            else:
+                exec_bundle = self._copy_action_bundle(self._sonic_last_executed_bundle)
+
+        self._sonic_last_executed_target = exec_bundle["body_action_29dof"].astype(np.float32, copy=True)
+        self._sonic_last_executed_bundle = self._copy_action_bundle(exec_bundle)
+        self._latest_executed_canonical_action_raw = exec_bundle["canonical_action_raw"].astype(np.float32, copy=True)
+        self._latest_executed_canonical_action = exec_bundle["canonical_action_aligned"].astype(np.float32, copy=True)
+        self._latest_executed_source_frame_index = int(exec_bundle["source_frame_index"])
+        self._latest_executed_source_timestamp_realtime = float(exec_bundle["source_timestamp_realtime"])
+        self._latest_executed_source_timestamp_monotonic = float(exec_bundle["source_timestamp_monotonic"])
+        self._latest_executed_source_control_step = int(exec_bundle["source_control_step"])
+        return exec_bundle
+
+
     def get_action(self, env) -> Optional[torch.Tensor]:
         try:
             if not hasattr(self, "_runtime_logged"):
@@ -4190,6 +4775,7 @@ class SonicActionProvider(ActionProvider):
                 self._frame_count = 0
                 print("\n[SONIC] Real get_action path enabled")
             self._frame_count += 1
+            self._latest_consumed_new_this_step = False
             self._command_edge_this_frame = "none"
             debug_log = self._sonic_debug and (
                 self._frame_count <= 3 or self._frame_count % self._sonic_log_every == 0
@@ -4257,6 +4843,13 @@ class SonicActionProvider(ActionProvider):
                 sonic_targets = self._run_gear_sonic_from_vla()
             else:
                 sonic_targets = self._run_gear_sonic()
+            canonical_action_raw, canonical_action_aligned, _ = self._build_current_canonical_actions(
+                sonic_targets=sonic_targets
+            )
+            self._latest_canonical_action_raw = canonical_action_raw.astype(np.float32, copy=True)
+            self._latest_canonical_action = canonical_action_aligned.astype(np.float32, copy=True)
+            sonic_exec_bundle = self._apply_sonic_output_delay(sonic_targets)
+            sonic_targets = sonic_exec_bundle["body_action_29dof"].astype(np.float32, copy=True)
 
             if debug_log:
                 sonic_targets_str = np.array2string(

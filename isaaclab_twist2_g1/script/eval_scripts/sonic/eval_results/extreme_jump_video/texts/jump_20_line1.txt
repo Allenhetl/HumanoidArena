@@ -1,0 +1,1 @@
+jump 20/22 | ep=1 frame=425 delta=128.4 deg

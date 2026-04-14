@@ -1,0 +1,13 @@
+{
+  "total_episodes": 1,
+  "total_successes": 0,
+  "overall_success_rate": 0.0,
+  "per_model": {
+    "checkpoints__last": {
+      "model_path": "/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/train/diffusion_twist2_0401/checkpoints/last/pretrained_model",
+      "episodes": 1,
+      "successes": 0,
+      "success_rate": 0.0
+    }
+  }
+}

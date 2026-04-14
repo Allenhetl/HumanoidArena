@@ -15,6 +15,7 @@ from smpl_lerobot_common import (
     build_sonic_actions_from_recording,
     extract_canonical_state,
     find_npz_files,
+    load_vision_rgb_and_indices,
     inspect_image_shape,
     normalize_task,
     prepare_output_root,
@@ -22,11 +23,11 @@ from smpl_lerobot_common import (
 
 
 DEFAULT_INPUT_ROOT = Path(
-    "/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic"
+    "/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic_v3"
 )
 # DEFAULT_OUTPUT_ROOT = Path("/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/HumanoidArena_datasets/HOI_football/0409_sonic_smpl_pose6d")
-DEFAULT_OUTPUT_ROOT = Path("/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/HumanoidArena_datasets/HOI_football/0411_twist2_smpl_pose6d")
-DEFAULT_REPO_ID = "local/sonic-football-0411-64-40"
+DEFAULT_OUTPUT_ROOT = Path("/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/HumanoidArena_datasets/HOI_football/0414_sonic_smpl_pose6d")
+DEFAULT_REPO_ID = "local/sonic-football-0414-64-40"
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,6 +46,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--use-images", action="store_true")
+    parser.set_defaults(align_heading_targets=True)
+    parser.add_argument(
+        "--align-heading-targets",
+        dest="align_heading_targets",
+        action="store_true",
+        help="Rotate SONIC action root orientation/xy delta into heading-aligned frame.",
+    )
+    parser.add_argument(
+        "--no-align-heading-targets",
+        dest="align_heading_targets",
+        action="store_false",
+        help="Keep raw SONIC heading in action targets.",
+    )
     return parser.parse_args()
 
 
@@ -115,8 +129,7 @@ def main() -> None:
                 qpos = np.asarray(data["robot_qpos_before_decimation"], dtype=np.float32)
                 qvel = np.asarray(data["robot_qvel_before_decimation"], dtype=np.float32)
                 root_orientation = np.asarray(data["robot_root_orientation"], dtype=np.float32)
-                vision_rgb = np.asarray(data["vision_rgb"], dtype=np.uint8)
-                vision_frame_indices = np.asarray(data["vision_frame_indices"], dtype=np.int64)
+                vision_rgb, vision_frame_indices = load_vision_rgb_and_indices(data, npz_path)
                 obs_state = extract_canonical_state(
                     data=data,
                     root_orientation=root_orientation,
@@ -126,6 +139,7 @@ def main() -> None:
                 action = build_sonic_actions_from_recording(
                     data,
                     num_frames=qpos.shape[0],
+                    align_heading_targets=args.align_heading_targets,
                 )
 
                 if qpos.ndim != 2 or qpos.shape[1] != 29:

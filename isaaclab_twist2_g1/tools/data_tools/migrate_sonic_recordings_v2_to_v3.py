@@ -1,0 +1,478 @@
+#!/usr/bin/env python3
+"""Replay SONIC v2 recordings and re-record them as v3 episodes."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+ISAACLAB_ROOT = REPO_ROOT / "isaaclab_twist2_g1"
+SIM_MAIN = ISAACLAB_ROOT / "sim_main.py"
+DEFAULT_ISAACLAB_PY = Path(
+    "/home/dreams/miniconda3/envs/unitree_sim_env_isaaclab5_0/bin/python"
+)
+DEFAULT_ENCODER_PATH = Path(
+    "/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_encoder.onnx"
+)
+DEFAULT_DECODER_PATH = Path(
+    "/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_decoder.onnx"
+)
+DEFAULT_BOX_ROBOT_USD = (
+    ISAACLAB_ROOT
+    / "assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2.usd"
+).resolve()
+DEFAULT_FOURPOINTS_ROBOT_USD = (
+    ISAACLAB_ROOT
+    / "assets/robots/g1-29dof_wholebody_dex3/temp/g1_29dof_with_dex3_rev_1_0_fourpoints.usd"
+).resolve()
+DEFAULT_SOURCE_ROOTS = [
+    ISAACLAB_ROOT / "recording_data/HOI_football_v2/sonic",
+    ISAACLAB_ROOT / "recording_data/HOI_double_desk/sonic",
+]
+TASK_TO_ENV_CONFIG = {
+    "Isaac-Move-Football-Single-G129-Dex3-Wholebody": (
+        ISAACLAB_ROOT / "tasks/common_env_config/football_single_sonic.yaml"
+    ).resolve(),
+    "Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody": (
+        ISAACLAB_ROOT / "tasks/common_env_config/doubledesk_sonic.yaml"
+    ).resolve(),
+}
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Batch migrate SONIC v2 NPZ recordings to the latest v3 recording protocol."
+    )
+    parser.add_argument(
+        "source_roots",
+        nargs="*",
+        default=[str(path) for path in DEFAULT_SOURCE_ROOTS],
+        help="Source directories that contain SONIC v2 .npz files.",
+    )
+    parser.add_argument(
+        "--python-bin",
+        type=str,
+        default="auto",
+        help="Python interpreter used to launch sim_main.py. Defaults to an onnxruntime-capable interpreter.",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cpu",
+        help="Device passed to sim_main.py.",
+    )
+    parser.add_argument(
+        "--robot-type",
+        type=str,
+        default="g129",
+        help="Robot type passed to sim_main.py.",
+    )
+    parser.add_argument(
+        "--robot-collider-mode",
+        type=str,
+        default="box",
+        choices=["box", "fourpoints", "default"],
+        help=(
+            "Robot collider/USD preset used for replay migration. "
+            "'box' matches run_replay_sonic.sh and exports ROBOT_USD_OVERRIDE to the m2 USD."
+        ),
+    )
+    parser.add_argument(
+        "--robot-usd-override",
+        type=str,
+        default="",
+        help="Explicit ROBOT_USD_OVERRIDE path. Takes precedence over --robot-collider-mode.",
+    )
+    parser.add_argument(
+        "--replay-mode",
+        type=str,
+        default="direct_replay",
+        choices=["direct", "inference", "direct_replay", "inference_replay"],
+        help="Replay mode used during migration.",
+    )
+    parser.add_argument(
+        "--output-suffix",
+        type=str,
+        default="_v3_migrated",
+        help="Suffix appended beside each source root to store migrated outputs.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Only migrate the first N eligible files across all source roots. 0 means no limit.",
+    )
+    parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=0.0,
+        help="Per-file timeout. 0 disables the timeout.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Seed passed to sim_main.py.",
+    )
+    parser.add_argument(
+        "--recording-save-workers",
+        type=int,
+        default=1,
+        help="Background save workers for the migrated recording.",
+    )
+    parser.add_argument(
+        "--recording-save-queue-size",
+        type=int,
+        default=4,
+        help="Background save queue size for the migrated recording.",
+    )
+    parser.add_argument(
+        "--sonic-encoder-path",
+        type=str,
+        default=str(DEFAULT_ENCODER_PATH),
+        help="GEAR-SONIC encoder path.",
+    )
+    parser.add_argument(
+        "--sonic-decoder-path",
+        type=str,
+        default=str(DEFAULT_DECODER_PATH),
+        help="GEAR-SONIC decoder path.",
+    )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        default=False,
+        help="Run sim_main.py in headless mode.",
+    )
+    parser.add_argument(
+        "--disable-cameras",
+        action="store_true",
+        default=False,
+        help="Disable cameras during migration. By default cameras stay enabled so vision data is re-recorded.",
+    )
+    parser.add_argument(
+        "--disable-dex3",
+        action="store_true",
+        default=False,
+        help="Do not pass --enable_dex3_dds.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="Ignore successful manifest entries and rerun every source file.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Print the planned commands without launching Isaac Lab.",
+    )
+    return parser.parse_args()
+
+
+def resolve_python_bin(requested: str) -> str:
+    if requested != "auto":
+        return requested
+    candidates = [Path(sys.executable)]
+    if DEFAULT_ISAACLAB_PY not in candidates:
+        candidates.append(DEFAULT_ISAACLAB_PY)
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        result = subprocess.run(
+            [str(candidate), "-c", "import onnxruntime"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            return str(candidate)
+    raise SystemExit("No usable python interpreter with onnxruntime was found.")
+
+
+def read_npz_meta(path: Path) -> tuple[str, str]:
+    with np.load(path, allow_pickle=True) as data:
+        schema = str(np.asarray(data["schema_version"]).item()) if "schema_version" in data else ""
+        task = str(np.asarray(data["task"]).item()) if "task" in data else ""
+    return schema, task
+
+
+def resolve_robot_usd_override(args: argparse.Namespace) -> str:
+    if args.robot_usd_override:
+        robot_usd = Path(args.robot_usd_override).expanduser().resolve()
+        if not robot_usd.is_file():
+            raise SystemExit(f"ROBOT_USD_OVERRIDE not found: {robot_usd}")
+        return str(robot_usd)
+    if args.robot_collider_mode == "box":
+        if not DEFAULT_BOX_ROBOT_USD.is_file():
+            raise SystemExit(f"Default box robot USD not found: {DEFAULT_BOX_ROBOT_USD}")
+        return str(DEFAULT_BOX_ROBOT_USD)
+    if args.robot_collider_mode == "fourpoints":
+        if not DEFAULT_FOURPOINTS_ROBOT_USD.is_file():
+            raise SystemExit(f"Default fourpoints robot USD not found: {DEFAULT_FOURPOINTS_ROBOT_USD}")
+        return str(DEFAULT_FOURPOINTS_ROBOT_USD)
+    return ""
+
+
+def build_subprocess_env(robot_usd_override: str) -> dict[str, str]:
+    env = os.environ.copy()
+    env.setdefault("PROJECT_ROOT", str(ISAACLAB_ROOT))
+    pythonpath_parts = [part for part in env.get("PYTHONPATH", "").split(os.pathsep) if part]
+    isaaclab_root_str = str(ISAACLAB_ROOT)
+    if isaaclab_root_str not in pythonpath_parts:
+        pythonpath_parts.insert(0, isaaclab_root_str)
+        env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
+    if robot_usd_override:
+        env["ROBOT_USD_OVERRIDE"] = robot_usd_override
+    return env
+
+
+def read_successful_sources(manifest_path: Path) -> set[str]:
+    if not manifest_path.is_file():
+        return set()
+    sources: set[str] = set()
+    with manifest_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if payload.get("status") == "success" and payload.get("source"):
+                sources.add(str(payload["source"]))
+    return sources
+
+
+def append_manifest(manifest_path: Path, payload: dict[str, object]) -> None:
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    with manifest_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=True, sort_keys=True))
+        handle.write("\n")
+
+
+def infer_failure_status_from_log(log_path: Path) -> str | None:
+    if not log_path.is_file():
+        return None
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+    if "Failed to parse environment configuration" in text:
+        return "failed_to_parse_env_config"
+    if "Failed to create environment:" in text:
+        return "failed_to_create_environment"
+    if "Failed to create action provider:" in text:
+        return "failed_to_create_action_provider"
+    if "Failed to create dds:" in text:
+        return "failed_to_create_dds"
+    if "program exception:" in text:
+        return "program_exception"
+    if "Simulation App Shutting Down" in text and "STARTING RECORDING IMMEDIATELY AFTER ENV.RESET()" not in text:
+        return "app_shutdown_before_control_loop"
+    return None
+
+
+def build_jobs(args: argparse.Namespace) -> list[dict[str, object]]:
+    jobs: list[dict[str, object]] = []
+    for source_root_raw in args.source_roots:
+        source_root = Path(source_root_raw).expanduser().resolve()
+        if not source_root.is_dir():
+            raise SystemExit(f"Source root not found: {source_root}")
+        output_root = source_root.parent / f"{source_root.name}{args.output_suffix}"
+        manifest_path = output_root / "migration_manifest.jsonl"
+        completed_sources = set() if args.force else read_successful_sources(manifest_path)
+        for source_file in sorted(source_root.rglob("*.npz")):
+            source_file = source_file.resolve()
+            if not args.force and str(source_file) in completed_sources:
+                continue
+            schema_version, task_name = read_npz_meta(source_file)
+            if schema_version != "sonic_episode_v2":
+                continue
+            env_config = TASK_TO_ENV_CONFIG.get(task_name)
+            if not env_config:
+                raise SystemExit(
+                    f"No env_config mapping configured for task '{task_name}' from {source_file}"
+                )
+            jobs.append(
+                {
+                    "source_root": source_root,
+                    "source_file": source_file,
+                    "output_root": output_root,
+                    "manifest_path": manifest_path,
+                    "task_name": task_name,
+                    "env_config": env_config,
+                }
+            )
+    return jobs
+
+
+def find_new_npz_files(output_dir: Path, before_files: set[Path]) -> list[Path]:
+    after_files = {path.resolve() for path in output_dir.glob("*.npz")}
+    return sorted(after_files - before_files, key=lambda path: path.stat().st_mtime)
+
+
+def build_command(args: argparse.Namespace, job: dict[str, object], output_dir: Path, python_bin: str) -> list[str]:
+    source_file = Path(job["source_file"])
+    command = [
+        python_bin,
+        "-u",
+        str(SIM_MAIN),
+        "--device",
+        args.device,
+        "--env_config_yaml",
+        str(job["env_config"]),
+        "--task",
+        str(job["task_name"]),
+        "--robot_type",
+        args.robot_type,
+        "--input_source",
+        "replay",
+        "--gmt_backend",
+        "sonic",
+        "--sonic_encoder_path",
+        args.sonic_encoder_path,
+        "--sonic_decoder_path",
+        args.sonic_decoder_path,
+        "--replay_file",
+        str(source_file),
+        "--replay_mode",
+        args.replay_mode,
+        "--record_during_replay",
+        "--exit_when_replay_complete",
+        "--recording_save_dir",
+        str(output_dir),
+        "--recording_save_workers",
+        str(args.recording_save_workers),
+        "--recording_save_queue_size",
+        str(args.recording_save_queue_size),
+        "--seed",
+        str(args.seed),
+    ]
+    if not args.disable_cameras:
+        command.append("--enable_cameras")
+    if not args.disable_dex3:
+        command.append("--enable_dex3_dds")
+    if args.headless:
+        command.append("--headless")
+    return command
+
+
+def main() -> int:
+    args = parse_args()
+    python_bin = resolve_python_bin(args.python_bin)
+    robot_usd_override = resolve_robot_usd_override(args)
+    subprocess_env = build_subprocess_env(robot_usd_override)
+    jobs = build_jobs(args)
+    if args.limit > 0:
+        jobs = jobs[: args.limit]
+    if not jobs:
+        print("No SONIC v2 recordings matched the migration criteria.")
+        return 0
+
+    print(f"python_bin={python_bin}")
+    print(f"robot_usd_override={robot_usd_override or '<default>'}")
+    print(f"jobs={len(jobs)}")
+
+    success_count = 0
+    failure_count = 0
+    for index, job in enumerate(jobs, start=1):
+        source_root = Path(job["source_root"])
+        source_file = Path(job["source_file"])
+        output_root = Path(job["output_root"])
+        manifest_path = Path(job["manifest_path"])
+        rel_parent = source_file.relative_to(source_root).parent
+        output_dir = (output_root / rel_parent).resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        command = build_command(args, job, output_dir, python_bin)
+        log_dir = output_root / "migration_logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / f"{source_file.stem}.log"
+
+        print(f"[{index}/{len(jobs)}] migrating {source_file}")
+        print(f"  output_dir={output_dir}")
+        print(f"  log={log_path}")
+        if args.dry_run:
+            print("  command=" + " ".join(command))
+            continue
+
+        before_npz = {path.resolve() for path in output_dir.glob("*.npz")}
+        started_at = time.time()
+        timed_out = False
+        return_code = None
+
+        with log_path.open("w", encoding="utf-8") as log_handle:
+            log_handle.write("COMMAND: " + " ".join(command) + "\n")
+            log_handle.write(f"ROBOT_USD_OVERRIDE: {robot_usd_override or '<default>'}\n")
+            log_handle.flush()
+            try:
+                completed = subprocess.run(
+                    command,
+                    cwd=REPO_ROOT,
+                    env=subprocess_env,
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    timeout=args.timeout_seconds if args.timeout_seconds > 0 else None,
+                    check=False,
+                )
+                return_code = completed.returncode
+            except subprocess.TimeoutExpired:
+                timed_out = True
+
+        new_npz_files = find_new_npz_files(output_dir, before_npz)
+        migrated_npz = new_npz_files[-1] if new_npz_files else None
+        migrated_schema = ""
+        if migrated_npz is not None:
+            migrated_schema, _ = read_npz_meta(migrated_npz)
+
+        status = "success"
+        if timed_out:
+            status = "timeout"
+        elif migrated_npz is None:
+            status = "missing_output"
+        elif migrated_schema != "sonic_episode_v3":
+            status = f"unexpected_schema:{migrated_schema or 'missing'}"
+
+        payload = {
+            "duration_sec": round(time.time() - started_at, 3),
+            "env_config": str(job["env_config"]),
+            "log_path": str(log_path.resolve()),
+            "migrated_npz": str(migrated_npz.resolve()) if migrated_npz is not None else "",
+            "return_code": return_code,
+            "source": str(source_file),
+            "status": status,
+            "task_name": job["task_name"],
+            "timestamp": int(time.time()),
+        }
+        if status == "missing_output":
+            inferred_status = infer_failure_status_from_log(log_path)
+            if inferred_status:
+                payload["status"] = inferred_status
+                status = inferred_status
+        append_manifest(manifest_path, payload)
+
+        if status == "success":
+            success_count += 1
+            print(f"  success -> {migrated_npz}")
+        else:
+            failure_count += 1
+            print(f"  {status}")
+
+    print(f"done: success={success_count} failure={failure_count}")
+    return 0 if failure_count == 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

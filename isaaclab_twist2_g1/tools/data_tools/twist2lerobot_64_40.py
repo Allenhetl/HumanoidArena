@@ -15,6 +15,7 @@ from smpl_lerobot_common import (
     build_twist2_actions_from_recording,
     extract_canonical_state,
     find_npz_files,
+    load_vision_rgb_and_indices,
     inspect_image_shape,
     normalize_task,
     prepare_output_root,
@@ -116,8 +117,7 @@ def main() -> None:
                 qpos = reorder_twist2_to_canonical_29(np.asarray(data["robot_qpos_before_decimation"], dtype=np.float32))
                 qvel = reorder_twist2_to_canonical_29(np.asarray(data["robot_qvel_before_decimation"], dtype=np.float32))
                 root_orientation = np.asarray(data["robot_root_orientation"], dtype=np.float32)
-                vision_rgb = np.asarray(data["vision_rgb"], dtype=np.uint8)
-                vision_frame_indices = np.asarray(data["vision_frame_indices"], dtype=np.int64)
+                vision_rgb, vision_frame_indices = load_vision_rgb_and_indices(data, npz_path)
                 obs_state = extract_canonical_state(
                     data=data,
                     root_orientation=root_orientation,

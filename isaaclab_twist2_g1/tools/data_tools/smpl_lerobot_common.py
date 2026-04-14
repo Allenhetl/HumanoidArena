@@ -12,6 +12,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from action_provider.vision_video import read_rgb_video_mp4
 from action_provider.vla_smpl_runtime import (
     CANONICAL_G1_JOINT_NAMES_29,
     VLA_SMPL_ACTION_DIM,
@@ -19,8 +20,12 @@ from action_provider.vla_smpl_runtime import (
     build_vla_action,
     build_vla_observation_state,
     quat_from_roll_pitch_yaw_wxyz,
+    quat_mul_wxyz,
+    quat_normalize_wxyz,
     quat_to_rot6d_wxyz,
     reorder_twist2_to_canonical_29,
+    rot6d_to_quat_wxyz,
+    yaw_from_quat_wxyz,
 )
 
 
@@ -86,13 +91,35 @@ def normalize_task(task_value, npz_path: Path, input_root: Path) -> str:
 def inspect_image_shape(npz_paths: list[Path]) -> tuple[int, int, int]:
     for path in npz_paths:
         with np.load(path, allow_pickle=True) as data:
-            vision_rgb = np.asarray(data["vision_rgb"])
+            vision_rgb, _ = load_vision_rgb_and_indices(data, path)
             if vision_rgb.ndim != 4:
                 raise ValueError(f"{path} has unexpected vision_rgb shape: {vision_rgb.shape}")
             if vision_rgb.shape[0] == 0:
                 continue
             return tuple(int(v) for v in vision_rgb.shape[1:])
     raise ValueError("No RGB frames found in the input dataset.")
+
+
+def load_vision_rgb_and_indices(
+    data: np.lib.npyio.NpzFile,
+    npz_path: Path,
+) -> tuple[np.ndarray, np.ndarray]:
+    if "vision_rgb" in data:
+        vision_rgb = np.asarray(data["vision_rgb"], dtype=np.uint8)
+    elif "vision_rgb_video_path" in data:
+        video_rel = decode_scalar(data["vision_rgb_video_path"])
+        video_path = npz_path.parent / video_rel
+        vision_rgb = read_rgb_video_mp4(video_path)
+        if vision_rgb.size == 0:
+            raise ValueError(f"{npz_path} video has no frames: {video_path}")
+    else:
+        raise KeyError(f"{npz_path} missing vision data: expected 'vision_rgb' or 'vision_rgb_video_path'")
+
+    if "vision_frame_indices" in data:
+        frame_indices = np.asarray(data["vision_frame_indices"], dtype=np.int64)
+    else:
+        frame_indices = np.arange(vision_rgb.shape[0], dtype=np.int64)
+    return vision_rgb, frame_indices
 
 
 def build_features(image_shape: tuple[int, int, int], use_videos: bool) -> dict[str, dict]:
@@ -149,6 +176,75 @@ def build_action(
     if action.shape != (len(ACTION_NAMES),):
         raise ValueError(f"Unexpected action shape: {action.shape}, expected {(len(ACTION_NAMES),)}")
     return action
+
+
+def _resolve_sonic_heading_align_quat(
+    data: np.lib.npyio.NpzFile,
+    *,
+    num_frames: int,
+) -> np.ndarray | None:
+    if "anchor_heading_align_quat_wxyz" in data:
+        align_quat = np.asarray(data["anchor_heading_align_quat_wxyz"], dtype=np.float32)
+        if align_quat.shape == (4,):
+            align_quat = np.repeat(align_quat.reshape(1, 4), num_frames, axis=0)
+        if align_quat.shape != (num_frames, 4):
+            raise ValueError(
+                "Unexpected anchor_heading_align_quat_wxyz shape: "
+                f"{align_quat.shape}, expected {(num_frames, 4)}"
+            )
+        align_quat = quat_normalize_wxyz(align_quat)
+        if "anchor_use_heading_align" in data:
+            use_align = np.asarray(data["anchor_use_heading_align"]).reshape(-1)
+            if use_align.size == 1:
+                use_align = np.repeat(use_align, num_frames)
+            if use_align.shape != (num_frames,):
+                raise ValueError(
+                    f"Unexpected anchor_use_heading_align shape: {use_align.shape}, expected {(num_frames,)}"
+                )
+            identity = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+            align_quat = align_quat.copy()
+            align_quat[~use_align.astype(bool)] = identity
+        return align_quat.astype(np.float32)
+
+    if "human_body_quat_w" in data and "robot_root_orientation" in data:
+        ref_quat = np.asarray(data["human_body_quat_w"], dtype=np.float32)
+        base_quat = np.asarray(data["robot_root_orientation"], dtype=np.float32)
+        if ref_quat.shape != (num_frames, 4) or base_quat.shape != (num_frames, 4):
+            raise ValueError(
+                "Unexpected quaternion shapes for fallback heading align: "
+                f"human_body_quat_w={ref_quat.shape} robot_root_orientation={base_quat.shape}"
+            )
+        yaw_delta = yaw_from_quat_wxyz(base_quat[0]) - yaw_from_quat_wxyz(ref_quat[0])
+        align0 = quat_from_roll_pitch_yaw_wxyz(roll=0.0, pitch=0.0, yaw=yaw_delta)
+        return np.repeat(align0.reshape(1, 4), num_frames, axis=0).astype(np.float32)
+    return None
+
+
+def _apply_heading_align_to_action(
+    action: np.ndarray,
+    *,
+    align_quat_wxyz: np.ndarray,
+) -> np.ndarray:
+    if action.shape[1] != VLA_ACTION_DIM:
+        raise ValueError(f"Unexpected action shape {action.shape}, expected (_, {VLA_ACTION_DIM})")
+    if align_quat_wxyz.shape != (action.shape[0], 4):
+        raise ValueError(
+            f"Unexpected align quaternion shape {align_quat_wxyz.shape}, expected {(action.shape[0], 4)}"
+        )
+
+    out = np.asarray(action, dtype=np.float32).copy()
+    align_quat_wxyz = quat_normalize_wxyz(align_quat_wxyz)
+
+    root_quat = rot6d_to_quat_wxyz(out[:, 3:9])
+    aligned_root_quat = quat_mul_wxyz(align_quat_wxyz, root_quat)
+    out[:, 3:9] = quat_to_rot6d_wxyz(aligned_root_quat)
+
+    rot_mats = R.from_quat(align_quat_wxyz[:, [1, 2, 3, 0]]).as_matrix().astype(np.float32)
+    xy_delta = out[:, :2]
+    xy_delta_3d = np.concatenate([xy_delta, np.zeros((xy_delta.shape[0], 1), dtype=np.float32)], axis=1)
+    rotated_xy_delta = np.einsum("nij,nj->ni", rot_mats, xy_delta_3d, optimize=True)[:, :2]
+    out[:, :2] = rotated_xy_delta.astype(np.float32)
+    return out.astype(np.float32)
 
 
 def get_hand_binary_arrays(data: np.lib.npyio.NpzFile, num_frames: int) -> tuple[np.ndarray, np.ndarray]:
@@ -314,14 +410,28 @@ def build_twist2_actions_from_recording(
     return actions
 
 
+def _sonic_vla_action_is_heading_aligned(data: np.lib.npyio.NpzFile) -> bool:
+    if "vla_action_heading_aligned" not in data:
+        return False
+    raw = np.asarray(data["vla_action_heading_aligned"]).reshape(-1)
+    if raw.size == 0:
+        return False
+    return bool(raw[0])
+
+
 def build_sonic_actions_from_recording(
     data: np.lib.npyio.NpzFile,
     *,
     num_frames: int,
+    align_heading_targets: bool = False,
 ) -> np.ndarray:
     if "vla_action" in data:
         action = np.asarray(data["vla_action"], dtype=np.float32)
         if action.ndim == 2 and action.shape[1] == VLA_ACTION_DIM:
+            if align_heading_targets and (not _sonic_vla_action_is_heading_aligned(data)):
+                align_quat = _resolve_sonic_heading_align_quat(data, num_frames=num_frames)
+                if align_quat is not None:
+                    return _apply_heading_align_to_action(action, align_quat_wxyz=align_quat)
             return action
     if (
         "vla_action_root_xy_delta" in data
@@ -340,7 +450,7 @@ def build_sonic_actions_from_recording(
             and joint_pos.shape == (num_frames, 29)
         ):
             left_binary, right_binary = get_hand_binary_arrays(data, num_frames)
-            return np.concatenate(
+            action = np.concatenate(
                 [
                     root_xy_delta,
                     root_z,
@@ -350,6 +460,11 @@ def build_sonic_actions_from_recording(
                 ],
                 axis=1,
             ).astype(np.float32)
+            if align_heading_targets and (not _sonic_vla_action_is_heading_aligned(data)):
+                align_quat = _resolve_sonic_heading_align_quat(data, num_frames=num_frames)
+                if align_quat is not None:
+                    return _apply_heading_align_to_action(action, align_quat_wxyz=align_quat)
+            return action
 
     if "vla_action_joint_pos_29" in data:
         joint_targets = np.asarray(data["vla_action_joint_pos_29"], dtype=np.float32)
@@ -387,4 +502,8 @@ def build_sonic_actions_from_recording(
             joint_pos=joint_targets[i],
             hand_binary=np.array([left_binary[i], right_binary[i]], dtype=np.float32),
         )
+    if align_heading_targets:
+        align_quat = _resolve_sonic_heading_align_quat(data, num_frames=num_frames)
+        if align_quat is not None:
+            return _apply_heading_align_to_action(actions, align_quat_wxyz=align_quat)
     return actions

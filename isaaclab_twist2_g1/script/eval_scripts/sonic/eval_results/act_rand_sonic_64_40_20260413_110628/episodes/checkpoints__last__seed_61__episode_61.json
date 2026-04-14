@@ -1,0 +1,21 @@
+{
+  "task": "Isaac-Move-Football-Single-G129-Dex3-Wholebody",
+  "model_path": "/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/train/diffusion_twist2_0401/checkpoints/last/pretrained_model",
+  "model_label": "checkpoints__last",
+  "seed": 61,
+  "episode_index": 61,
+  "success": false,
+  "failure_reason": "sim_error",
+  "error": "<urlopen error [Errno 111] Connection refused>",
+  "episode_steps": 0,
+  "max_steps": 1000,
+  "final_reward": 0.0,
+  "final_reward_scaled": 0.0,
+  "max_reward": 0.0,
+  "max_reward_scaled": 0.0,
+  "video_path": "",
+  "server_url": "http://127.0.0.1:8443",
+  "started_at": 1776051920.2612717,
+  "finished_at": 1776051921.8929229,
+  "duration_sec": 1.6316514015197754
+}

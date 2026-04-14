@@ -261,6 +261,60 @@ def rot6d_to_quat_wxyz(rot6d: np.ndarray) -> np.ndarray:
     return quat_wxyz.reshape(rot.shape[:-2] + (4,)).astype(np.float32)
 
 
+def _convert_rot6d_col_to_row(rot6d: np.ndarray) -> np.ndarray:
+    """Convert column-stacked 6D rotation to row-stacked format used by rot6d_to_rotation_matrix()."""
+    arr = np.asarray(rot6d, dtype=np.float32)
+    flat = arr.reshape(-1, 6)
+    row_flat = flat[:, [0, 3, 1, 4, 2, 5]]
+    return row_flat.reshape(arr.shape).astype(np.float32)
+
+
+def rot6d_to_quat_wxyz_with_layout(rot6d: np.ndarray, layout: str = "row") -> np.ndarray:
+    layout = str(layout).strip().lower()
+    if layout == "row":
+        return rot6d_to_quat_wxyz(rot6d)
+    if layout == "col":
+        return rot6d_to_quat_wxyz(_convert_rot6d_col_to_row(rot6d))
+    raise ValueError(f"Unsupported rot6d layout: {layout}. Expected one of ['row', 'col'].")
+
+
+def quat_angle_between_wxyz(q_ref: np.ndarray, q_cur: np.ndarray) -> float:
+    """Return smallest rotation angle (radians) between two wxyz quaternions."""
+    q_ref = quat_normalize_wxyz(np.asarray(q_ref, dtype=np.float32).reshape(4))
+    q_cur = quat_normalize_wxyz(np.asarray(q_cur, dtype=np.float32).reshape(4))
+    rel = quat_mul_wxyz(quat_conjugate_wxyz(q_ref), q_cur)
+    w = float(np.clip(np.abs(rel[0]), -1.0, 1.0))
+    return float(2.0 * np.arccos(w))
+
+
+def quat_slerp_shortest_wxyz(q_start: np.ndarray, q_end: np.ndarray, t: float) -> np.ndarray:
+    """Shortest-path SLERP in wxyz format."""
+    q0 = quat_normalize_wxyz(np.asarray(q_start, dtype=np.float32).reshape(4))
+    q1 = quat_normalize_wxyz(np.asarray(q_end, dtype=np.float32).reshape(4))
+    t = float(np.clip(t, 0.0, 1.0))
+
+    dot = float(np.dot(q0, q1))
+    if dot < 0.0:
+        q1 = -q1
+        dot = -dot
+    dot = float(np.clip(dot, -1.0, 1.0))
+
+    if dot > 0.9995:
+        out = q0 + t * (q1 - q0)
+        return quat_normalize_wxyz(out)
+
+    theta_0 = float(np.arccos(dot))
+    sin_theta_0 = float(np.sin(theta_0))
+    if sin_theta_0 < 1e-8:
+        return q0.copy()
+
+    theta = theta_0 * t
+    s0 = float(np.sin(theta_0 - theta) / sin_theta_0)
+    s1 = float(np.sin(theta) / sin_theta_0)
+    out = s0 * q0 + s1 * q1
+    return quat_normalize_wxyz(out)
+
+
 def rot6d_to_axis_angle(rot6d: np.ndarray) -> np.ndarray:
     rot = rot6d_to_rotation_matrix(rot6d)
     rotvec = R.from_matrix(rot.reshape(-1, 3, 3)).as_rotvec().astype(np.float32)
@@ -755,13 +809,38 @@ class UnifiedSMPLActionFrame:
 
 
 class UnifiedSMPLActionRuntime:
-    def __init__(self) -> None:
+    def __init__(self, root_rot6d_layout: str = "row", max_root_delta_deg: float | None = None) -> None:
+        self._root_rot6d_layout = str(root_rot6d_layout).strip().lower()
+        if self._root_rot6d_layout not in {"row", "col", "auto"}:
+            raise ValueError(
+                f"Unsupported root_rot6d_layout={root_rot6d_layout}. "
+                "Expected one of ['row', 'col', 'auto']."
+            )
+        self._max_root_delta_rad: float | None = None
+        self.set_max_root_delta_deg(max_root_delta_deg)
         self.reset()
 
     def reset(self) -> None:
         self._body_xy_world = np.zeros((2,), dtype=np.float32)
         self._prev_root_quat_wxyz: np.ndarray | None = None
         self._prev_joint_pos_canonical_29: np.ndarray | None = None
+        self._last_selected_root_rot6d_layout: str = "row"
+
+    def prime_root_quat(self, root_quat_wxyz: np.ndarray) -> None:
+        """Prime previous root orientation for continuity-based rot6d layout selection."""
+        self._prev_root_quat_wxyz = quat_normalize_wxyz(
+            np.asarray(root_quat_wxyz, dtype=np.float32).reshape(4)
+        )
+
+    def set_max_root_delta_deg(self, max_root_delta_deg: float | None) -> None:
+        if max_root_delta_deg is None:
+            self._max_root_delta_rad = None
+            return
+        value = float(max_root_delta_deg)
+        if not np.isfinite(value) or value <= 0.0:
+            self._max_root_delta_rad = None
+            return
+        self._max_root_delta_rad = float(np.deg2rad(value))
 
     def step(self, action: np.ndarray) -> UnifiedSMPLActionFrame:
         action = np.asarray(action, dtype=np.float32).reshape(-1)
@@ -776,7 +855,37 @@ class UnifiedSMPLActionRuntime:
         joint_pos_canonical_29 = action[9:38].astype(np.float32, copy=True)
         hand_binary = action[38:40].astype(np.float32, copy=True)
 
-        root_quat_wxyz = rot6d_to_quat_wxyz(root_orient_rot6d).reshape(4).astype(np.float32)
+        if self._root_rot6d_layout in {"row", "col"}:
+            root_quat_wxyz = rot6d_to_quat_wxyz_with_layout(
+                root_orient_rot6d,
+                layout=self._root_rot6d_layout,
+            ).reshape(4).astype(np.float32)
+            self._last_selected_root_rot6d_layout = self._root_rot6d_layout
+        else:
+            quat_row = rot6d_to_quat_wxyz_with_layout(root_orient_rot6d, layout="row").reshape(4).astype(np.float32)
+            quat_col = rot6d_to_quat_wxyz_with_layout(root_orient_rot6d, layout="col").reshape(4).astype(np.float32)
+            if self._prev_root_quat_wxyz is None:
+                root_quat_wxyz = quat_row
+                self._last_selected_root_rot6d_layout = "row"
+            else:
+                row_delta = quat_angle_between_wxyz(self._prev_root_quat_wxyz, quat_row)
+                col_delta = quat_angle_between_wxyz(self._prev_root_quat_wxyz, quat_col)
+                if col_delta < row_delta:
+                    root_quat_wxyz = quat_col
+                    self._last_selected_root_rot6d_layout = "col"
+                else:
+                    root_quat_wxyz = quat_row
+                    self._last_selected_root_rot6d_layout = "row"
+
+        if self._max_root_delta_rad is not None and self._prev_root_quat_wxyz is not None:
+            root_delta = quat_angle_between_wxyz(self._prev_root_quat_wxyz, root_quat_wxyz)
+            if root_delta > self._max_root_delta_rad:
+                blend = self._max_root_delta_rad / max(root_delta, 1e-8)
+                root_quat_wxyz = quat_slerp_shortest_wxyz(
+                    self._prev_root_quat_wxyz,
+                    root_quat_wxyz,
+                    blend,
+                )
 
         prev_root_quat = None if self._prev_root_quat_wxyz is None else self._prev_root_quat_wxyz.copy()
         prev_joint_pos = (

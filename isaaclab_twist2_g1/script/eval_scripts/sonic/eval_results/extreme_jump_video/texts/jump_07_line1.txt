@@ -1,0 +1,1 @@
+jump 7/22 | ep=20 frame=24 delta=149.3 deg

@@ -1,6 +1,6 @@
 PYTHONPATH=src python src/lerobot/scripts/lerobot_train.py \
-  --dataset.repo_id=local/twist2-football-0410-64-40 \
-  --dataset.root=/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/HumanoidArena_datasets/HOI_football/0410_twist2_smpl_pose6d \
+  --dataset.repo_id=local/sonic-football-0411-64-40 \
+  --dataset.root=/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/HumanoidArena_datasets/HOI_football/0411_sonic_smpl_pose6d_aligned \
   --dataset.image_transforms.enable=true \
   --policy.type=act \
   --policy.device=cuda \
@@ -10,8 +10,8 @@ PYTHONPATH=src python src/lerobot/scripts/lerobot_train.py \
   --policy.push_to_hub=false \
   --batch_size=80 \
   --steps=50000 \
-  --output_dir=/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/train/act_twist2_football_rand_0410_64_40 \
-  --job_name=act_twist2_football_rand_0410_64_40
+  --output_dir=/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/train/act_sonic_football_rand_0413_64_40 \
+  --job_name=act_sonic_football_rand_0413_64_40
 
 
 # PYTHONPATH=src python src/lerobot/scripts/lerobot_train.py \
@@ -31,8 +31,8 @@ PYTHONPATH=src python src/lerobot/scripts/lerobot_train.py \
 
 
 PYTHONPATH=src python src/lerobot/scripts/lerobot_train.py \
-  --dataset.repo_id=local/twist2-football-0410-64-40 \
-  --dataset.root=/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/datasets/0410_twist2_smpl_pose6d \
+  --dataset.repo_id=local/sonic-football-0411-64-40 \
+  --dataset.root=/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/HumanoidArena_datasets/HOI_football/0411_sonic_smpl_pose6d_aligned \
   --dataset.image_transforms.enable=true \
   --policy.type=diffusion \
   --policy.device=cuda \
@@ -43,5 +43,5 @@ PYTHONPATH=src python src/lerobot/scripts/lerobot_train.py \
   --policy.push_to_hub=false \
   --batch_size=32 \
   --steps=50000 \
-  --output_dir=/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/train/diffusion_twist2_football_rand_0410_64_40 \
-  --job_name=diffusion_twist2_football_rand_0410_64_40
+  --output_dir=/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/train/diffusion_sonic_football_rand_0413_64_40 \
+  --job_name=diffusion_sonic_football_rand_0413_64_40
