@@ -1,5 +1,5 @@
 import isaaclab.sim as sim_utils
-from isaaclab.assets import  AssetBaseCfg, RigidObjectCfg
+from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 from isaaclab.utils import configclass
@@ -12,8 +12,13 @@ CONTAINER_R_POS_OFFSET = [0.3, 0.0, 1.00]
 ROOM_SCALE = (100.0, 100.0, 100.0)
 HAMMER_INIT_POS = [-3.137042543141045, -3.0097883381183254, 1.0106319452873727]
 HAMMER_INIT_ROT = [0.7139050960540771, 0.0, 0.0, -0.7002424597740173]
+# HAMMER_INIT_POS = [0.0, 0.0, 0.0]
+# HAMMER_INIT_ROT = [1.0, 0.0, 0.0, 0.0]
 CRATE_INIT_POS = [-2.8, -0.1, 0.745]
 CRATE_INIT_ROT = [1.0, 0.0, 0.0, 0.0]
+BASKET_RIGID_SUBPRIM = "PRootNode"
+
+
 @configclass
 class DoubleTableSceneCfg(InteractiveSceneCfg): # inherit from the interactive scene configuration class
     """object table scene configuration class

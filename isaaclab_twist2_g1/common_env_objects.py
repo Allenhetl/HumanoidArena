@@ -62,7 +62,7 @@ def resolve_env_object_scene_key(env, env_cfg: Any, object_name: str) -> str | N
         for scene_key in spec["scene_keys"]:
             if scene_key in env.scene.keys():
                 return scene_key
-        return None
+        break
 
     for fallback_key in (object_name,):
         if fallback_key in env.scene.keys():
@@ -188,20 +188,18 @@ def collect_recordable_env_object_states(env, env_cfg: Any) -> dict[str, dict[st
     for spec in get_recordable_env_object_specs(env_cfg):
         record_name = spec["record_name"]
         scene_key = resolve_env_object_scene_key(env, env_cfg, record_name)
-        if scene_key is None:
-            env_state[record_name] = None
-            continue
 
-        try:
-            obj = env.scene[scene_key]
-            root_state = obj.data.root_state_w
-            env_state[record_name] = {
-                field_name: root_state[0, field_slice].detach().cpu().numpy().astype(np.float32).copy()
-                for field_name, field_slice, _, _ in _ROOT_STATE_FIELDS
-            }
-            continue
-        except Exception:
-            pass
+        if scene_key is not None:
+            try:
+                obj = env.scene[scene_key]
+                root_state = obj.data.root_state_w
+                env_state[record_name] = {
+                    field_name: root_state[0, field_slice].detach().cpu().numpy().astype(np.float32).copy()
+                    for field_name, field_slice, _, _ in _ROOT_STATE_FIELDS
+                }
+                continue
+            except Exception:
+                pass
 
         prim_paths = spec.get("prim_paths", []) or []
         prim_state = None
@@ -405,19 +403,22 @@ def _load_prim_default_states(
     return defaults
 
 
-def apply_deterministic_object_resets(env_cfg: Any, env, *, selected_record_names: set[str] | None = None) -> list[str]:
-    if getattr(env_cfg, "_replay_initial_env_state_active", False):
-        return []
-
+def _apply_deterministic_object_resets_with_seed(
+    env_cfg: Any,
+    env,
+    *,
+    episode_seed: int,
+    seed_source: str,
+    selected_record_names: set[str] | None = None,
+) -> list[str]:
     specs = get_recordable_env_object_specs(env_cfg)
     if not specs:
         return []
 
     env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
     applied: list[str] = []
-    episode_seed, seed_source = _next_episode_object_seed(env_cfg)
-    setattr(env_cfg, "_current_episode_object_seed", episode_seed)
-    setattr(env_cfg, "_current_episode_object_seed_source", seed_source)
+    setattr(env_cfg, "_current_episode_object_seed", int(episode_seed))
+    setattr(env_cfg, "_current_episode_object_seed_source", str(seed_source or ""))
 
     scene_object_changed = False
     for spec in specs:
@@ -429,45 +430,47 @@ def apply_deterministic_object_resets(env_cfg: Any, env, *, selected_record_name
         pose_range = spec.get("pose_range", {}) or {}
 
         if scene_key is not None:
-            obj = env.scene[scene_key]
+            root_state = None
             try:
+                obj = env.scene[scene_key]
                 root_state = obj.data.default_root_state.clone()
             except Exception:
                 try:
                     root_state = obj.data.root_state_w.clone()
                 except Exception:
-                    continue
+                    root_state = None
 
-            for env_offset, env_id in enumerate(env_ids.tolist()):
-                rng = _make_local_spawn_rng(episode_seed, record_name, env_offset)
-                yaw_rad = _sample_yaw_with_pose_range(pose_range, rng)
-                root_state[env_id, 0:3] = torch.as_tensor(
-                    _sample_abs_position_with_pose_range(
-                        root_state[env_id, 0:3].detach().cpu().numpy(),
-                        pose_range,
-                        rng,
-                    ),
-                    device=root_state.device,
-                    dtype=root_state.dtype,
-                )
-                root_state[env_id, 3:7] = torch.as_tensor(
-                    _apply_yaw_delta_to_orientation(
-                        root_state[env_id, 3:7].detach().cpu().numpy(),
-                        yaw_rad,
-                    ),
-                    device=root_state.device,
-                    dtype=root_state.dtype,
-                )
-                if spec.get("zero_velocity_on_reset", True):
-                    root_state[env_id, 7:13] = 0.0
+            if root_state is not None:
+                for env_offset, env_id in enumerate(env_ids.tolist()):
+                    rng = _make_local_spawn_rng(episode_seed, record_name, env_offset)
+                    yaw_rad = _sample_yaw_with_pose_range(pose_range, rng)
+                    root_state[env_id, 0:3] = torch.as_tensor(
+                        _sample_abs_position_with_pose_range(
+                            root_state[env_id, 0:3].detach().cpu().numpy(),
+                            pose_range,
+                            rng,
+                        ),
+                        device=root_state.device,
+                        dtype=root_state.dtype,
+                    )
+                    root_state[env_id, 3:7] = torch.as_tensor(
+                        _apply_yaw_delta_to_orientation(
+                            root_state[env_id, 3:7].detach().cpu().numpy(),
+                            yaw_rad,
+                        ),
+                        device=root_state.device,
+                        dtype=root_state.dtype,
+                    )
+                    if spec.get("zero_velocity_on_reset", True):
+                        root_state[env_id, 7:13] = 0.0
 
-            obj.write_root_state_to_sim(root_state, env_ids=env_ids)
-            scene_object_changed = True
-            applied.append(
-                f"{record_name}->{scene_key}:episode_seed={episode_seed}:seed_source={seed_source}:pos="
-                f"{root_state[0, 0:3].detach().cpu().numpy().tolist()}"
-            )
-            continue
+                obj.write_root_state_to_sim(root_state, env_ids=env_ids)
+                scene_object_changed = True
+                applied.append(
+                    f"{record_name}->{scene_key}:episode_seed={episode_seed}:seed_source={seed_source}:pos="
+                    f"{root_state[0, 0:3].detach().cpu().numpy().tolist()}"
+                )
+                continue
 
         prim_paths = [str(v) for v in (spec.get("prim_paths", []) or []) if v]
         if not prim_paths:
@@ -515,6 +518,37 @@ def apply_deterministic_object_resets(env_cfg: Any, env, *, selected_record_name
     return applied
 
 
+def apply_deterministic_object_resets(env_cfg: Any, env, *, selected_record_names: set[str] | None = None) -> list[str]:
+    if getattr(env_cfg, "_replay_initial_env_state_active", False):
+        return []
+
+    episode_seed, seed_source = _next_episode_object_seed(env_cfg)
+    return _apply_deterministic_object_resets_with_seed(
+        env_cfg,
+        env,
+        episode_seed=episode_seed,
+        seed_source=seed_source,
+        selected_record_names=selected_record_names,
+    )
+
+
+def apply_deterministic_object_resets_with_seed(
+    env_cfg: Any,
+    env,
+    *,
+    episode_seed: int,
+    seed_source: str = "recorded",
+    selected_record_names: set[str] | None = None,
+) -> list[str]:
+    return _apply_deterministic_object_resets_with_seed(
+        env_cfg,
+        env,
+        episode_seed=int(episode_seed),
+        seed_source=str(seed_source or "recorded"),
+        selected_record_names=selected_record_names,
+    )
+
+
 def apply_explicit_env_object_states(
     env,
     env_cfg: Any,
@@ -552,31 +586,36 @@ def apply_explicit_env_object_states(
 
         scene_name = resolve_env_object_scene_key(env, env_cfg, object_name)
         if scene_name is not None:
-            asset = env.scene[scene_name]
+            root_state = None
             try:
+                asset = env.scene[scene_name]
                 root_state = asset.data.default_root_state.clone()
             except Exception:
-                root_state = asset.data.root_state_w.clone()
+                try:
+                    root_state = asset.data.root_state_w.clone()
+                except Exception:
+                    root_state = None
 
-            if "position" in state:
-                root_state[:, 0:3] = _broadcast_field(state["position"], 3)
-            if "orientation" in state:
-                root_state[:, 3:7] = _broadcast_field(state["orientation"], 4)
-            if "linear_velocity" in state:
-                root_state[:, 7:10] = _broadcast_field(state["linear_velocity"], 3)
-            else:
-                root_state[:, 7:10] = 0.0
-            if "angular_velocity" in state:
-                root_state[:, 10:13] = _broadcast_field(state["angular_velocity"], 3)
-            else:
-                root_state[:, 10:13] = 0.0
+            if root_state is not None:
+                if "position" in state:
+                    root_state[:, 0:3] = _broadcast_field(state["position"], 3)
+                if "orientation" in state:
+                    root_state[:, 3:7] = _broadcast_field(state["orientation"], 4)
+                if "linear_velocity" in state:
+                    root_state[:, 7:10] = _broadcast_field(state["linear_velocity"], 3)
+                else:
+                    root_state[:, 7:10] = 0.0
+                if "angular_velocity" in state:
+                    root_state[:, 10:13] = _broadcast_field(state["angular_velocity"], 3)
+                else:
+                    root_state[:, 10:13] = 0.0
 
-            asset.write_root_state_to_sim(root_state, env_ids=env_ids)
-            scene_object_changed = True
-            applied_objects.append(
-                f"{object_name}->{scene_name}:pos={root_state[0, 0:3].detach().cpu().numpy().tolist()}"
-            )
-            continue
+                asset.write_root_state_to_sim(root_state, env_ids=env_ids)
+                scene_object_changed = True
+                applied_objects.append(
+                    f"{object_name}->{scene_name}:pos={root_state[0, 0:3].detach().cpu().numpy().tolist()}"
+                )
+                continue
 
         spec = _resolve_spec_by_record_name(env_cfg, object_name)
         prim_paths = [str(v) for v in ((spec or {}).get("prim_paths", []) or []) if v]
@@ -587,6 +626,8 @@ def apply_explicit_env_object_states(
 
         orientation_value = state.get("orientation", np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
         first_pos = None
+        first_readback_pos = None
+        first_readback_ori = None
         for env_idx in range(env.num_envs):
             pos = _pick_env_field(state["position"], env_idx, 3)
             ori = _pick_env_field(orientation_value, env_idx, 4)
@@ -600,8 +641,20 @@ def apply_explicit_env_object_states(
                     break
             if write_ok and first_pos is None:
                 first_pos = pos.tolist()
+                if prim_path:
+                    readback = _read_prim_world_pose(prim_path)
+                    if readback is not None:
+                        readback_pos, readback_ori = readback
+                        first_readback_pos = readback_pos.tolist()
+                        first_readback_ori = readback_ori.tolist()
         if first_pos is not None:
-            applied_objects.append(f"{object_name}->prim:pos={first_pos}")
+            if first_readback_pos is not None:
+                applied_objects.append(
+                    f"{object_name}->prim:target_pos={first_pos}:readback_pos={first_readback_pos}:"
+                    f"readback_ori={first_readback_ori}"
+                )
+            else:
+                applied_objects.append(f"{object_name}->prim:pos={first_pos}")
 
     if scene_object_changed:
         env.scene.write_data_to_sim()

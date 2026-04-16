@@ -1,1 +1,0 @@
-jump 6/22 | ep=53 frame=512 delta=159.0 deg

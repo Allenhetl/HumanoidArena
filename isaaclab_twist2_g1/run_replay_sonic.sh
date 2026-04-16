@@ -10,7 +10,9 @@ cd "${SCRIPT_DIR}" || exit 1
 PYTHON_BIN="python"
 DEFAULT_ISAACLAB_PY="/home/dreams/miniconda3/envs/unitree_sim_env_isaaclab5_0/bin/python"
 # Double-desk HOI recording (edit REPLAY_FILE for other runs)
-REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic_v3/zk/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1776167470033014.npz"
+REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_doubledesk/sonic/tw/Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody_sonic_1776310845760138.npz"
+# REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/zk/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1776167367864058.npz"
+
   # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775894660832965.npz
   # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775894789682027.npz
   # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775894841888126.npz
@@ -33,9 +35,10 @@ REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recordin
 # REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_open_door/sonic/zk/Isaac-Move-Open-Door-G129-Dex3-Wholebody_sonic_1775975894226796.npz"
 REPLAY_MODE="direct_replay"   # inference_replay | direct_replay
 REPLAY_LOOP=0                    # 1 | 0
+TASK_NAME="${TASK_NAME:-}"       # 留空则从 replay 文件读取
 # ENV_CONFIG_YAML="tasks/common_env_config/opendoor_sonic.yaml"
 # ENV_CONFIG_YAML="tasks/common_env_config/doubledesk_sonic.yaml"
-ENV_CONFIG_YAML="tasks/common_env_config/football_single_sonic.yaml"
+ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/doubledesk_sonic.yaml}"
 RUN_DEVICE="cpu"
 ROBOT_TYPE="g129"
 ROBOT_COLLIDER_MODE="box"        # box | fourpoints
@@ -52,30 +55,6 @@ SEED="42"
 
 export PROJECT_ROOT="${SCRIPT_DIR}"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
-
-load_task_name_from_yaml() {
-  "${PYTHON_BIN}" - "${SCRIPT_DIR}/tasks/common_env_config/loader.py" "${1}" <<'PY'
-import importlib.util
-import pathlib
-import sys
-
-loader_path = pathlib.Path(sys.argv[1])
-config_path = sys.argv[2]
-spec = importlib.util.spec_from_file_location("common_env_config_loader", loader_path)
-module = importlib.util.module_from_spec(spec)
-assert spec.loader is not None
-spec.loader.exec_module(module)
-
-task_name = module.get_env_config_task_name(config_path)
-if not task_name:
-    raise SystemExit(
-        f"Error: env config YAML must define a top-level 'task_name': {config_path}"
-    )
-print(task_name)
-PY
-}
-
-TASK_NAME="${TASK_NAME:-$(load_task_name_from_yaml "${ENV_CONFIG_YAML}")}"
 
 if [ ! -f "${REPLAY_FILE}" ]; then
   echo "Error: replay file not found: ${REPLAY_FILE}"

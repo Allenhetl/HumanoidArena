@@ -1,1 +1,0 @@
-jump 18/22 | ep=14 frame=281 delta=130.1 deg

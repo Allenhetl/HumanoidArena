@@ -6,5 +6,5 @@ backend: twist2
 overrides:
   sim:
     dt: 0.001
-  decimation: 10
+  decimation: 20
   object_reset_seed_source: env_seed

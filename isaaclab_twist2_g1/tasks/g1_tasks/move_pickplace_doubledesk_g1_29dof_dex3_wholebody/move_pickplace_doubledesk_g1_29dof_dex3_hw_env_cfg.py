@@ -13,14 +13,14 @@ from isaaclab.sensors import ContactSensorCfg
 from . import mdp
 from tasks.common_config import G1RobotPresets, CameraPresets
 from tasks.common_event.event_manager import SimpleEvent, SimpleEventManager
-from tasks.common_scene.base_scene_pickplace_doubledesk import DoubleTableSceneCfg
+from tasks.common_scene.base_scene_pickplace_doubledesk import BASKET_RIGID_SUBPRIM, DoubleTableSceneCfg
 from common_env_objects import apply_deterministic_object_resets
 
 
 @configclass
 class PickPlaceDoubleDeskSceneCfg(DoubleTableSceneCfg):
     robot: ArticulationCfg = G1RobotPresets.g1_29dof_dex3_wholebody(
-        init_pos=(-3.0, -2.2, 0.8),
+        init_pos=(-3.7, -2.2, 0.8),
         # init_pos=(-1.8, -6.0, 0.8), # far_distance
         init_rot=(1, 0.0, 0.0, 0.0),
     )
@@ -222,19 +222,22 @@ class MovePickPlaceDoubleDeskG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
             for env_idx in range(env.num_envs):
                 basket_root = stage.GetPrimAtPath(f"/World/envs/env_{env_idx}/Basket")
                 if not basket_root or not basket_root.IsValid():
+                    basket_root = stage.GetPrimAtPath(
+                        f"/World/envs/env_{env_idx}/Basket/{BASKET_RIGID_SUBPRIM}"
+                    )
+                if not basket_root or not basket_root.IsValid():
                     continue
                 for sub_prim in Usd.PrimRange(basket_root):
                     collision_api = UsdPhysics.MeshCollisionAPI.Get(stage, str(sub_prim.GetPath()))
                     if not collision_api:
                         continue
-                    collision_api = UsdPhysics.MeshCollisionAPI.Apply(sub_prim)
-                    collision_api.GetApproximationAttr().Set("sdf")
+                    approximation = collision_api.GetApproximationAttr().Get()
                     updates.append(
                         f"{sub_prim.GetPath().pathString}:"
-                        f"{collision_api.GetApproximationAttr().Get()}"
+                        f"{approximation}"
                     )
             if updates:
-                print("[basket_collision] approximation=" + ", ".join(updates))
+                print("[basket_collision] approximation(preserved)=" + ", ".join(updates))
             else:
                 print("[basket_collision] no MeshCollisionAPI found under /Basket")
         except Exception as exc:

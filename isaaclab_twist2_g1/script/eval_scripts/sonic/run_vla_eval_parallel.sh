@@ -5,8 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ISAACLAB_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 export ROBOT_USD_OVERRIDE="${ISAACLAB_ROOT}/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2.usd"
-TASK_NAME="Isaac-Move-Football-Single-G129-Dex3-Wholebody"
-ENV_CONFIG_YAML="tasks/common_env_config/football_single_sonic.yaml"
+ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/football_single_sonic.yaml}"
 ISAAC_DEVICE="cpu"
 HEADLESS=1
 MAX_STEPS=1000
@@ -35,6 +34,30 @@ TLS_KEY_FILE=""
 REPEATS_PER_SEED=1
 SEEDS=($(seq 0 99))
 echo "${SEEDS[@]}"
+
+load_task_name_from_yaml() {
+  python - "${ISAACLAB_ROOT}/tasks/common_env_config/loader.py" "${1}" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+loader_path = pathlib.Path(sys.argv[1])
+config_path = sys.argv[2]
+spec = importlib.util.spec_from_file_location("common_env_config_loader", loader_path)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+task_name = module.get_env_config_task_name(config_path)
+if not task_name:
+    raise SystemExit(
+        f"Error: env config YAML must define a top-level 'task_name': {config_path}"
+    )
+print(task_name)
+PY
+}
+
+TASK_NAME="${TASK_NAME:-$(load_task_name_from_yaml "${ENV_CONFIG_YAML}")}"
 
 MODEL_PATHS=(
   "/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/train/diffusion_twist2_0401/checkpoints/last/pretrained_model"

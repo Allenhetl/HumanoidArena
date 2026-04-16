@@ -7,5 +7,9 @@
 /GR00T-WholeBodyControl/
 /lerobot/outputs
 /isaaclab_twist2_g1/script/eval_scripts/twist2/eval_results
+/isaaclab_twist2_g1/script/eval_scripts/sonic/eval_results
 /isaaclab_twist2_g1/outputs
+/isaaclab_twist2_g1/smpl
+/isaaclab_twist2_g1/smpl/SMPL_NEUTRAL.pkl
 GMR
+.omx/

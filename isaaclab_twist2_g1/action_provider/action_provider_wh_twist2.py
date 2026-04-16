@@ -772,10 +772,10 @@ class TWIST2ActionProvider(ActionProvider):
             -0.2, 0.0, 0.0, 0.4, -0.2, 0.0,  # left leg (6)
             -0.2, 0.0, 0.0, 0.4, -0.2, 0.0,  # right leg (6)
             0.0, 0.0, 0.0,                   # waist (3)
-            0.0, 0.4, 0.0, 0.05, 0.0, 0.0, 0.0,  # left arm (7)
-            # 0.0, 0.4, 0.0, 1.2, 0.0, 0.0, 0.0,  # left arm (7)
-            0.0, -0.4, 0.0, 0.05, 0.0, 0.0, 0.0, # right arm (7)
-            # 0.0, -0.4, 0.0, 1.2, 0.0, 0.0, 0.0, # right arm (7)
+            # 0.0, 0.4, 0.0, 0.05, 0.0, 0.0, 0.0,  # left arm (7)
+            0.0, 0.4, 0.0, 1.2, 0.0, 0.0, 0.0,  # left arm (7)
+            # 0.0, -0.4, 0.0, 0.05, 0.0, 0.0, 0.0, # right arm (7)
+            0.0, -0.4, 0.0, 1.2, 0.0, 0.0, 0.0, # right arm (7)
         ], device=self.env.device, dtype=torch.float32).unsqueeze(0)  # [1, 35]
 
         # Indices used in TWIST2

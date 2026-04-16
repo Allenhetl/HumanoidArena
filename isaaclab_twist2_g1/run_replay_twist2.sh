@@ -8,11 +8,11 @@ cd "${SCRIPT_DIR}" || exit 1
 # User config: edit here
 # ------------------------------------------------------------------
 PYTHON_BIN="python"
-REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/test/twist2/Isaac-Move-Football-Single-G129-Dex3-Wholebody_1775828021422741.npz"
+REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_doubledesk/twist2_v2/tw/Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody_1776266674455679.npz"
 REPLAY_MODE="direct"   # inference | direct
 REPLAY_LOOP=0             # 1 | 0
 TASK_NAME=""              # 留空则从 replay 文件读取
-ENV_CONFIG_YAML="tasks/common_env_config/football_single_twist2.yaml"
+ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/doubledesk_twist2.yaml}"
 RUN_DEVICE="cpu"
 ROBOT_TYPE="g129"
 ROBOT_COLLIDER_MODE="box" # box | fourpoints

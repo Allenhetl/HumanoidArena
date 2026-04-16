@@ -1,1 +1,0 @@
-jump 21/22 | ep=69 frame=674 delta=127.3 deg

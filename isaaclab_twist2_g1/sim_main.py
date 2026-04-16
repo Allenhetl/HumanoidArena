@@ -236,7 +236,11 @@ from action_provider.reset_control import (
     publish_reset_complete,
     read_reset_trigger,
 )
-from common_env_objects import apply_explicit_env_object_states as _apply_explicit_env_object_states_common
+from common_env_objects import (
+    apply_deterministic_object_resets_with_seed,
+    apply_explicit_env_object_states as _apply_explicit_env_object_states_common,
+    get_recordable_env_object_specs,
+)
 from tasks.common_env_config import apply_env_config_yaml
 from tasks.common_runtime import apply_optional_runtime_augments
 from tools.get_stiffness import get_robot_stiffness_from_env
@@ -347,17 +351,19 @@ def _publish_backend_input_ready(args_cli, *, redis_client=None, source="startup
     return payload
 
 
-def _load_replay_initial_env_object_states(args_cli):
+def _load_replay_env_init_cache(args_cli):
     replay_file = getattr(args_cli, "replay_file", "")
     if not replay_file:
-        return {}
+        return {"object_states": {}, "episode_object_seed": None, "episode_object_seed_source": ""}
 
-    cached = getattr(args_cli, "_replay_initial_env_object_states_cache", None)
+    cached = getattr(args_cli, "_replay_env_init_cache", None)
     if cached is not None:
         return cached
 
     replay_path = Path(replay_file).expanduser().resolve()
     object_states = {}
+    episode_object_seed = None
+    episode_object_seed_source = ""
     suffixes = {
         "_position": "position",
         "_orientation": "orientation",
@@ -393,8 +399,27 @@ def _load_replay_initial_env_object_states(args_cli):
                     "falling back to frame-0 env_obj_* state from replay file"
                 )
 
-    setattr(args_cli, "_replay_initial_env_object_states_cache", object_states)
-    return object_states
+        if "episode_object_seed" in replay_data:
+            episode_object_seed = int(np.asarray(replay_data["episode_object_seed"]).item())
+        if "episode_object_seed_source" in replay_data:
+            episode_object_seed_source = str(np.asarray(replay_data["episode_object_seed_source"]).item())
+
+    cache = {
+        "object_states": object_states,
+        "episode_object_seed": episode_object_seed,
+        "episode_object_seed_source": episode_object_seed_source,
+    }
+    setattr(args_cli, "_replay_env_init_cache", cache)
+    return cache
+
+
+def _load_replay_initial_env_object_states(args_cli):
+    return _load_replay_env_init_cache(args_cli)["object_states"]
+
+
+def _load_replay_episode_object_seed_info(args_cli):
+    cache = _load_replay_env_init_cache(args_cli)
+    return cache.get("episode_object_seed"), cache.get("episode_object_seed_source", "")
 
 def _apply_explicit_env_object_states(env, env_cfg, object_states, *, log_prefix="replay_env_init"):
     return _apply_explicit_env_object_states_common(env, env_cfg, object_states, log_prefix=log_prefix)
@@ -402,9 +427,73 @@ def _apply_explicit_env_object_states(env, env_cfg, object_states, *, log_prefix
 
 def _restore_replay_initial_env_state_if_needed(env, args_cli):
     object_states = _load_replay_initial_env_object_states(args_cli)
-    if not object_states:
-        return False
-    return _apply_explicit_env_object_states(env, env.cfg, object_states)
+    specs = get_recordable_env_object_specs(env.cfg)
+    configured_names = {
+        str(spec.get("record_name"))
+        for spec in specs
+        if spec.get("record_name")
+    }
+    spec_by_name = {
+        str(spec.get("record_name")): spec
+        for spec in specs
+        if spec.get("record_name")
+    }
+    episode_seed, episode_seed_source = _load_replay_episode_object_seed_info(args_cli)
+    seed_applied_names: set[str] = set()
+
+    # For prim-path objects such as the doubledesk basket, explicit world-pose snapshots can be
+    # polluted by authored xform stacks on the referenced USD. When a recorded episode seed exists,
+    # rebuild these objects through the same deterministic reset path used during recording.
+    seed_preferred_names = {
+        name
+        for name, spec in spec_by_name.items()
+        if spec.get("prim_paths") and not spec.get("scene_keys")
+    }
+    if episode_seed is not None and seed_preferred_names:
+        applied = apply_deterministic_object_resets_with_seed(
+            env.cfg,
+            env,
+            episode_seed=episode_seed,
+            seed_source=episode_seed_source or "recorded",
+            selected_record_names={str(name) for name in seed_preferred_names},
+        )
+        if applied:
+            seed_applied_names = {
+                entry.split("->", 1)[0]
+                for entry in applied
+                if "->" in entry
+            }
+            print(
+                "[replay_env_init] rebuilt prim-path object init state from "
+                f"episode_object_seed={episode_seed} source={episode_seed_source or 'recorded'} "
+                f"for {sorted(seed_applied_names)}"
+            )
+
+    explicit_object_states = {
+        name: state
+        for name, state in object_states.items()
+        if name not in seed_applied_names
+    }
+    missing_names = configured_names - seed_applied_names - set(explicit_object_states)
+
+    if missing_names and episode_seed is not None:
+        applied = apply_deterministic_object_resets_with_seed(
+            env.cfg,
+            env,
+            episode_seed=episode_seed,
+            seed_source=episode_seed_source or "recorded",
+            selected_record_names={str(name) for name in missing_names},
+        )
+        if applied:
+            print(
+                "[replay_env_init] replay file missing explicit init state for "
+                f"{sorted(missing_names)}; rebuilt from recorded episode_object_seed={episode_seed} "
+                f"source={episode_seed_source or 'recorded'}"
+            )
+
+    if not explicit_object_states:
+        return bool(seed_applied_names)
+    return _apply_explicit_env_object_states(env, env.cfg, explicit_object_states)
 
 
 def _perform_complete_reset(env, env_cfg, args_cli, redis_client=None, action_provider=None):

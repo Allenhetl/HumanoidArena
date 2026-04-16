@@ -8,7 +8,7 @@ cd "${SCRIPT_DIR}" || exit 1
 # User config: edit here
 # ------------------------------------------------------------------
 PYTHON_BIN="python"
-ENV_CONFIG_YAML="tasks/common_env_config/doubledesk_sonic.yaml"
+ENV_CONFIG_YAML="tasks/common_env_config/boxing_bag_sonic.yaml"
 RUN_DEVICE="cpu"
 ROBOT_TYPE="g129"
 ROBOT_COLLIDER_MODE="box"   # box | fourpoints
@@ -26,7 +26,7 @@ IMAGE_XROBOT_PORT="12345"
 IMAGE_XROBOT_BITRATE="2097152"
 IMAGE_FPS="30"
 IMAGE_XROBOT_FFMPEG="/usr/bin/ffmpeg"
-RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/test/sonic"
+RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HOI_doubledesk/sonic/yb"
 
 export PROJECT_ROOT="${SCRIPT_DIR}"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"

@@ -29,6 +29,7 @@ from isaaclab.managers import SceneEntityCfg
 
 from common_env_objects import resolve_env_object_scene_key
 from tasks.common_scene.base_scene_pickplace_doubledesk import (
+    BASKET_RIGID_SUBPRIM,
     CRATE_INIT_POS,
     HAMMER_INIT_POS,
 )
@@ -122,24 +123,26 @@ def _load_basket_goal_boxes_from_stage_local(
 ) -> list[tuple[float, float, float, float, float, float]]:
     """Read the live imported ``/Basket`` AABB and convert it to env-local coordinates."""
     boxes: list[tuple[float, float, float, float, float, float]] = []
-    basket_root = stage.GetPrimAtPath("/World/envs/env_0/Basket")
-    if basket_root is None or not basket_root.IsValid() or not basket_root.IsActive():
-        return []
-
     candidate_paths = (
         "/World/envs/env_0/Basket",
-        "/World/envs/env_0/Basket/PRootNode",
+        f"/World/envs/env_0/Basket/{BASKET_RIGID_SUBPRIM}",
     )
+    basket_root = None
     for path in candidate_paths:
         prim = stage.GetPrimAtPath(path)
         if prim is None or not prim.IsValid() or not prim.IsActive():
             continue
+        if basket_root is None:
+            basket_root = prim
         try:
             box = _range_to_local_box(env, bbox_cache.ComputeWorldBound(prim).ComputeAlignedRange())
         except Exception:
             continue
         if box is not None:
             boxes.append(box)
+
+    if basket_root is None:
+        return []
 
     if boxes:
         return _dedupe_goal_boxes_local(boxes)

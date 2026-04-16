@@ -6,7 +6,7 @@ backend: twist2
 overrides:
   sim:
     dt: 0.001
-  decimation: 10
+  decimation: 20
   object_reset_seed_source: time
   deterministic_object_resets:
     - record_name: football

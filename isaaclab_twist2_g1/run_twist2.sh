@@ -8,7 +8,7 @@ cd "${SCRIPT_DIR}" || exit 1
 # User config: edit here
 # ------------------------------------------------------------------
 PYTHON_BIN="python"
-ENV_CONFIG_YAML="tasks/common_env_config/football_single_twist2.yaml"
+ENV_CONFIG_YAML="tasks/common_env_config/doubledesk_twist2.yaml"
 RUN_DEVICE="cpu"
 ROBOT_TYPE="g129"
 ROBOT_COLLIDER_MODE="box"   # box | fourpoints
@@ -18,13 +18,12 @@ ENABLE_DEX3_DDS=1
 HEADLESS=1
 IMAGE_TRANSPORT="xrobot"
 IMAGE_XROBOT_HOST="10.42.0.35" # eth
-#IMAGE_XROBOT_HOST="192.168.101.69" ｜ wifi
+# IMAGE_XROBOT_HOST="192.168.101.174" #｜ wifi
 IMAGE_XROBOT_PORT="12345"
 IMAGE_XROBOT_BITRATE="16777216"
 IMAGE_FPS="30"
 IMAGE_XROBOT_FFMPEG="/usr/bin/ffmpeg"
-RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HOI_football_v2/twist2/zk/"
-
+RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HOI_doubledesk/twist2_v2/zz"
 export PROJECT_ROOT="${SCRIPT_DIR}"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
 

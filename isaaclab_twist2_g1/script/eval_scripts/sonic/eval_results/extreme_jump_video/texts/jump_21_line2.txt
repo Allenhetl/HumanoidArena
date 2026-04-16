@@ -1,1 +1,0 @@
-source=Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775908638445975.npz | t_local=13.480s | t_video=34.280s

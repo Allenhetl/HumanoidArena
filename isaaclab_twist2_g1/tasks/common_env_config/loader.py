@@ -212,6 +212,17 @@ def apply_env_config_yaml(
     if resolved_path is None:
         return None
 
+    yaml_task_name = raw_cfg.get("task_name", raw_cfg.get("task"))
+    if task_name and isinstance(yaml_task_name, str) and yaml_task_name.strip():
+        normalized_task_name = str(task_name).strip()
+        normalized_yaml_task_name = yaml_task_name.strip()
+        if normalized_task_name != normalized_yaml_task_name:
+            raise ValueError(
+                "Environment config YAML task_name mismatch: "
+                f"requested task='{normalized_task_name}', yaml task_name='{normalized_yaml_task_name}' "
+                f"from {resolved_path}"
+            )
+
     merged_overrides = _collect_yaml_overrides(
         raw_cfg,
         task_name=task_name,

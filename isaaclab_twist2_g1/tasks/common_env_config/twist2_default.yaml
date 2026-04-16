@@ -4,4 +4,4 @@ description: Default environment timing overrides for TWIST2-backed simulation.
 overrides:
   sim:
     dt: 0.001
-  decimation: 10
+  decimation: 20
