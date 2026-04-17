@@ -45,7 +45,7 @@ import numpy as np
 import torch
 from scipy.spatial.transform import Rotation as R
 
-from action_provider.action_base import ActionProvider
+from action_provider.action_base import ActionProvider, ReplayComplete
 from action_provider.lerobot_vla_http_client import LeRobotVLAHttpClient
 from action_provider.recording_common import AsyncEpisodeRecorder
 from action_provider.vision_video import write_rgb_video_mp4
@@ -77,6 +77,7 @@ from common_env_objects import (
     resolve_env_object_scene_key,
 )
 from pico_server.data_utils.params import DEFAULT_HAND_POSE
+from tools.get_reward import get_step_reward_value
 
 # Isaac Sim imports for RTF monitoring
 try:
@@ -979,6 +980,37 @@ def _json_string(value: Any) -> str:
     return json.dumps(value, default=_json_default, separators=(",", ":"))
 
 
+def _decode_json_episode_field(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    arr = np.asarray(value)
+    if arr.shape == ():
+        value = arr.item()
+    elif arr.size == 1:
+        value = arr.reshape(-1)[0].item()
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8")
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        return json.loads(value)
+    if isinstance(value, list):
+        return value
+    raise TypeError(f"Unsupported episode JSON field type: {type(value)}")
+
+
+def _reward_scalar(env) -> float:
+    try:
+        reward = get_step_reward_value(env)
+        if isinstance(reward, torch.Tensor):
+            if reward.numel() == 0:
+                return 0.0
+            return float(reward.detach().reshape(-1)[0].item())
+        return float(reward)
+    except Exception:
+        return 0.0
+
+
 def _extract_controller_binary_signals(controller_data: dict | None) -> dict[str, bool]:
     def _get_side_data(side_name: str) -> dict:
         if not isinstance(controller_data, dict):
@@ -1059,6 +1091,42 @@ def _apply_heading_align_to_vla_action(
     return out.astype(np.float32)
 
 
+def _store_sonic_camera_stream(
+    organized: dict[str, Any],
+    *,
+    save_dir: str | None,
+    task_name: str,
+    timestamp_us: int,
+    fps: float,
+    frames: list[np.ndarray],
+    depth_frames: list[np.ndarray],
+    frame_indices: list[int],
+    indices_key: str,
+    video_path_key: str,
+    video_fps_key: str,
+    video_num_frames_key: str,
+    depth_key: str,
+    raw_rgb_key: str,
+    video_suffix: str,
+) -> bool:
+    if not frames:
+        return False
+    organized[indices_key] = np.array(frame_indices, dtype=np.int32)
+    organized[video_fps_key] = np.array(fps, dtype=np.float32)
+    if save_dir:
+        basename = f"{task_name}_{timestamp_us}_{video_suffix}.mp4"
+        video_relpath = os.path.join("videos", basename)
+        video_abspath = os.path.join(save_dir, video_relpath)
+        written = write_rgb_video_mp4(frames, video_abspath, fps=fps)
+        organized[video_path_key] = np.array(video_relpath)
+        organized[video_num_frames_key] = np.array(written, dtype=np.int32)
+    else:
+        organized[raw_rgb_key] = np.array(frames, dtype=np.uint8)
+    if depth_frames:
+        organized[depth_key] = np.asarray(depth_frames, dtype=np.float16)
+    return True
+
+
 def _organize_sonic_episode(
     data_buffer: list[dict[str, Any]],
     timestamp_us: int,
@@ -1069,6 +1137,7 @@ def _organize_sonic_episode(
         raise ValueError("empty sonic recording buffer")
 
     first = data_buffer[0]
+    last = data_buffer[-1]
     meta = first["meta"]
     num_frames = len(data_buffer)
 
@@ -1250,35 +1319,101 @@ def _organize_sonic_episode(
     object_seed_source = meta.get("episode_object_seed_source")
     if object_seed_source:
         organized["episode_object_seed_source"] = np.array(str(object_seed_source))
+    rerecord_final_reward = last.get("rerecord_final_reward")
+    if rerecord_final_reward is not None:
+        organized["rerecord_final_reward"] = np.array(float(rerecord_final_reward), dtype=np.float32)
 
-    rgb_frames = []
-    depth_frames = []
-    vision_indices = []
+    front_rgb_frames = []
+    front_depth_frames = []
+    front_vision_indices = []
+    left_wrist_rgb_frames = []
+    left_wrist_depth_frames = []
+    left_wrist_indices = []
+    right_wrist_rgb_frames = []
+    right_wrist_depth_frames = []
+    right_wrist_indices = []
     for idx, frame in enumerate(data_buffer):
-        rgb = frame["env"]["vision"].get("rgb")
-        depth = frame["env"]["vision"].get("depth")
+        vision = frame["env"]["vision"]
+        rgb = vision.get("rgb")
+        depth = vision.get("depth")
         if rgb is not None:
-            rgb_frames.append(rgb)
-            vision_indices.append(idx)
+            front_rgb_frames.append(rgb)
+            front_vision_indices.append(idx)
         if depth is not None:
-            depth_frames.append(depth)
-    if rgb_frames:
-        organized["vision_frame_indices"] = np.array(vision_indices, dtype=np.int32)
+            front_depth_frames.append(depth)
+
+        left_rgb = vision.get("left_wrist_rgb")
+        left_depth = vision.get("left_wrist_depth")
+        if left_rgb is not None:
+            left_wrist_rgb_frames.append(left_rgb)
+            left_wrist_indices.append(idx)
+        if left_depth is not None:
+            left_wrist_depth_frames.append(left_depth)
+
+        right_rgb = vision.get("right_wrist_rgb")
+        right_depth = vision.get("right_wrist_depth")
+        if right_rgb is not None:
+            right_wrist_rgb_frames.append(right_rgb)
+            right_wrist_indices.append(idx)
+        if right_depth is not None:
+            right_wrist_depth_frames.append(right_depth)
+    if front_rgb_frames:
         organized["vision_storage_format"] = np.array("video_v1")
         control_dt = float(meta.get("control_dt", 0.0) or 0.0)
         video_fps = float(1.0 / control_dt) if control_dt > 1e-6 else 30.0
-        organized["vision_rgb_video_fps"] = np.array(video_fps, dtype=np.float32)
-        if save_dir:
-            basename = f"{task_name or meta['task']}_{timestamp_us}_front_rgb.mp4"
-            video_relpath = os.path.join("videos", basename)
-            video_abspath = os.path.join(save_dir, video_relpath)
-            written = write_rgb_video_mp4(rgb_frames, video_abspath, fps=video_fps)
-            organized["vision_rgb_video_path"] = np.array(video_relpath)
-            organized["vision_rgb_video_num_frames"] = np.array(written, dtype=np.int32)
-        else:
-            organized["vision_rgb"] = np.array(rgb_frames, dtype=np.uint8)
-    if depth_frames:
-        organized["vision_depth"] = np.asarray(depth_frames, dtype=np.float16)
+        _store_sonic_camera_stream(
+            organized,
+            save_dir=save_dir,
+            task_name=task_name or meta["task"],
+            timestamp_us=timestamp_us,
+            fps=video_fps,
+            frames=front_rgb_frames,
+            depth_frames=front_depth_frames,
+            frame_indices=front_vision_indices,
+            indices_key="vision_frame_indices",
+            video_path_key="vision_rgb_video_path",
+            video_fps_key="vision_rgb_video_fps",
+            video_num_frames_key="vision_rgb_video_num_frames",
+            depth_key="vision_depth",
+            raw_rgb_key="vision_rgb",
+            video_suffix="front_rgb",
+        )
+        if _store_sonic_camera_stream(
+            organized,
+            save_dir=save_dir,
+            task_name=task_name or meta["task"],
+            timestamp_us=timestamp_us,
+            fps=video_fps,
+            frames=left_wrist_rgb_frames,
+            depth_frames=left_wrist_depth_frames,
+            frame_indices=left_wrist_indices,
+            indices_key="vision_left_wrist_frame_indices",
+            video_path_key="vision_left_wrist_rgb_video_path",
+            video_fps_key="vision_left_wrist_rgb_video_fps",
+            video_num_frames_key="vision_left_wrist_rgb_video_num_frames",
+            depth_key="vision_left_wrist_depth",
+            raw_rgb_key="vision_left_wrist_rgb",
+            video_suffix="left_wrist_rgb",
+        ):
+            organized["schema_version"] = np.array("sonic_episode_v4_multicam")
+        if _store_sonic_camera_stream(
+            organized,
+            save_dir=save_dir,
+            task_name=task_name or meta["task"],
+            timestamp_us=timestamp_us,
+            fps=video_fps,
+            frames=right_wrist_rgb_frames,
+            depth_frames=right_wrist_depth_frames,
+            frame_indices=right_wrist_indices,
+            indices_key="vision_right_wrist_frame_indices",
+            video_path_key="vision_right_wrist_rgb_video_path",
+            video_fps_key="vision_right_wrist_rgb_video_fps",
+            video_num_frames_key="vision_right_wrist_rgb_video_num_frames",
+            depth_key="vision_right_wrist_depth",
+            raw_rgb_key="vision_right_wrist_rgb",
+            video_suffix="right_wrist_rgb",
+        ):
+            organized["schema_version"] = np.array("sonic_episode_v4_multicam")
 
     add_env_object_frame_arrays(organized, data_buffer)
     add_episode_init_env_object_fields(organized, first.get("episode_init_env"))
@@ -1325,6 +1460,8 @@ class SonicActionProvider(ActionProvider):
         self._replay_mode   = self._normalize_replay_mode(getattr(args_cli, "replay_mode", "inference_replay"))
         self._replay_loop   = bool(getattr(args_cli, "replay_loop", False))
         self._replay_enabled = bool(self._replay_file)
+        self._record_during_replay = bool(getattr(args_cli, "record_during_replay", False))
+        self._exit_when_replay_complete = bool(getattr(args_cli, "exit_when_replay_complete", False))
         self._input_source = getattr(args_cli, "input_source", "") or ""
         self._gmt_backend = getattr(args_cli, "gmt_backend", "") or ""
         self._use_lerobot_vla = self._input_source == "vla"
@@ -1404,6 +1541,8 @@ class SonicActionProvider(ActionProvider):
             self._pose_source = "replay"
         if self._use_lerobot_vla and self._replay_enabled:
             raise ValueError("[SonicActionProvider] input_source=vla and replay_file are mutually exclusive")
+        if self._record_during_replay and not self._replay_enabled:
+            raise ValueError("[SonicActionProvider] record_during_replay requires replay_file")
         self._replay_anchor_heading_initialized = None
         self._replay_anchor_use_heading_align = None
         self._replay_anchor_init_base_quat_wxyz = None
@@ -1440,7 +1579,7 @@ class SonicActionProvider(ActionProvider):
             max_save_workers=int(getattr(args_cli, "recording_save_workers", 1)),
             max_queue_size=int(getattr(args_cli, "recording_save_queue_size", 10)),
         )
-        self._should_start_recording_on_first_call = not self._replay_enabled
+        self._should_start_recording_on_first_call = (not self._replay_enabled) or self._record_during_replay
         self._recording_command = "none"
         self._recording_active = False
         self._recording_display_state = "idle"
@@ -1451,12 +1590,16 @@ class SonicActionProvider(ActionProvider):
         self._pending_save_jobs = 0
         self._waiting_for_reset_complete = False
         self._reset_complete_received = False
+        self._replay_completion_requested = False
         self._input_ready_key = get_input_ready_key("sonic_joint29" if self._sonic_joint29_mode else "sonic")
         self._input_ready_epoch_id = -1
         self._input_ready_timestamp_realtime = 0.0
         self._input_ready_timestamp_monotonic = 0.0
         self._stale_input_drop_logged_epoch = -1
         self._episode_id = 0
+        self._replay_human_raw_smplx = []
+        self._replay_human_controller_json = []
+        self._replay_human_recording_control_json = []
         self._latest_human_smplx_frame = None
         self._raw_controller_data = None
         self._latest_controller_data = None
@@ -1778,6 +1921,11 @@ class SonicActionProvider(ActionProvider):
             self._replay_smpl_joints = _load_array(replay_data, "human_smpl_joints")
             self._replay_smpl_pose = _load_array(replay_data, "human_smpl_pose")
             self._replay_body_quat_w = _load_array(replay_data, "human_body_quat_w")
+            self._replay_human_raw_smplx = _decode_json_episode_field(replay_data.get("human_raw_smplx_json"))
+            self._replay_human_controller_json = _decode_json_episode_field(replay_data.get("human_controller_json"))
+            self._replay_human_recording_control_json = _decode_json_episode_field(
+                replay_data.get("human_recording_control_json")
+            )
             self._replay_joint_pos = _load_array(replay_data, "robot_qpos_before_decimation")
             self._replay_joint_vel = _load_array(replay_data, "robot_qvel_before_decimation")
             self._replay_frame_indices = _load_array(replay_data, "frame_index")
@@ -2309,6 +2457,40 @@ class SonicActionProvider(ActionProvider):
         if self._use_lerobot_vla:
             self._apply_hand_binary_targets(left_closed=False, right_closed=False)
 
+    def _recording_enabled_for_current_mode(self) -> bool:
+        return (not self._replay_enabled) or self._record_during_replay
+
+    def _finalize_replay_if_needed(self) -> None:
+        if self._replay_completion_requested:
+            return
+        self._replay_completion_requested = True
+        try:
+            setattr(self.env, "_request_main_loop_exit", True)
+            print("[SonicActionProvider] Marked env for main-loop exit after replay completion")
+        except Exception:
+            pass
+        if self._record_during_replay and self.recording_manager.is_recording:
+            final_reward = _reward_scalar(self.env)
+            if self.recording_manager.recording_buffer:
+                self.recording_manager.recording_buffer[-1]["rerecord_final_reward"] = final_reward
+            print(f"[SonicActionProvider] Final rerecord reward={final_reward:.4f}")
+            print("[SonicActionProvider] Finalizing replay rerecord before exit")
+            self.recording_manager.save_recording()
+        if self._exit_when_replay_complete:
+            sim = getattr(self.env, "sim", None)
+            stop_fn = getattr(sim, "stop", None)
+            if callable(stop_fn):
+                try:
+                    stop_fn()
+                    print("[SonicActionProvider] Requested env.sim.stop() after replay completion")
+                except Exception as exc:
+                    print(f"[SonicActionProvider] env.sim.stop() after replay completion failed: {exc}")
+
+    def should_exit_after_replay_complete(self) -> bool:
+        if not self._exit_when_replay_complete:
+            return False
+        return bool(self._replay_completion_requested)
+
     def _next_replay_frame_idx(self) -> int | None:
         if not self._replay_enabled or self._replay_num_frames <= 0:
             return None
@@ -2329,6 +2511,24 @@ class SonicActionProvider(ActionProvider):
         if self._replay_hand_right is not None and frame_idx < len(self._replay_hand_right):
             right = np.asarray(self._replay_hand_right[frame_idx], dtype=np.float32).reshape(-1)
             self._right_hand_target[: min(7, right.shape[0])] = right[:7]
+
+    def _apply_replay_raw_human_context(self, frame_idx: int) -> None:
+        self._latest_human_smplx_frame = (
+            self._replay_human_raw_smplx[frame_idx]
+            if frame_idx < len(self._replay_human_raw_smplx)
+            else None
+        )
+        self._raw_controller_data = (
+            self._replay_human_controller_json[frame_idx]
+            if frame_idx < len(self._replay_human_controller_json)
+            else None
+        )
+        self._latest_recording_control = (
+            self._replay_human_recording_control_json[frame_idx]
+            if frame_idx < len(self._replay_human_recording_control_json)
+            else None
+        )
+        self._consumed_controller_data = self._raw_controller_data
 
     def _apply_replay_anchor_state(self, frame_idx: int) -> None:
         if (
@@ -2370,6 +2570,7 @@ class SonicActionProvider(ActionProvider):
 
     def _prepare_replay_frame(self, frame_idx: int) -> np.ndarray | None:
         self._set_replay_hand_targets(frame_idx)
+        self._apply_replay_raw_human_context(frame_idx)
         self._apply_replay_anchor_state(frame_idx)
         if self._replay_frame_indices is not None and frame_idx < len(self._replay_frame_indices):
             self._latest_frame_index = int(np.asarray(self._replay_frame_indices[frame_idx]).reshape(-1)[-1])
@@ -2730,6 +2931,7 @@ class SonicActionProvider(ActionProvider):
             root_z = float(robot.root_state_w[0, 2].cpu().numpy())
 
         self._episode_init_env_state = self._collect_env_state()
+        self._replay_completion_requested = False
 
         self._frame_count = 0
         self._smpl_data_valid = False
@@ -3097,15 +3299,35 @@ class SonicActionProvider(ActionProvider):
         return collect_recordable_env_object_states(self.env, self.env.cfg)
 
     def _collect_vision_state(self) -> dict[str, Any]:
-        vision = {"rgb": None, "depth": None}
+        vision = {
+            "rgb": None,
+            "depth": None,
+            "left_wrist_rgb": None,
+            "left_wrist_depth": None,
+            "right_wrist_rgb": None,
+            "right_wrist_depth": None,
+        }
         try:
-            if "front_camera" not in self.env.scene.keys():
-                return vision
-            camera = self.env.scene["front_camera"]
-            if "rgb" in camera.data.output:
-                vision["rgb"] = camera.data.output["rgb"][0].cpu().numpy().copy()
-            if "distance_to_image_plane" in camera.data.output:
-                vision["depth"] = camera.data.output["distance_to_image_plane"][0].cpu().numpy().copy()
+            if "front_camera" in self.env.scene.keys():
+                camera = self.env.scene["front_camera"]
+                if "rgb" in camera.data.output:
+                    vision["rgb"] = camera.data.output["rgb"][0].cpu().numpy().copy()
+                if "distance_to_image_plane" in camera.data.output:
+                    vision["depth"] = camera.data.output["distance_to_image_plane"][0].cpu().numpy().copy()
+
+            if "left_wrist_camera" in self.env.scene.keys():
+                camera = self.env.scene["left_wrist_camera"]
+                if "rgb" in camera.data.output:
+                    vision["left_wrist_rgb"] = camera.data.output["rgb"][0].cpu().numpy().copy()
+                if "distance_to_image_plane" in camera.data.output:
+                    vision["left_wrist_depth"] = camera.data.output["distance_to_image_plane"][0].cpu().numpy().copy()
+
+            if "right_wrist_camera" in self.env.scene.keys():
+                camera = self.env.scene["right_wrist_camera"]
+                if "rgb" in camera.data.output:
+                    vision["right_wrist_rgb"] = camera.data.output["rgb"][0].cpu().numpy().copy()
+                if "distance_to_image_plane" in camera.data.output:
+                    vision["right_wrist_depth"] = camera.data.output["distance_to_image_plane"][0].cpu().numpy().copy()
         except Exception:
             return vision
         return vision
@@ -4787,7 +5009,7 @@ class SonicActionProvider(ActionProvider):
                     self._reset_complete_received = True
                     self.on_env_reset()
                     self._episode_id += 1
-                    if not self._replay_enabled:
+                    if self._recording_enabled_for_current_mode():
                         # Align post-reset episode boundaries with startup recording:
                         # start the new segment immediately after reset, before any
                         # fresh live pose frames can advance the provider state.
@@ -4810,6 +5032,9 @@ class SonicActionProvider(ActionProvider):
             if self._replay_enabled:
                 replay_frame_idx = self._next_replay_frame_idx()
                 if replay_frame_idx is None:
+                    self._finalize_replay_if_needed()
+                    if self._exit_when_replay_complete:
+                        raise ReplayComplete("SonicActionProvider replay rerecord complete")
                     return self._default_pos.clone().squeeze(0)
                 replay_direct_targets = self._prepare_replay_frame(replay_frame_idx)
                 if debug_log:
@@ -4892,7 +5117,7 @@ class SonicActionProvider(ActionProvider):
                 if self._waiting_for_reset_complete:
                     return self._default_pos.clone().squeeze(0)
             self._latest_decoder_body_effort = body_effort_preview.copy()
-            if not self._replay_enabled and self.recording_manager.is_recording:
+            if self._recording_enabled_for_current_mode() and self.recording_manager.is_recording:
                 self.recording_manager.add_frame(
                     self._collect_recording_data(
                         full_action=full_action,
@@ -4902,7 +5127,7 @@ class SonicActionProvider(ActionProvider):
                 )
                 if self._reset_complete_received:
                     self._reset_complete_received = False
-            if not self._replay_enabled:
+            if self._recording_enabled_for_current_mode():
                 self._update_recording_display_state()
 
             # 5. 步进仿真（decimation）
@@ -5061,6 +5286,8 @@ class SonicActionProvider(ActionProvider):
 
             return full_action
 
+        except ReplayComplete:
+            raise
         except Exception as e:
             print(f"[SonicActionProvider] get_action error: {e}")
             import traceback

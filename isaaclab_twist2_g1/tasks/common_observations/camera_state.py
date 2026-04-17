@@ -259,25 +259,25 @@ def get_camera_image(
     #     except Exception as e:
     #         print(f"[CAMERA_STATE] Warning: Failed to compute joint keypoints: {e}")
 
-    # Left camera (left wrist camera) - DISABLED
-    # if "left_wrist_camera" in env.scene.keys():
-    #     left_image = env.scene["left_wrist_camera"].data.output["rgb"][0]
-    #     images["left"] = left_image.cpu().numpy()
+    # Left camera (left wrist camera)
+    if "left_wrist_camera" in env.scene.keys():
+        left_image = env.scene["left_wrist_camera"].data.output["rgb"][0]
+        images["left"] = left_image.cpu().numpy()
 
-    #     # Get depth data if available
-    #     if "distance_to_image_plane" in env.scene["left_wrist_camera"].data.output:
-    #         left_depth = env.scene["left_wrist_camera"].data.output["distance_to_image_plane"][0]
-    #         depths["left"] = left_depth.cpu().numpy()
+        # Get depth data if available
+        if "distance_to_image_plane" in env.scene["left_wrist_camera"].data.output:
+            left_depth = env.scene["left_wrist_camera"].data.output["distance_to_image_plane"][0]
+            depths["left"] = left_depth.cpu().numpy()
 
-    # Right camera (right wrist camera) - DISABLED
-    # if "right_wrist_camera" in env.scene.keys():
-    #     right_image = env.scene["right_wrist_camera"].data.output["rgb"][0]
-    #     images["right"] = right_image.cpu().numpy()
+    # Right camera (right wrist camera)
+    if "right_wrist_camera" in env.scene.keys():
+        right_image = env.scene["right_wrist_camera"].data.output["rgb"][0]
+        images["right"] = right_image.cpu().numpy()
 
-    #     # Get depth data if available
-    #     if "distance_to_image_plane" in env.scene["right_wrist_camera"].data.output:
-    #         right_depth = env.scene["right_wrist_camera"].data.output["distance_to_image_plane"][0]
-    #         depths["right"] = right_depth.cpu().numpy()
+        # Get depth data if available
+        if "distance_to_image_plane" in env.scene["right_wrist_camera"].data.output:
+            right_depth = env.scene["right_wrist_camera"].data.output["distance_to_image_plane"][0]
+            depths["right"] = right_depth.cpu().numpy()
 
     # if no camera with the specified name is found, try other common camera names
     if not images:

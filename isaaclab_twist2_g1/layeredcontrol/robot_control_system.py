@@ -119,6 +119,20 @@ class RobotController:
 
                 sync_reward_after_physics_step(self.env)
 
+            # Replay rerecord jobs should stop the controller immediately once the
+            # provider reports EOF completion, instead of continuing to replay the
+            # last cached action indefinitely.
+            if action is None:
+                should_exit = getattr(self.action_provider, "should_exit_after_replay_complete", None)
+                if callable(should_exit):
+                    try:
+                        if should_exit():
+                            print("[SimpleController] replay completion acknowledged, stopping controller")
+                            self.is_running = False
+                            return
+                    except Exception as exc:
+                        print(f"[SimpleController] replay completion check failed: {exc}")
+
         # if no action is obtained, use the pre-calculated fallback strategy
         if action is None:
             action = self._last_action

@@ -1,6 +1,6 @@
 # Copyright (c) 2025, Unitree Robotics Co., Ltd. All Rights Reserved.
 # License: Apache License, Version 2.0
-from action_provider.action_base import ActionProvider
+from action_provider.action_base import ActionProvider, ReplayComplete
 from action_provider.reset_control import get_input_ready_key
 from typing import Optional
 import torch
@@ -39,6 +39,7 @@ from common_env_objects import (
     resolve_env_object_scene_key,
 )
 from pico_server.data_utils.params import DEFAULT_HAND_POSE
+from tools.get_reward import get_step_reward_value
 
 project_root = os.environ.get("PROJECT_ROOT")
 
@@ -91,6 +92,98 @@ def _extract_controller_binary_signals(controller_data: dict | None) -> dict[str
         "left_open_trigger_binary": _get_open_trigger_binary("LeftController"),
         "right_open_trigger_binary": _get_open_trigger_binary("RightController"),
     }
+
+
+def _decode_npz_scalar(value):
+    if value is None:
+        return None
+    arr = np.asarray(value)
+    if arr.shape == ():
+        return arr.item()
+    if arr.size == 1:
+        return arr.reshape(-1)[0].item()
+    return arr
+
+
+def _decode_json_list_field(value) -> list:
+    decoded = _decode_npz_scalar(value)
+    if decoded in (None, ""):
+        return []
+    if isinstance(decoded, (bytes, bytearray)):
+        decoded = decoded.decode("utf-8")
+    if isinstance(decoded, str):
+        return json.loads(decoded)
+    if isinstance(decoded, list):
+        return decoded
+    raise TypeError(f"Unsupported JSON list payload type: {type(decoded)}")
+
+
+def _reward_scalar(env) -> float:
+    try:
+        reward = get_step_reward_value(env)
+        if isinstance(reward, torch.Tensor):
+            if reward.numel() == 0:
+                return 0.0
+            return float(reward.detach().reshape(-1)[0].item())
+        return float(reward)
+    except Exception:
+        return 0.0
+
+
+def _build_replay_controller_data(controller_binary: dict[str, bool]) -> dict[str, dict[str, float | bool]]:
+    left_close = bool(controller_binary.get("left_close_trigger_binary", False))
+    right_close = bool(controller_binary.get("right_close_trigger_binary", False))
+    left_open = bool(controller_binary.get("left_open_trigger_binary", False))
+    right_open = bool(controller_binary.get("right_open_trigger_binary", False))
+    return {
+        "LeftController": {
+            "grip_binary": bool(controller_binary.get("left_grip_binary", False)),
+            "close_trigger_binary": left_close,
+            "open_trigger_binary": left_open,
+            "index_trig": 1.0 if left_close else 0.0,
+            "grip": 1.0 if left_open else 0.0,
+        },
+        "RightController": {
+            "grip_binary": bool(controller_binary.get("right_grip_binary", False)),
+            "close_trigger_binary": right_close,
+            "open_trigger_binary": right_open,
+            "index_trig": 1.0 if right_close else 0.0,
+            "grip": 1.0 if right_open else 0.0,
+        },
+    }
+
+
+def _store_optional_camera_stream(
+    organized: dict,
+    *,
+    save_dir: str,
+    task_name: str,
+    timestamp_us: int,
+    fps: float,
+    frames: list[np.ndarray],
+    depth_frames: list[np.ndarray],
+    frame_indices: list[int],
+    rgb_key: str,
+    depth_key: str,
+    indices_key: str,
+    video_path_key: str,
+    video_fps_key: str,
+    video_num_frames_key: str,
+    video_suffix: str,
+) -> bool:
+    if not frames:
+        return False
+    video_basename = f"{task_name}_{timestamp_us}_{video_suffix}.mp4"
+    video_relpath = os.path.join("videos", video_basename)
+    video_abspath = os.path.join(save_dir, video_relpath)
+    written = write_rgb_video_mp4(frames, video_abspath, fps=fps)
+    organized[video_path_key] = np.array(video_relpath)
+    organized[video_fps_key] = np.array(fps, dtype=np.float32)
+    organized[video_num_frames_key] = np.array(written, dtype=np.int32)
+    organized[indices_key] = np.array(frame_indices, dtype=np.int32)
+    if depth_frames:
+        organized[depth_key] = np.asarray(depth_frames, dtype=np.float16)
+    return True
 
 
 class RecordingManager:
@@ -284,6 +377,7 @@ class RecordingManager:
             raise ValueError("Data buffer is empty")
 
         first_frame = data_buffer[0]
+        last_frame = data_buffer[-1]
         print(f"[RecordingManager] First frame keys: {first_frame.keys()}")
         print(f"[RecordingManager] Task: {first_frame.get('task', 'N/A')}")
 
@@ -343,6 +437,9 @@ class RecordingManager:
             seed_source = episode_init_meta.get("object_seed_source")
             if seed_source:
                 organized["episode_object_seed_source"] = np.array(str(seed_source))
+        rerecord_final_reward = last_frame.get("rerecord_final_reward")
+        if rerecord_final_reward is not None:
+            organized["rerecord_final_reward"] = np.array(float(rerecord_final_reward), dtype=np.float32)
 
         first_robot = first_frame.get('robot', {})
         first_torque = first_robot.get('applied_torque_before_decimation')
@@ -362,12 +459,16 @@ class RecordingManager:
         # Lists for variable-size data
         human_smplx_list = []
         human_info_list = []
-        # Collect vision data (store first and last frame only to save space)
-        # vision_indices = [0, num_frames - 1] if num_frames > 1 else [0]
         vision_indices = list(range(num_frames))
-        vision_rgb_list = []
-        vision_depth_list = []
-        vision_frame_indices = []
+        front_rgb_list = []
+        front_depth_list = []
+        front_frame_indices = []
+        left_wrist_rgb_list = []
+        left_wrist_depth_list = []
+        left_wrist_frame_indices = []
+        right_wrist_rgb_list = []
+        right_wrist_depth_list = []
+        right_wrist_frame_indices = []
 
         # Fill arrays frame by frame
         for i, frame_data in enumerate(data_buffer):
@@ -422,12 +523,31 @@ class RecordingManager:
 
             # Vision data (only store selected frames)
             if i in vision_indices:
-                rgb = frame_data['robot']['vision']['rgb']
-                depth = frame_data['robot']['vision']['depth']
-                if rgb is not None and depth is not None:
-                    vision_rgb_list.append(rgb)
-                    vision_depth_list.append(depth)
-                    vision_frame_indices.append(i)
+                vision = frame_data['robot']['vision']
+
+                rgb = vision.get('rgb')
+                depth = vision.get('depth')
+                if rgb is not None:
+                    front_rgb_list.append(rgb)
+                    front_frame_indices.append(i)
+                if depth is not None:
+                    front_depth_list.append(depth)
+
+                left_rgb = vision.get('left_wrist_rgb')
+                left_depth = vision.get('left_wrist_depth')
+                if left_rgb is not None:
+                    left_wrist_rgb_list.append(left_rgb)
+                    left_wrist_frame_indices.append(i)
+                if left_depth is not None:
+                    left_wrist_depth_list.append(left_depth)
+
+                right_rgb = vision.get('right_wrist_rgb')
+                right_depth = vision.get('right_wrist_depth')
+                if right_rgb is not None:
+                    right_wrist_rgb_list.append(right_rgb)
+                    right_wrist_frame_indices.append(i)
+                if right_depth is not None:
+                    right_wrist_depth_list.append(right_depth)
 
             # System data
             organized['system_control_frequency'][i] = frame_data['system']['control_frequency']
@@ -442,19 +562,62 @@ class RecordingManager:
         add_episode_init_env_object_fields(organized, first_frame.get("episode_init_env"))
 
         # Add vision data
-        if vision_rgb_list:
+        if front_rgb_list:
             fps = float(np.clip(np.nanmedian(organized["system_control_frequency"]), 1.0, 240.0))
-            video_basename = f"{self.task_name}_{timestamp_us}_front_rgb.mp4"
-            video_relpath = os.path.join("videos", video_basename)
-            video_abspath = os.path.join(self.save_dir, video_relpath)
-            written = write_rgb_video_mp4(vision_rgb_list, video_abspath, fps=fps)
             organized['vision_storage_format'] = np.array("video_v1")
-            organized['vision_rgb_video_path'] = np.array(video_relpath)
-            organized['vision_rgb_video_fps'] = np.array(fps, dtype=np.float32)
-            organized['vision_rgb_video_num_frames'] = np.array(written, dtype=np.int32)
-            organized['vision_frame_indices'] = np.array(vision_frame_indices, dtype=np.int32)
-            if vision_depth_list:
-                organized['vision_depth'] = np.asarray(vision_depth_list, dtype=np.float16)
+            _store_optional_camera_stream(
+                organized,
+                save_dir=self.save_dir,
+                task_name=self.task_name,
+                timestamp_us=timestamp_us,
+                fps=fps,
+                frames=front_rgb_list,
+                depth_frames=front_depth_list,
+                frame_indices=front_frame_indices,
+                rgb_key='vision_rgb',
+                depth_key='vision_depth',
+                indices_key='vision_frame_indices',
+                video_path_key='vision_rgb_video_path',
+                video_fps_key='vision_rgb_video_fps',
+                video_num_frames_key='vision_rgb_video_num_frames',
+                video_suffix='front_rgb',
+            )
+            if _store_optional_camera_stream(
+                organized,
+                save_dir=self.save_dir,
+                task_name=self.task_name,
+                timestamp_us=timestamp_us,
+                fps=fps,
+                frames=left_wrist_rgb_list,
+                depth_frames=left_wrist_depth_list,
+                frame_indices=left_wrist_frame_indices,
+                rgb_key='vision_left_wrist_rgb',
+                depth_key='vision_left_wrist_depth',
+                indices_key='vision_left_wrist_frame_indices',
+                video_path_key='vision_left_wrist_rgb_video_path',
+                video_fps_key='vision_left_wrist_rgb_video_fps',
+                video_num_frames_key='vision_left_wrist_rgb_video_num_frames',
+                video_suffix='left_wrist_rgb',
+            ):
+                organized['schema_version'] = np.array("twist2_episode_v3_multicam")
+            if _store_optional_camera_stream(
+                organized,
+                save_dir=self.save_dir,
+                task_name=self.task_name,
+                timestamp_us=timestamp_us,
+                fps=fps,
+                frames=right_wrist_rgb_list,
+                depth_frames=right_wrist_depth_list,
+                frame_indices=right_wrist_frame_indices,
+                rgb_key='vision_right_wrist_rgb',
+                depth_key='vision_right_wrist_depth',
+                indices_key='vision_right_wrist_frame_indices',
+                video_path_key='vision_right_wrist_rgb_video_path',
+                video_fps_key='vision_right_wrist_rgb_video_fps',
+                video_num_frames_key='vision_right_wrist_rgb_video_num_frames',
+                video_suffix='right_wrist_rgb',
+            ):
+                organized['schema_version'] = np.array("twist2_episode_v3_multicam")
 
         return organized
 
@@ -606,6 +769,8 @@ class TWIST2ActionProvider(ActionProvider):
         self._replay_mode = self._normalize_replay_mode(getattr(args_cli, "replay_mode", "inference_replay"))
         self._replay_loop = bool(getattr(args_cli, "replay_loop", False))
         self._replay_enabled = bool(self._replay_file)
+        self._record_during_replay = bool(getattr(args_cli, "record_during_replay", False))
+        self._exit_when_replay_complete = bool(getattr(args_cli, "exit_when_replay_complete", False))
         self._input_source = getattr(args_cli, "input_source", "") or ""
         self._use_lerobot_vla = self._input_source == "vla"
         self._lerobot_server_url = getattr(args_cli, "lerobot_server_url", "") or ""
@@ -625,6 +790,8 @@ class TWIST2ActionProvider(ActionProvider):
             raise FileNotFoundError(f"[{self.name}] Policy file not found: {self.policy_path}")
         if self._use_lerobot_vla and self._replay_enabled:
             raise ValueError(f"[{self.name}] input_source=vla and replay_file are mutually exclusive")
+        if self._record_during_replay and not self._replay_enabled:
+            raise ValueError(f"[{self.name}] record_during_replay requires replay_file")
         self.env = env
         self.task_name = args_cli.task  # Store task name for recording
 
@@ -639,13 +806,15 @@ class TWIST2ActionProvider(ActionProvider):
 
         # Recording will start on first get_action() call (after env.reset())
         # This ensures Frame 0 captures real physics state, not default values
-        self._should_start_recording_on_first_call = not self._replay_enabled
-        if self._replay_enabled:
+        self._should_start_recording_on_first_call = (not self._replay_enabled) or self._record_during_replay
+        if self._replay_enabled and not self._record_during_replay:
             print(f"[{self.name}] 🎬 Recording auto-start disabled during replay")
         else:
             print(f"[{self.name}] 🔴 AUTO-START RECORDING ENABLED")
             print(f"[{self.name}] Recording will start on first get_action() call")
             print(f"[{self.name}] This ensures Frame 0 captures real physics state")
+        if self._record_during_replay:
+            print(f"[{self.name}] 🔁 Replay rerecord enabled")
 
         # Debug: Fix root in air for PID tuning
         # Set to True to fix robot root at a fixed height, preventing falls during teleop debugging
@@ -734,6 +903,14 @@ class TWIST2ActionProvider(ActionProvider):
         self._replay_data_hand_left = None
         self._replay_data_hand_right = None
         self._replay_data_neck = None
+        self._replay_human_smplx_data = []
+        self._replay_human_info_data = []
+        self._replay_pico_left_grip_binary = None
+        self._replay_pico_right_grip_binary = None
+        self._replay_pico_left_close_trigger_binary = None
+        self._replay_pico_right_close_trigger_binary = None
+        self._replay_pico_left_open_trigger_binary = None
+        self._replay_pico_right_open_trigger_binary = None
         self._replay_object_states = {}
         self._replay_num_frames = 0
         self._replay_cursor = 0
@@ -742,6 +919,7 @@ class TWIST2ActionProvider(ActionProvider):
         self._replay_joint_err_log_interval = 10
         self._replay_object_err_sums = {}
         self._replay_object_err_counts = {}
+        self._replay_completion_requested = False
         self._episode_init_env_state = self._collect_env_state()
 
         if self._replay_enabled:
@@ -1457,6 +1635,22 @@ class TWIST2ActionProvider(ActionProvider):
                         [right_close if row[1] >= 0.5 else right_open for row in hand_binary], axis=0
                     ).astype(np.float32)
             self._replay_data_neck = self._load_replay_array(replay_data, "human_neck")
+            self._replay_human_smplx_data = _decode_json_list_field(replay_data.get("human_smplx_data"))
+            self._replay_human_info_data = _decode_json_list_field(replay_data.get("human_info_data"))
+            self._replay_pico_left_grip_binary = self._load_replay_array(replay_data, "pico_left_grip_binary")
+            self._replay_pico_right_grip_binary = self._load_replay_array(replay_data, "pico_right_grip_binary")
+            self._replay_pico_left_close_trigger_binary = self._load_replay_array(
+                replay_data, "pico_left_close_trigger_binary"
+            )
+            self._replay_pico_right_close_trigger_binary = self._load_replay_array(
+                replay_data, "pico_right_close_trigger_binary"
+            )
+            self._replay_pico_left_open_trigger_binary = self._load_replay_array(
+                replay_data, "pico_left_open_trigger_binary"
+            )
+            self._replay_pico_right_open_trigger_binary = self._load_replay_array(
+                replay_data, "pico_right_open_trigger_binary"
+            )
             self._replay_object_states = {}
             replay_object_suffixes = {
                 "_position": "position",
@@ -1610,7 +1804,72 @@ class TWIST2ActionProvider(ActionProvider):
         self._replay_cursor += 1
         return frame_idx
 
+    def _get_replay_controller_binary(self, frame_idx: int) -> dict[str, bool]:
+        def _frame_bool(series) -> bool:
+            if series is None or frame_idx >= len(series):
+                return False
+            return bool(np.asarray(series[frame_idx]).reshape(-1)[-1])
+
+        return {
+            "left_grip_binary": _frame_bool(self._replay_pico_left_grip_binary),
+            "right_grip_binary": _frame_bool(self._replay_pico_right_grip_binary),
+            "left_close_trigger_binary": _frame_bool(self._replay_pico_left_close_trigger_binary),
+            "right_close_trigger_binary": _frame_bool(self._replay_pico_right_close_trigger_binary),
+            "left_open_trigger_binary": _frame_bool(self._replay_pico_left_open_trigger_binary),
+            "right_open_trigger_binary": _frame_bool(self._replay_pico_right_open_trigger_binary),
+        }
+
+    def _apply_replay_human_context(self, frame_idx: int) -> None:
+        if frame_idx < len(self._replay_human_smplx_data):
+            self._twist2_human_smplx_data = copy.deepcopy(self._replay_human_smplx_data[frame_idx])
+            self._twist2_human_smplx_valid = self._twist2_human_smplx_data is not None
+        else:
+            self._twist2_human_smplx_data = None
+            self._twist2_human_smplx_valid = False
+
+        if frame_idx < len(self._replay_human_info_data):
+            self._twist2_human_info = copy.deepcopy(self._replay_human_info_data[frame_idx])
+            self._twist2_human_info_valid = self._twist2_human_info is not None
+        else:
+            self._twist2_human_info = None
+            self._twist2_human_info_valid = False
+
+        controller_binary = self._get_replay_controller_binary(frame_idx)
+        self._twist2_controller_data = _build_replay_controller_data(controller_binary)
+
+    def _finalize_replay_if_needed(self) -> None:
+        if self._replay_completion_requested:
+            return
+        self._replay_completion_requested = True
+        try:
+            setattr(self.env, "_request_main_loop_exit", True)
+            print(f"[{self.name}] Marked env for main-loop exit after replay completion")
+        except Exception:
+            pass
+        if self._record_during_replay and self.recording_manager.is_recording:
+            final_reward = _reward_scalar(self.env)
+            if self.recording_manager.recording_buffer:
+                self.recording_manager.recording_buffer[-1]["rerecord_final_reward"] = final_reward
+            print(f"[{self.name}] Final rerecord reward={final_reward:.4f}")
+            print(f"[{self.name}] 💾 Finalizing replay rerecord before exit")
+            self.recording_manager.save_recording()
+        if self._exit_when_replay_complete:
+            sim = getattr(self.env, "sim", None)
+            stop_fn = getattr(sim, "stop", None)
+            if callable(stop_fn):
+                try:
+                    stop_fn()
+                    print(f"[{self.name}] Requested env.sim.stop() after replay completion")
+                except Exception as exc:
+                    print(f"[{self.name}] env.sim.stop() after replay completion failed: {exc}")
+
+    def should_exit_after_replay_complete(self) -> bool:
+        if not self._exit_when_replay_complete:
+            return False
+        return bool(self._replay_completion_requested)
+
     def _set_replay_hand_targets(self, frame_idx: int) -> None:
+        self._apply_replay_human_context(frame_idx)
         self._twist2_hand_valid = False
         self._twist2_action_hand_left.zero_()
         self._twist2_action_hand_right.zero_()
@@ -2163,6 +2422,9 @@ class TWIST2ActionProvider(ActionProvider):
                 replay_frame_idx = self._next_replay_frame_idx()
                 if replay_frame_idx is None:
                     print(f"[{self.name}] Replay finished")
+                    self._finalize_replay_if_needed()
+                    if self._exit_when_replay_complete:
+                        raise ReplayComplete(f"{self.name} replay rerecord complete")
                     return None
                 target_29, obs_buf = self._run_replay_policy(replay_frame_idx)
             else:
@@ -2500,6 +2762,8 @@ class TWIST2ActionProvider(ActionProvider):
                 self._print_performance_report()
 
             return full_action
+        except ReplayComplete:
+            raise
         except Exception as e:
             print(f"[{self.name}] Get DDS action failed: {e}")
             return None
@@ -2843,11 +3107,43 @@ class TWIST2ActionProvider(ActionProvider):
                 vision_data["rgb_display"] = None
                 vision_data["depth"] = None
                 print(f"[{self.name}] Warning: front_camera not found in scene")
+
+            if "left_wrist_camera" in self.env.scene.keys():
+                left_camera = self.env.scene["left_wrist_camera"]
+                if "rgb" in left_camera.data.output:
+                    vision_data["left_wrist_rgb"] = left_camera.data.output["rgb"][0].cpu().numpy().copy()
+                else:
+                    vision_data["left_wrist_rgb"] = None
+                if "distance_to_image_plane" in left_camera.data.output:
+                    vision_data["left_wrist_depth"] = left_camera.data.output["distance_to_image_plane"][0].cpu().numpy().copy()
+                else:
+                    vision_data["left_wrist_depth"] = None
+            else:
+                vision_data["left_wrist_rgb"] = None
+                vision_data["left_wrist_depth"] = None
+
+            if "right_wrist_camera" in self.env.scene.keys():
+                right_camera = self.env.scene["right_wrist_camera"]
+                if "rgb" in right_camera.data.output:
+                    vision_data["right_wrist_rgb"] = right_camera.data.output["rgb"][0].cpu().numpy().copy()
+                else:
+                    vision_data["right_wrist_rgb"] = None
+                if "distance_to_image_plane" in right_camera.data.output:
+                    vision_data["right_wrist_depth"] = right_camera.data.output["distance_to_image_plane"][0].cpu().numpy().copy()
+                else:
+                    vision_data["right_wrist_depth"] = None
+            else:
+                vision_data["right_wrist_rgb"] = None
+                vision_data["right_wrist_depth"] = None
         except Exception as e:
             print(f"[{self.name}] Failed to get camera data: {e}")
             vision_data["rgb"] = None
             vision_data["rgb_display"] = None
             vision_data["depth"] = None
+            vision_data["left_wrist_rgb"] = None
+            vision_data["left_wrist_depth"] = None
+            vision_data["right_wrist_rgb"] = None
+            vision_data["right_wrist_depth"] = None
 
         robot_data["vision"] = vision_data
 
@@ -2986,6 +3282,7 @@ class TWIST2ActionProvider(ActionProvider):
             self._replay_joint_mae_count = 0
             self._replay_object_err_sums = {}
             self._replay_object_err_counts = {}
+            self._replay_completion_requested = False
             if self._use_lerobot_vla:
                 self._lerobot_vla_runtime.reset()
                 if self._lerobot_http_client is not None:

@@ -4,22 +4,19 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}" || exit 1
 
-# ------------------------------------------------------------------
-# User config: edit here
-# ------------------------------------------------------------------
 PYTHON_BIN="python"
-REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2/zz/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_1776435375070891.npz"
-REPLAY_MODE="direct"   # inference | direct
-REPLAY_LOOP=0             # 1 | 0
-TASK_NAME=""              # 留空则从 replay 文件读取
-ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/small_warehouse_vision_navigation_twist2.yaml}"
+REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_double_desk/twist2/zz/Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody_1776343243956570.npz"
+REPLAY_MODE="direct"
+REPLAY_LOOP=0
+TASK_NAME=""
+ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/doubledesk_twist2.yaml}"
 RUN_DEVICE="cpu"
 ROBOT_TYPE="g129"
-ROBOT_COLLIDER_MODE="box" # box | fourpoints
+ROBOT_COLLIDER_MODE="box"
 ENABLE_CAMERAS=1
-ENABLE_WRIST_CAMERAS=0
+ENABLE_WRIST_CAMERAS=1
 ENABLE_DEX3_DDS=1
-HEADLESS=0
+HEADLESS=1
 MODEL_PATH="/home/dreams/Users/taowen/HumanoidArena/TWIST2/assets/ckpts/twist2_1017_20k.onnx"
 IMAGE_TRANSPORT="zmq"
 IMAGE_ZMQ_PORT="5555"
@@ -30,6 +27,7 @@ STATS_INTERVAL="10.0"
 STEP_HZ="50"
 VIDEO_FPS="30"
 SEED="42"
+RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data_rerecord/HOI_double_desk/twist2_multicam/zz"
 
 export PROJECT_ROOT="${SCRIPT_DIR}"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
@@ -48,6 +46,19 @@ if [ "${REPLAY_MODE}" != "inference" ] && [ "${REPLAY_MODE}" != "direct" ]; then
 fi
 
 REPLAY_FILE="$(realpath "${REPLAY_FILE}")"
+mkdir -p "${RECORDING_SAVE_DIR}"
+START_SENTINEL="$(mktemp)"
+touch "${START_SENTINEL}"
+REPLAY_DIR="$(dirname "${REPLAY_FILE}")"
+RECORDING_SAVE_DIR_REAL="$(realpath "${RECORDING_SAVE_DIR}")"
+
+if [ "${REPLAY_DIR}" = "${RECORDING_SAVE_DIR_REAL}" ]; then
+  echo "Error: RECORDING_SAVE_DIR must not be the same directory as REPLAY_FILE"
+  echo "  replay_dir=${REPLAY_DIR}"
+  echo "  recording_save_dir=${RECORDING_SAVE_DIR_REAL}"
+  exit 1
+fi
+
 if [ -z "${TASK_NAME}" ]; then
   TASK_NAME="$("${PYTHON_BIN}" - "${REPLAY_FILE}" <<'PY'
 import sys
@@ -73,10 +84,10 @@ fi
 
 echo "[robot_usd] mode=${ROBOT_COLLIDER_MODE}"
 echo "[robot_usd] path=${ROBOT_USD_OVERRIDE}"
-echo "[twist2 replay] file=${REPLAY_FILE}"
-echo "[twist2 replay] mode=${REPLAY_MODE}"
-echo "[twist2 replay] task=${TASK_NAME}"
-echo "[twist2 replay] env_config=${ENV_CONFIG_YAML}"
+echo "[twist2 rerecord] file=${REPLAY_FILE}"
+echo "[twist2 rerecord] mode=${REPLAY_MODE}"
+echo "[twist2 rerecord] task=${TASK_NAME}"
+echo "[twist2 rerecord] recording_save_dir=${RECORDING_SAVE_DIR}"
 
 cmd=(
   "${PYTHON_BIN}" "${SCRIPT_DIR}/sim_main.py"
@@ -88,6 +99,9 @@ cmd=(
   --gmt_backend twist2
   --replay_file "${REPLAY_FILE}"
   --replay_mode "${REPLAY_MODE}"
+  --record_during_replay
+  --exit_when_replay_complete
+  --recording_save_dir "${RECORDING_SAVE_DIR}"
   --model_path "${MODEL_PATH}"
   --image_transport "${IMAGE_TRANSPORT}"
   --image_fps "${IMAGE_FPS}"
@@ -116,4 +130,50 @@ if [ "${REPLAY_LOOP}" = "1" ]; then
   cmd+=(--replay_loop)
 fi
 
-exec "${cmd[@]}"
+cleanup() {
+  rm -f "${START_SENTINEL}"
+}
+trap cleanup EXIT
+
+setsid "${cmd[@]}" &
+child_pid=$!
+rerecord_completed=0
+stable_count=0
+last_output_file=""
+last_size=""
+
+while kill -0 "${child_pid}" 2>/dev/null; do
+  latest_output="$(
+    find "${RECORDING_SAVE_DIR}" -maxdepth 1 -type f -name '*.npz' -newer "${START_SENTINEL}" 2>/dev/null \
+      | sort \
+      | tail -n 1
+  )"
+
+  if [ -n "${latest_output}" ]; then
+    current_size="$(stat -c%s "${latest_output}" 2>/dev/null || echo '')"
+    if [ "${latest_output}" = "${last_output_file}" ] && [ -n "${current_size}" ] && [ "${current_size}" = "${last_size}" ]; then
+      stable_count=$((stable_count + 1))
+    else
+      stable_count=0
+      last_output_file="${latest_output}"
+      last_size="${current_size}"
+    fi
+
+    if [ "${stable_count}" -ge 2 ]; then
+      rerecord_completed=1
+      echo "[run_rerecord_twist2] detected stable rerecord output: ${latest_output}"
+      kill -INT "-${child_pid}" 2>/dev/null || true
+      break
+    fi
+  fi
+
+  sleep 1
+done
+
+wait "${child_pid}" || rc=$?
+rc="${rc:-0}"
+
+if [ "${rerecord_completed}" -eq 1 ] && { [ "${rc}" -eq 130 ] || [ "${rc}" -eq 143 ]; }; then
+  exit 0
+fi
+exit "${rc}"

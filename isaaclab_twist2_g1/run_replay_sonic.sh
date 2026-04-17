@@ -10,7 +10,7 @@ cd "${SCRIPT_DIR}" || exit 1
 PYTHON_BIN="python"
 DEFAULT_ISAACLAB_PY="/home/dreams/miniconda3/envs/unitree_sim_env_isaaclab5_0/bin/python"
 # Double-desk HOI recording (edit REPLAY_FILE for other runs)
-REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_doubledesk/sonic/tw/Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody_sonic_1776310845760138.npz"
+REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_double_desk/sonic/tw/Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody_sonic_1776428555154908.npz"
 # REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/zk/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1776167367864058.npz"
 
   # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775894660832965.npz
@@ -43,12 +43,15 @@ RUN_DEVICE="cpu"
 ROBOT_TYPE="g129"
 ROBOT_COLLIDER_MODE="box"        # box | fourpoints
 ENABLE_CAMERAS=1
+ENABLE_WRIST_CAMERAS=1
 ENABLE_DEX3_DDS=1
 HEADLESS=0
 SONIC_ENCODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_encoder.onnx"
 SONIC_DECODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_decoder.onnx"
 IMAGE_TRANSPORT="zmq"
 IMAGE_ZMQ_PORT="5555"
+LEFT_WRIST_CAMERA_PORT="5557"
+RIGHT_WRIST_CAMERA_PORT="5558"
 IMAGE_FPS="30"
 LOG_DIR="${SCRIPT_DIR}/logs/sonic_replay"
 SEED="42"
@@ -149,6 +152,11 @@ cmd=(
 
 if [ "${ENABLE_CAMERAS}" = "1" ]; then
   cmd+=(--enable_cameras)
+fi
+if [ "${ENABLE_WRIST_CAMERAS}" = "1" ]; then
+  cmd+=(--enable_wrist_cameras)
+  cmd+=(--left_wrist_camera_port "${LEFT_WRIST_CAMERA_PORT}")
+  cmd+=(--right_wrist_camera_port "${RIGHT_WRIST_CAMERA_PORT}")
 fi
 if [ "${ENABLE_DEX3_DDS}" = "1" ]; then
   cmd+=(--enable_dex3_dds)

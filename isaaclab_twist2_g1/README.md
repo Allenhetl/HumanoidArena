@@ -50,6 +50,8 @@
 
 - [REPLAY_DEBUG_SUMMARY.md](/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/REPLAY_DEBUG_SUMMARY.md)
   当前 replay 问题、经验和修复总结。
+- [SCENE_RANDOMIZATION_SEED_RULES.md](/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/docs/SCENE_RANDOMIZATION_SEED_RULES.md)
+  场景随机化、录制和 replay 必须共用单一 `episode_object_seed` 的约束说明。
 - [TWIST2_DATA_FORMAT.md](/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/docs/TWIST2_DATA_FORMAT.md)
   `TWIST2` 录制 `.npz` 数据格式说明。
 - [SONIC_DATA_FORMAT.md](/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/docs/SONIC_DATA_FORMAT.md)
@@ -59,3 +61,4 @@
 
 - 当前推荐直接修改各 `run_*.sh` 文件顶部参数，不再额外走共享 YAML/配置脚本。
 - `TWIST2` 与 `SONIC` 都已经加入输入 ready barrier，避免启动或 reset 前的 Redis 数据污染录制首段。
+- 带随机场景初始化的任务只允许一颗场景主 seed。不要再为 obstacle layout 或局部 scene 初始化额外维护第二颗 seed。

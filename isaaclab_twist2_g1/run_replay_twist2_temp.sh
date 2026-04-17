@@ -8,11 +8,11 @@ cd "${SCRIPT_DIR}" || exit 1
 # User config: edit here
 # ------------------------------------------------------------------
 PYTHON_BIN="python"
-REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2/zz/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_1776435375070891.npz"
+REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_double_desk/twist2/zz/Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody_1776343243956570.npz"
 REPLAY_MODE="direct"   # inference | direct
 REPLAY_LOOP=0             # 1 | 0
 TASK_NAME=""              # 留空则从 replay 文件读取
-ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/small_warehouse_vision_navigation_twist2.yaml}"
+ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/doubledesk_twist2.yaml}"
 RUN_DEVICE="cpu"
 ROBOT_TYPE="g129"
 ROBOT_COLLIDER_MODE="box" # box | fourpoints
@@ -117,3 +117,15 @@ if [ "${REPLAY_LOOP}" = "1" ]; then
 fi
 
 exec "${cmd[@]}"
+
+# 可切换：
+#一般沙袋: tasks/common_env_config/boxing_bag_twist2.yaml
+#吊挂沙袋: tasks/common_env_config/boxing_bag_hanging_twist2.yaml
+#足球: tasks/common_env_config/football_twist2.yaml
+#单足球: tasks/common_env_config/football_single_twist2.yaml
+#双桌面拾放: tasks/common_env_config/doubledesk_twist2.yaml
+#Push-T: tasks/common_env_config/push_t_twist2.yaml
+#客厅抓杯：tasks/common_env_config/livingroom_grapcup_twist2.yaml
+#三级台阶平台：tasks/common_env_config/three_step_platform_twist2.yaml
+#开门：tasks/common_env_config/opendoor_twist2.yaml
+#小推车：tasks/common_env_config/pickplace_small_trolley_twist2.yaml

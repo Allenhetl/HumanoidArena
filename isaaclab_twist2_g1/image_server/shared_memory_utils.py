@@ -1,9 +1,11 @@
 # Copyright (c) 2025, Unitree Robotics Co., Ltd. All Rights Reserved.
 # License: Apache License, Version 2.0  
 """
-A simplified multi-image shared memory tool module
-When writing, concatenate three images (head, left, right) horizontally and write them
-When reading, split the concatenated image into three independent images
+A simplified multi-image shared memory tool module.
+
+Writers concatenate the active camera slots from ['head', 'world', 'left', 'right'] and
+store a slot bitmask in the header so readers can reconstruct sparse combinations such as
+head + left + right without mislabeling them.
 """
 
 import ctypes
@@ -11,8 +13,7 @@ import time
 import numpy as np
 import cv2
 from multiprocessing import shared_memory
-from typing import Optional, Dict, List
-import struct
+from typing import Optional, Dict
 
 # shared memory configuration
 SHM_NAME = "isaac_multi_image_shm"
@@ -35,7 +36,11 @@ class SimpleImageHeader(ctypes.Structure):
         ('rgb_data_size', ctypes.c_uint32),  # RGB data size
         ('depth_data_size', ctypes.c_uint32),  # depth data size
         ('has_depth', ctypes.c_uint32),  # whether depth data is included (0 or 1)
+        ('slot_mask', ctypes.c_uint32),  # bitmask for ['head', 'world', 'left', 'right']
     ]
+
+
+IMAGE_ORDER = ['head', 'world', 'left', 'right']
 
 
 class MultiImageWriter:
@@ -82,9 +87,9 @@ class MultiImageWriter:
             # Process RGB images
             frames_to_concat = []
             depth_frames_to_concat = []
-            image_order = ['head', 'world', 'left', 'right']
+            slot_mask = 0
 
-            for image_name in image_order:
+            for slot_idx, image_name in enumerate(IMAGE_ORDER):
                 if image_name in images:
                     # Process RGB
                     image = images[image_name]
@@ -106,6 +111,7 @@ class MultiImageWriter:
                         if len(depth.shape) == 3 and depth.shape[2] == 1:
                             depth = depth.squeeze(axis=2)
                         depth_frames_to_concat.append(depth)
+                    slot_mask |= (1 << slot_idx)
 
             if not frames_to_concat:
                 return False
@@ -141,6 +147,7 @@ class MultiImageWriter:
             header.rgb_data_size = rgb_data_size
             header.depth_data_size = depth_data_size
             header.has_depth = 1 if concatenated_depth is not None else 0
+            header.slot_mask = slot_mask
 
             # Write header
             header_size = ctypes.sizeof(SimpleImageHeader)
@@ -279,20 +286,28 @@ class MultiImageReader:
 
             # Split RGB images
             images = {}  # Ensure images is always a dict
-            image_names = ['head', 'world', 'left', 'right']
             single_width = header.single_width
+            slot_indices = [idx for idx in range(len(IMAGE_ORDER)) if header.slot_mask & (1 << idx)]
+            if not slot_indices:
+                slot_indices = list(range(header.image_count))
+            if len(slot_indices) != header.image_count:
+                print(
+                    f"[MultiImageReader] Invalid slot_mask={header.slot_mask:#x} for image_count={header.image_count}, "
+                    "falling back to positional mapping"
+                )
+                slot_indices = list(range(header.image_count))
 
             # Validate single_width
             if single_width == 0 or single_width * header.image_count != header.width:
                 print(f"[MultiImageReader] Invalid single_width: {single_width}, image_count: {header.image_count}, total width: {header.width}")
                 return self.buffer
 
-            for i in range(header.image_count):
-                if i < len(image_names):
-                    start_col = i * single_width
+            for packed_idx, slot_idx in enumerate(slot_indices):
+                if slot_idx < len(IMAGE_ORDER):
+                    start_col = packed_idx * single_width
                     end_col = start_col + single_width
                     single_image = concatenated_image[:, start_col:end_col, :]
-                    images[image_names[i]] = single_image
+                    images[IMAGE_ORDER[slot_idx]] = single_image
 
             # Read depth data if available
             if header.has_depth and header.depth_data_size > 0:
@@ -311,12 +326,12 @@ class MultiImageReader:
                     concatenated_depth = concatenated_depth.reshape(header.height, header.width)
 
                     # Split depth maps
-                    for i in range(header.image_count):
-                        if i < len(image_names):
-                            start_col = i * single_width
+                    for packed_idx, slot_idx in enumerate(slot_indices):
+                        if slot_idx < len(IMAGE_ORDER):
+                            start_col = packed_idx * single_width
                             end_col = start_col + single_width
                             single_depth = concatenated_depth[:, start_col:end_col]
-                            images[f"{image_names[i]}_depth"] = single_depth
+                            images[f"{IMAGE_ORDER[slot_idx]}_depth"] = single_depth
 
             # Update buffer and timestamp
             self.buffer = images

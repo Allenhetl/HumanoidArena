@@ -183,6 +183,18 @@ parser.add_argument("--setpgrp", action="store_true", default=False, help="detac
 parser.add_argument("--recording_save_dir", type=str, default="./recording_data", help="directory to save recording data")
 parser.add_argument("--auto_start_recording", action="store_true", default=False, help="automatically start recording on startup (for testing from-reset reproducibility)")
 parser.add_argument(
+    "--record_during_replay",
+    action="store_true",
+    default=False,
+    help="re-record a fresh episode while replaying an input npz; disabled by default to preserve legacy replay behavior",
+)
+parser.add_argument(
+    "--exit_when_replay_complete",
+    action="store_true",
+    default=False,
+    help="stop the main loop after replay reaches EOF (useful for batch replay/rerecord jobs)",
+)
+parser.add_argument(
     "--recording_save_workers",
     type=int,
     default=10,
@@ -201,10 +213,26 @@ parser.add_argument("--seed", type=int, default=None, help="random seed for repr
 # world camera parameters
 parser.add_argument("--enable_world_camera", action="store_true", default=False, help="enable world camera (third-person view)")
 parser.add_argument("--world_camera_port", type=int, default=5556, help="ZMQ port for world camera streaming")
+parser.add_argument(
+    "--enable_wrist_cameras",
+    action="store_true",
+    default=False,
+    help="enable left/right wrist camera sensors and streams",
+)
+parser.add_argument("--left_wrist_camera_port", type=int, default=5557, help="ZMQ port for left wrist camera streaming")
+parser.add_argument("--right_wrist_camera_port", type=int, default=5558, help="ZMQ port for right wrist camera streaming")
 
 # add AppLauncher parameters
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+
+if getattr(args_cli, "enable_wrist_cameras", False) and not getattr(args_cli, "enable_cameras", False):
+    print("[sim_main] enable_wrist_cameras requested; forcing enable_cameras for sensor rendering")
+    args_cli.enable_cameras = True
+if getattr(args_cli, "record_during_replay", False) and not (
+    getattr(args_cli, "input_source", "") == "replay" or getattr(args_cli, "replay_file", "")
+):
+    raise ValueError("--record_during_replay requires replay input (--replay_file / input_source=replay)")
 
 
 if args_cli.enable_dex3_dds and args_cli.enable_dex1_dds and args_cli.enable_inspire_dds:
@@ -228,6 +256,7 @@ from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
 
 from tools.data_json_load import sim_state_to_json
 from dds.sim_state_dds import *
+from action_provider.action_base import ReplayComplete
 from action_provider.create_action_provider import create_action_provider
 from action_provider.reset_control import (
     clear_reset_trigger,
@@ -301,6 +330,61 @@ def _initialize_task_scene(env, env_cfg, args_cli):
         print(f"[env_runtime] init setup failed: {exc}")
 
 
+def _resolve_wrist_camera_pair(args_cli, env_cfg):
+    from tasks.common_config import CameraPresets
+
+    usd_path = ""
+    try:
+        usd_path = str(env_cfg.scene.robot.spawn.usd_path).lower()
+    except Exception:
+        usd_path = ""
+
+    if getattr(args_cli, "enable_dex3_dds", False) or "dex3" in usd_path:
+        return CameraPresets.left_dex3_wrist_camera(), CameraPresets.right_dex3_wrist_camera(), "dex3"
+    if getattr(args_cli, "enable_inspire_dds", False) or "inspire" in usd_path:
+        return CameraPresets.left_inspire_wrist_camera(), CameraPresets.right_inspire_wrist_camera(), "inspire"
+    if getattr(args_cli, "enable_dex1_dds", False) or "dex1" in usd_path or "gripper" in usd_path:
+        return CameraPresets.left_gripper_wrist_camera(), CameraPresets.right_gripper_wrist_camera(), "gripper"
+    # Most replay/live G1 whole-body tasks in this repo use Dex3 hands.
+    return CameraPresets.left_dex3_wrist_camera(), CameraPresets.right_dex3_wrist_camera(), "dex3(default)"
+
+
+def _augment_env_cfg_with_wrist_cameras(env_cfg, args_cli):
+    if not getattr(args_cli, "enable_wrist_cameras", False):
+        return
+
+    left_cfg, right_cfg, hand_variant = _resolve_wrist_camera_pair(args_cli, env_cfg)
+    env_cfg.scene.left_wrist_camera = left_cfg
+    env_cfg.scene.right_wrist_camera = right_cfg
+    print(
+        "[sim_main] Wrist cameras enabled in scene config "
+        f"(variant={hand_variant}, left={left_cfg.prim_path}, right={right_cfg.prim_path})"
+    )
+
+
+def _create_image_server(args_cli, *, port: int, camera_name: str, redis_suffix: str, dds_suffix: str, xrobot_port_offset: int):
+    redis_channel = args_cli.image_redis_channel + redis_suffix if args_cli.image_redis_channel else ""
+    return ImageServer(
+        fps=args_cli.image_fps,
+        port=port,
+        Unit_Test=False,
+        transport=args_cli.image_transport,
+        redis_host=args_cli.image_redis_host,
+        redis_port=args_cli.image_redis_port,
+        redis_db=args_cli.image_redis_db,
+        redis_key_prefix=args_cli.image_redis_key_prefix + redis_suffix,
+        redis_channel=redis_channel,
+        dds_topic=args_cli.image_dds_topic + dds_suffix,
+        xrobot_host=args_cli.image_xrobot_host,
+        xrobot_port=args_cli.image_xrobot_port + xrobot_port_offset,
+        xrobot_bitrate=args_cli.image_xrobot_bitrate,
+        xrobot_width=None,
+        xrobot_height=None,
+        xrobot_ffmpeg=args_cli.image_xrobot_ffmpeg or None,
+        camera_name=camera_name,
+    )
+
+
 def _trigger_task_reset_event(env_cfg, event_name, env):
     event_manager = getattr(env_cfg, "event_manager", None)
     if event_manager is None:
@@ -337,6 +421,22 @@ def _notify_action_provider_env_objects_reset(action_provider):
     method = getattr(action_provider, "on_env_objects_reset", None)
     if callable(method):
         method()
+
+
+def _should_exit_after_replay_complete(action_provider, args_cli) -> bool:
+    if action_provider is None or not getattr(args_cli, "exit_when_replay_complete", False):
+        return False
+    env = getattr(action_provider, "env", None)
+    if env is not None and bool(getattr(env, "_request_main_loop_exit", False)):
+        return True
+    method = getattr(action_provider, "should_exit_after_replay_complete", None)
+    if callable(method):
+        try:
+            return bool(method())
+        except Exception as exc:
+            print(f"[sim_main] replay completion check failed: {exc}")
+            return False
+    return False
 
 
 def _publish_backend_input_ready(args_cli, *, redis_client=None, source="startup"):
@@ -440,6 +540,25 @@ def _restore_replay_initial_env_state_if_needed(env, args_cli):
     }
     episode_seed, episode_seed_source = _load_replay_episode_object_seed_info(args_cli)
     seed_applied_names: set[str] = set()
+    task_handled_names: set[str] = set()
+
+    restore_replay_initial_env_state = getattr(env.cfg, "restore_replay_initial_env_state", None)
+    if callable(restore_replay_initial_env_state):
+        try:
+            handled_names = restore_replay_initial_env_state(
+                env,
+                episode_seed=episode_seed,
+                episode_seed_source=episode_seed_source or "recorded",
+                object_states=object_states,
+            )
+            if handled_names:
+                task_handled_names = {str(name) for name in handled_names}
+                print(
+                    "[replay_env_init] task-specific restore handled "
+                    f"{sorted(task_handled_names)}"
+                )
+        except Exception as exc:
+            print(f"[replay_env_init] task-specific restore failed: {exc}")
 
     # For prim-path objects such as the doubledesk basket, explicit world-pose snapshots can be
     # polluted by authored xform stacks on the referenced USD. When a recorded episode seed exists,
@@ -447,7 +566,7 @@ def _restore_replay_initial_env_state_if_needed(env, args_cli):
     seed_preferred_names = {
         name
         for name, spec in spec_by_name.items()
-        if spec.get("prim_paths") and not spec.get("scene_keys")
+        if spec.get("prim_paths") and not spec.get("scene_keys") and name not in task_handled_names
     }
     if episode_seed is not None and seed_preferred_names:
         applied = apply_deterministic_object_resets_with_seed(
@@ -472,9 +591,9 @@ def _restore_replay_initial_env_state_if_needed(env, args_cli):
     explicit_object_states = {
         name: state
         for name, state in object_states.items()
-        if name not in seed_applied_names
+        if name not in seed_applied_names and name not in task_handled_names
     }
-    missing_names = configured_names - seed_applied_names - set(explicit_object_states)
+    missing_names = configured_names - seed_applied_names - task_handled_names - set(explicit_object_states)
 
     if missing_names and episode_seed is not None:
         applied = apply_deterministic_object_resets_with_seed(
@@ -492,7 +611,7 @@ def _restore_replay_initial_env_state_if_needed(env, args_cli):
             )
 
     if not explicit_object_states:
-        return bool(seed_applied_names)
+        return bool(seed_applied_names or task_handled_names)
     return _apply_explicit_env_object_states(env, env.cfg, explicit_object_states)
 
 
@@ -577,11 +696,29 @@ def setup_signal_handlers(controller, dds_manager=None, image_servers=None, simu
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
+
+def _close_image_servers(image_servers):
+    try:
+        if image_servers is None:
+            return
+        servers_list = image_servers if isinstance(image_servers, list) else [image_servers]
+        for idx, server in enumerate(servers_list):
+            if server is None:
+                continue
+            try:
+                server._close()
+                print(f"[sim_main] Image server {idx} closed successfully")
+            except Exception as exc:
+                print(f"[sim_main] Failed to close image server {idx}: {exc}")
+    except Exception as exc:
+        print(f"[sim_main] Failed to stop image servers: {exc}")
+
 def main():
     """main function"""
     import os
     import atexit
     _normalize_control_routing(args_cli)
+    image_servers = None
     try:
         if args_cli.setpgrp:
             os.setpgrp()
@@ -634,6 +771,7 @@ def main():
             task_name=args_cli.task,
             route_name=args_cli.gmt_backend or args_cli.action_source,
         )
+        _augment_env_cfg_with_wrist_cameras(env_cfg, args_cli)
         # Set seed: command line argument takes priority, otherwise use default 42
         seed_value = args_cli.seed if args_cli.seed is not None else 42
         env_cfg.seed = seed_value
@@ -646,6 +784,7 @@ def main():
     print("\ncreate environment...")
     try:
         env = gym.make(args_cli.task, cfg=env_cfg).unwrapped
+        env._request_main_loop_exit = False
         print(f"\ncreate environment success ...")
         print("robot cfg init pos:", env.cfg.scene.robot.init_state.pos)
         print("robot usd:", env.cfg.scene.robot.spawn.usd_path)
@@ -846,23 +985,13 @@ def main():
 
         # Create front camera image server (always enabled)
         try:
-            front_server = ImageServer(
-                fps=args_cli.image_fps,
+            front_server = _create_image_server(
+                args_cli,
                 port=args_cli.image_zmq_port,
-                Unit_Test=False,
-                transport=args_cli.image_transport,
-                redis_host=args_cli.image_redis_host,
-                redis_port=args_cli.image_redis_port,
-                redis_db=args_cli.image_redis_db,
-                redis_key_prefix=args_cli.image_redis_key_prefix,
-                redis_channel=args_cli.image_redis_channel,
-                dds_topic=args_cli.image_dds_topic,
-                xrobot_host=args_cli.image_xrobot_host,
-                xrobot_port=args_cli.image_xrobot_port,
-                xrobot_bitrate=args_cli.image_xrobot_bitrate,
-                xrobot_width=None,
-                xrobot_height=None,
-                xrobot_ffmpeg=args_cli.image_xrobot_ffmpeg or None,
+                camera_name="front_camera",
+                redis_suffix="",
+                dds_suffix="",
+                xrobot_port_offset=0,
             )
             image_servers.append(front_server)
             print(f"[sim_main] Front camera ImageServer started on port {args_cli.image_zmq_port}")
@@ -873,24 +1002,13 @@ def main():
         # Create world camera image server (optional, based on --enable_world_camera)
         if args_cli.enable_world_camera:
             try:
-                world_server = ImageServer(
-                    fps=args_cli.image_fps,
+                world_server = _create_image_server(
+                    args_cli,
                     port=args_cli.world_camera_port,
-                    Unit_Test=False,
-                    transport=args_cli.image_transport,
-                    redis_host=args_cli.image_redis_host,
-                    redis_port=args_cli.image_redis_port,
-                    redis_db=args_cli.image_redis_db,
-                    redis_key_prefix=args_cli.image_redis_key_prefix + "_world",
-                    redis_channel=args_cli.image_redis_channel + "_world" if args_cli.image_redis_channel else "",
-                    dds_topic=args_cli.image_dds_topic + "_world",
-                    xrobot_host=args_cli.image_xrobot_host,
-                    xrobot_port=args_cli.image_xrobot_port + 1,  # Use different port for world camera
-                    xrobot_bitrate=args_cli.image_xrobot_bitrate,
-                    xrobot_width=None,
-                    xrobot_height=None,
-                    xrobot_ffmpeg=args_cli.image_xrobot_ffmpeg or None,
-                    camera_name="world_camera",  # Specify which camera to use
+                    camera_name="world_camera",
+                    redis_suffix="_world",
+                    dds_suffix="_world",
+                    xrobot_port_offset=1,
                 )
                 image_servers.append(world_server)
                 print(f"[sim_main] World camera ImageServer started on port {args_cli.world_camera_port}")
@@ -899,6 +1017,27 @@ def main():
                 print("[sim_main] Continuing without world camera...")
         else:
             print("[sim_main] World camera disabled (use --enable_world_camera to enable)")
+
+        if args_cli.enable_wrist_cameras:
+            wrist_specs = [
+                ("left_wrist_camera", args_cli.left_wrist_camera_port, "_left_wrist", 2, "Left"),
+                ("right_wrist_camera", args_cli.right_wrist_camera_port, "_right_wrist", 3, "Right"),
+            ]
+            for camera_name, port, suffix, xrobot_offset, label in wrist_specs:
+                try:
+                    server = _create_image_server(
+                        args_cli,
+                        port=port,
+                        camera_name=camera_name,
+                        redis_suffix=suffix,
+                        dds_suffix=suffix,
+                        xrobot_port_offset=xrobot_offset,
+                    )
+                    image_servers.append(server)
+                    print(f"[sim_main] {label} wrist camera ImageServer started on port {port}")
+                except Exception as e:
+                    print(f"Warning: Failed to create {camera_name} image server: {e}")
+                    print(f"[sim_main] Continuing without {camera_name} stream...")
 
         print(f"========= created {len(image_servers)} image server(s) success =========")
         print("========= create dds =========")
@@ -1155,7 +1294,17 @@ def main():
                         recent_loop_times.pop(0)
 
                     # execute control step (in main thread, support rendering)
-                    controller.step()
+                    try:
+                        controller.step()
+                    except ReplayComplete as exc:
+                        print(f"[sim_main] {exc}")
+                        controller.stop()
+                        break
+
+                    if _should_exit_after_replay_complete(action_provider, args_cli):
+                        print("[sim_main] Replay reached EOF and requested exit; stopping controller")
+                        controller.stop()
+                        break
 
                     if loop_count % 10 == 0:
                         try:
@@ -1232,6 +1381,7 @@ def main():
     finally:
         # clean up resources
         print("\nclean up resources...")
+        _close_image_servers(image_servers)
         controller.cleanup()
         env.close()
         print("cleanup completed")

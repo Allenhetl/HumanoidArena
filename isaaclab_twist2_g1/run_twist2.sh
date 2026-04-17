@@ -8,7 +8,7 @@ cd "${SCRIPT_DIR}" || exit 1
 # User config: edit here
 # ------------------------------------------------------------------
 PYTHON_BIN="python"
-ENV_CONFIG_YAML="tasks/common_env_config/doubledesk_twist2.yaml"
+ENV_CONFIG_YAML="tasks/common_env_config/small_warehouse_vision_navigation_twist2.yaml"
 RUN_DEVICE="cpu"
 ROBOT_TYPE="g129"
 ROBOT_COLLIDER_MODE="box"   # box | fourpoints
@@ -23,7 +23,7 @@ IMAGE_XROBOT_PORT="12345"
 IMAGE_XROBOT_BITRATE="16777216"
 IMAGE_FPS="30"
 IMAGE_XROBOT_FFMPEG="/usr/bin/ffmpeg"
-RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HOI_doubledesk/twist2_v2/zz"
+RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HSI_vision_target/twist2/zz"
 export PROJECT_ROOT="${SCRIPT_DIR}"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
 
@@ -115,3 +115,4 @@ exec "${cmd[@]}"
 #三级台阶平台：tasks/common_env_config/three_step_platform_twist2.yaml
 #开门：tasks/common_env_config/opendoor_twist2.yaml
 #小推车：tasks/common_env_config/pickplace_small_trolley_twist2.yaml
+# 箱子：tasks/common_env_config/pickplace_box_twist2.yaml

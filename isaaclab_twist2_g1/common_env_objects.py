@@ -46,6 +46,8 @@ def get_recordable_env_object_specs(env_cfg: Any) -> list[dict[str, Any]]:
                     "record_name": record_name,
                     "scene_keys": scene_keys,
                     "prim_paths": prim_paths,
+                    "allow_prroot_fallback": bool(raw_spec.get("allow_prroot_fallback", True)),
+                    "prim_pose_write_mode": str(raw_spec.get("prim_pose_write_mode", "") or "").strip().lower(),
                     "pose_range": raw_spec.get("pose_range", {}) or {},
                     "zero_velocity_on_reset": bool(raw_spec.get("zero_velocity_on_reset", True)),
                 }
@@ -81,13 +83,24 @@ def _resolve_prim_path(template: str, env_idx: int) -> str:
     return str(template).replace("{env_idx}", str(int(env_idx)))
 
 
-def _candidate_prim_paths(template: str, env_idx: int) -> list[str]:
+def _candidate_prim_paths(
+    template: str,
+    env_idx: int,
+    *,
+    allow_prroot_fallback: bool = True,
+) -> list[str]:
     base = _resolve_prim_path(template, env_idx)
     out = [base]
     # Many Prop USDs expose a transformable default prim below the mount node.
-    if not base.endswith("/PRootNode"):
+    if allow_prroot_fallback and not base.endswith("/PRootNode"):
         out.append(base.rstrip("/") + "/PRootNode")
     return out
+
+
+def _should_prefer_prim_pose_write(spec: dict[str, Any] | None) -> bool:
+    if not isinstance(spec, dict):
+        return False
+    return str(spec.get("prim_pose_write_mode", "") or "").strip().lower() == "local_matrix"
 
 
 def _try_import_usd_modules():
@@ -174,6 +187,7 @@ def _write_prim_world_pose(path: str, position: np.ndarray, orientation: np.ndar
             if op.GetOpType() == UsdGeom.XformOp.TypeTransform:
                 matrix_op = op
                 break
+
         if matrix_op is None:
             matrix_op = xformable.AddTransformOp()
         matrix_op.Set(local_matrix)
@@ -187,7 +201,8 @@ def collect_recordable_env_object_states(env, env_cfg: Any) -> dict[str, dict[st
 
     for spec in get_recordable_env_object_specs(env_cfg):
         record_name = spec["record_name"]
-        scene_key = resolve_env_object_scene_key(env, env_cfg, record_name)
+        prefer_prim_pose_write = _should_prefer_prim_pose_write(spec)
+        scene_key = None if prefer_prim_pose_write else resolve_env_object_scene_key(env, env_cfg, record_name)
 
         if scene_key is not None:
             try:
@@ -204,7 +219,11 @@ def collect_recordable_env_object_states(env, env_cfg: Any) -> dict[str, dict[st
         prim_paths = spec.get("prim_paths", []) or []
         prim_state = None
         for prim_template in prim_paths:
-            for prim_path in _candidate_prim_paths(str(prim_template), 0):
+            for prim_path in _candidate_prim_paths(
+                str(prim_template),
+                0,
+                allow_prroot_fallback=bool(spec.get("allow_prroot_fallback", True)),
+            ):
                 pose = _read_prim_world_pose(prim_path)
                 if pose is None:
                     continue
@@ -287,6 +306,29 @@ def get_current_episode_object_seed_info(env_cfg: Any) -> dict[str, Any]:
     }
 
 
+def set_current_episode_object_seed(env_cfg: Any, episode_seed: int, seed_source: str) -> tuple[int, str]:
+    normalized_seed = int(episode_seed)
+    normalized_source = str(seed_source or "")
+    setattr(env_cfg, "_current_episode_object_seed", normalized_seed)
+    setattr(env_cfg, "_current_episode_object_seed_source", normalized_source)
+    return normalized_seed, normalized_source
+
+
+def begin_new_episode_object_seed(env_cfg: Any) -> tuple[int, str]:
+    episode_seed, seed_source = _next_episode_object_seed(env_cfg)
+    return set_current_episode_object_seed(env_cfg, episode_seed, seed_source)
+
+
+def ensure_current_episode_object_seed(env_cfg: Any) -> tuple[int, str]:
+    seed_info = get_current_episode_object_seed_info(env_cfg)
+    current_seed = seed_info.get("seed")
+    current_source = str(seed_info.get("source") or "")
+    if current_seed is not None:
+        return int(current_seed), current_source
+
+    return begin_new_episode_object_seed(env_cfg)
+
+
 def _next_episode_object_seed(env_cfg: Any) -> tuple[int, str]:
     seed_source = str(getattr(env_cfg, "object_reset_seed_source", "time") or "time").strip().lower()
     if seed_source == "time":
@@ -360,6 +402,25 @@ def _quat_wxyz_mul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
     return _quat_wxyz_normalize(out)
 
 
+def _quat_wxyz_to_euler_xyz_deg(quat: np.ndarray) -> np.ndarray:
+    quat = _quat_wxyz_normalize(quat)
+    w, x, y, z = [float(v) for v in quat]
+
+    sinr_cosp = 2.0 * (w * x + y * z)
+    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+    roll = np.arctan2(sinr_cosp, cosr_cosp)
+
+    sinp = 2.0 * (w * y - z * x)
+    sinp = np.clip(sinp, -1.0, 1.0)
+    pitch = np.arcsin(sinp)
+
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    yaw = np.arctan2(siny_cosp, cosy_cosp)
+
+    return np.degrees(np.asarray([roll, pitch, yaw], dtype=np.float32)).astype(np.float32)
+
+
 def _apply_yaw_delta_to_orientation(base_orientation: np.ndarray, yaw_rad: float | None) -> np.ndarray:
     base = _quat_wxyz_normalize(base_orientation)
     if yaw_rad is None:
@@ -374,6 +435,8 @@ def _load_prim_default_states(
     record_name: str,
     prim_paths: list[str],
     num_envs: int,
+    *,
+    allow_prroot_fallback: bool = True,
 ) -> dict[int, dict[str, np.ndarray]]:
     cache = getattr(env_cfg, "_deterministic_prim_default_states", None)
     if not isinstance(cache, dict):
@@ -387,7 +450,11 @@ def _load_prim_default_states(
     defaults: dict[int, dict[str, np.ndarray]] = {}
     for env_idx in range(num_envs):
         for prim_template in prim_paths:
-            for prim_path in _candidate_prim_paths(str(prim_template), env_idx):
+            for prim_path in _candidate_prim_paths(
+                str(prim_template),
+                env_idx,
+                allow_prroot_fallback=allow_prroot_fallback,
+            ):
                 pose = _read_prim_world_pose(prim_path)
                 if pose is None:
                     continue
@@ -426,7 +493,8 @@ def _apply_deterministic_object_resets_with_seed(
         if selected_record_names is not None and record_name not in selected_record_names:
             continue
 
-        scene_key = resolve_env_object_scene_key(env, env_cfg, record_name)
+        prefer_prim_pose_write = _should_prefer_prim_pose_write(spec)
+        scene_key = None if prefer_prim_pose_write else resolve_env_object_scene_key(env, env_cfg, record_name)
         pose_range = spec.get("pose_range", {}) or {}
 
         if scene_key is not None:
@@ -476,7 +544,13 @@ def _apply_deterministic_object_resets_with_seed(
         if not prim_paths:
             continue
 
-        defaults = _load_prim_default_states(env_cfg, record_name, prim_paths, env.num_envs)
+        defaults = _load_prim_default_states(
+            env_cfg,
+            record_name,
+            prim_paths,
+            env.num_envs,
+            allow_prroot_fallback=bool(spec.get("allow_prroot_fallback", True)),
+        )
         first_pos = None
         for env_offset in range(env.num_envs):
             default_state = defaults.get(env_offset)
@@ -495,7 +569,11 @@ def _apply_deterministic_object_resets_with_seed(
             )
             write_ok = False
             for prim_template in prim_paths:
-                for prim_path in _candidate_prim_paths(prim_template, env_offset):
+                for prim_path in _candidate_prim_paths(
+                    prim_template,
+                    env_offset,
+                    allow_prroot_fallback=bool(spec.get("allow_prroot_fallback", True)),
+                ):
                     write_ok = _write_prim_world_pose(prim_path, target_pos, target_ori)
                     if write_ok:
                         break
@@ -584,7 +662,9 @@ def apply_explicit_env_object_states(
         if not isinstance(state, dict):
             continue
 
-        scene_name = resolve_env_object_scene_key(env, env_cfg, object_name)
+        spec = _resolve_spec_by_record_name(env_cfg, object_name)
+        prefer_prim_pose_write = _should_prefer_prim_pose_write(spec)
+        scene_name = None if prefer_prim_pose_write else resolve_env_object_scene_key(env, env_cfg, object_name)
         if scene_name is not None:
             root_state = None
             try:
@@ -617,7 +697,6 @@ def apply_explicit_env_object_states(
                 )
                 continue
 
-        spec = _resolve_spec_by_record_name(env_cfg, object_name)
         prim_paths = [str(v) for v in ((spec or {}).get("prim_paths", []) or []) if v]
         if not prim_paths:
             continue
@@ -633,7 +712,11 @@ def apply_explicit_env_object_states(
             ori = _pick_env_field(orientation_value, env_idx, 4)
             write_ok = False
             for prim_template in prim_paths:
-                for prim_path in _candidate_prim_paths(prim_template, env_idx):
+                for prim_path in _candidate_prim_paths(
+                    prim_template,
+                    env_idx,
+                    allow_prroot_fallback=bool((spec or {}).get("allow_prroot_fallback", True)),
+                ):
                     write_ok = _write_prim_world_pose(prim_path, pos, ori)
                     if write_ok:
                         break

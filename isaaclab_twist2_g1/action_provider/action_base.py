@@ -9,6 +9,10 @@ import time
 import threading
 
 
+class ReplayComplete(Exception):
+    """Signal normal EOF completion for explicit replay jobs."""
+
+
 class ActionProvider(ABC):
     """Abstract base class for action providers"""
 
