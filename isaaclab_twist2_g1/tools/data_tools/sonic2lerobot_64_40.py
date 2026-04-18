@@ -26,8 +26,8 @@ DEFAULT_INPUT_ROOT = Path(
     "/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_double_desk/sonic"
 )
 # DEFAULT_OUTPUT_ROOT = Path("/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/HumanoidArena_datasets/HOI_football/0409_sonic_smpl_pose6d")
-DEFAULT_OUTPUT_ROOT = Path("/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/HumanoidArena_datasets/HOI_double_desk/sonic_doubledesk_0417")
-DEFAULT_REPO_ID = "local/sonic_doubledesk_0417"
+DEFAULT_OUTPUT_ROOT = Path("/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/HumanoidArena_datasets/HOI_double_desk/sonic_doubledesk_0418")
+DEFAULT_REPO_ID = "local/sonic_doubledesk_0418"
 
 
 def parse_args() -> argparse.Namespace:

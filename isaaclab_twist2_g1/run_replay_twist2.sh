@@ -8,11 +8,11 @@ cd "${SCRIPT_DIR}" || exit 1
 # User config: edit here
 # ------------------------------------------------------------------
 PYTHON_BIN="python"
-REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2/zz/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_1776435375070891.npz"
+REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_pickplace_box/twist2/zk/Isaac-Move-PickPlace-Box-G129-Dex3-Wholedoby_1776505005180287.npz"
 REPLAY_MODE="direct"   # inference | direct
 REPLAY_LOOP=0             # 1 | 0
 TASK_NAME=""              # 留空则从 replay 文件读取
-ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/small_warehouse_vision_navigation_twist2.yaml}"
+ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/pickplace_box_twist2.yaml}"
 RUN_DEVICE="cpu"
 ROBOT_TYPE="g129"
 ROBOT_COLLIDER_MODE="box" # box | fourpoints

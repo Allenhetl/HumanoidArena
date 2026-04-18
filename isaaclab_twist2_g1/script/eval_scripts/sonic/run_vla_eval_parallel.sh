@@ -11,7 +11,7 @@ HEADLESS=1
 MAX_STEPS=1000
 VIDEO_FPS=30
 POST_TERMINATION_RECORD_STEPS=50
-NUM_WORKERS=4
+NUM_WORKERS=4  # per GPU
 SERVER_PORT_BASE=18443
 ROBOT_TYPE="g129"
 SONIC_VLA_ROOT_ROT6D_LAYOUT="row"
@@ -22,7 +22,8 @@ SONIC_DECODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_
 
 SERVER_PYTHON="/home/dreams/miniconda3/envs/lerobot/bin/python"
 SERVER_SCRIPT="${ISAACLAB_ROOT}/../lerobot/scripts/serve_lerobot_vla_http.py"
-SERVER_DEVICE="cuda:0"
+SERVER_GPU_IDS="${SERVER_GPU_IDS:-0}"   # e.g. "0,1,2,3" => each GPU runs NUM_WORKERS workers
+SERVER_DEVICE="${SERVER_DEVICE:-cuda:0}" # legacy single-device fallback when SERVER_GPU_IDS is empty
 SERVER_HOST="127.0.0.1"
 SERVER_SCHEME="http"
 SERVER_READY_TIMEOUT=60
@@ -60,10 +61,10 @@ PY
 TASK_NAME="${TASK_NAME:-$(load_task_name_from_yaml "${ENV_CONFIG_YAML}")}"
 
 MODEL_PATHS=(
-  "/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/train/diffusion_twist2_0401/checkpoints/last/pretrained_model"
+  "/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/train/act_sonic_football_rand_0414_64_40/checkpoints/last/pretrained_model"
 )
 
-RESULTS_DIR="${SCRIPT_DIR}/eval_results/act_rand_trained_parallel_0407_$(date +%Y%m%d_%H%M%S)"
+RESULTS_DIR="${SCRIPT_DIR}/eval_results/act_sonic_football_batchtest_0418$(date +%Y%m%d_%H%M%S)"
 
 ARGS=(
   --task "${TASK_NAME}"
@@ -84,6 +85,7 @@ ARGS=(
   --server_python "${SERVER_PYTHON}"
   --server_script "${SERVER_SCRIPT}"
   --server_device "${SERVER_DEVICE}"
+  --server_gpu_ids "${SERVER_GPU_IDS}"
   --server_host "${SERVER_HOST}"
   --server_scheme "${SERVER_SCHEME}"
   --server_ready_timeout "${SERVER_READY_TIMEOUT}"

@@ -9,7 +9,8 @@ import os
 project_root = os.environ.get("PROJECT_ROOT")
 ROOM_SCALE = (100.0, 100.0, 100.0)
 BOX_ASSET_SCALE = (0.01, 0.01, 0.01)
-SHELF_ASSET_SCALE = (0.1, 0.1, 0.1)
+# SHELF_ASSET_SCALE = (0.01, 0.01, 0.01)
+SHELF_ASSET_SCALE = (1.0, 1.0, 1.0)
 BOX_INIT_POS = [-3.0, -3.05, 0.82]
 BOX_INIT_ROT = [1.0, 0.0, 0.0, 0.0]
 SHELF_INIT_POS = [-2.7, -0.15, 0.0]
@@ -55,7 +56,7 @@ class PickPlaceBoxSceneCfg(InteractiveSceneCfg):
                 disable_gravity=False,
                 retain_accelerations=False,
             ),
-            mass_props=sim_utils.MassPropertiesCfg(mass=0.35),
+            mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
             collision_props=sim_utils.CollisionPropertiesCfg(
                 collision_enabled=True,
                 contact_offset=0.005,

@@ -11,7 +11,7 @@ HEADLESS=1
 MAX_STEPS=1000
 VIDEO_FPS=30
 POST_TERMINATION_RECORD_STEPS=50
-NUM_WORKERS=4
+NUM_WORKERS=4  # per GPU
 SERVER_PORT_BASE=18443
 ROBOT_TYPE="g129"
 
@@ -19,7 +19,8 @@ TWIST2_MODEL_PATH="${ISAACLAB_ROOT}/../TWIST2/assets/ckpts/twist2_1017_20k.onnx"
 
 SERVER_PYTHON="/home/dreams/miniconda3/envs/lerobot/bin/python"
 SERVER_SCRIPT="${ISAACLAB_ROOT}/../lerobot/scripts/serve_lerobot_vla_http.py"
-SERVER_DEVICE="cuda:0"
+SERVER_GPU_IDS="${SERVER_GPU_IDS:-0}"   # e.g. "0,1,2,3" => each GPU runs NUM_WORKERS workers
+SERVER_DEVICE="${SERVER_DEVICE:-cuda:0}" # legacy single-device fallback when SERVER_GPU_IDS is empty
 SERVER_HOST="127.0.0.1"
 SERVER_SCHEME="http"
 SERVER_READY_TIMEOUT=60
@@ -78,6 +79,7 @@ ARGS=(
   --server_python "${SERVER_PYTHON}"
   --server_script "${SERVER_SCRIPT}"
   --server_device "${SERVER_DEVICE}"
+  --server_gpu_ids "${SERVER_GPU_IDS}"
   --server_host "${SERVER_HOST}"
   --server_scheme "${SERVER_SCHEME}"
   --server_ready_timeout "${SERVER_READY_TIMEOUT}"
