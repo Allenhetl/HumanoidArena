@@ -61,10 +61,10 @@ TASK_NAME="${TASK_NAME:-$(load_task_name_from_yaml "${ENV_CONFIG_YAML}")}"
 
 
 MODEL_PATHS=(
-  "/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/train/act_sonic_football_rand_0414_2_64_40/checkpoints/last/pretrained_model"
+  "/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/train/act_sonic_football_rand_0414_64_40/checkpoints/last/pretrained_model"
 )
 
-RESULTS_DIR="${SCRIPT_DIR}/eval_results/act_sonic_football_rand_0414_64_40$(date +%Y%m%d_%H%M%S)"
+RESULTS_DIR="${SCRIPT_DIR}/eval_results/act_sonic_football_batchtest_0418$(date +%Y%m%d_%H%M%S)"
 
 ARGS=(
   --task "${TASK_NAME}"

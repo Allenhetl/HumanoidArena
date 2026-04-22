@@ -307,7 +307,7 @@ def get_current_episode_object_seed_info(env_cfg: Any) -> dict[str, Any]:
 
 
 def set_current_episode_object_seed(env_cfg: Any, episode_seed: int, seed_source: str) -> tuple[int, str]:
-    normalized_seed = int(episode_seed)
+    normalized_seed = int(episode_seed) & 0x7FFFFFFF
     normalized_source = str(seed_source or "")
     setattr(env_cfg, "_current_episode_object_seed", normalized_seed)
     setattr(env_cfg, "_current_episode_object_seed_source", normalized_source)
@@ -332,17 +332,17 @@ def ensure_current_episode_object_seed(env_cfg: Any) -> tuple[int, str]:
 def _next_episode_object_seed(env_cfg: Any) -> tuple[int, str]:
     seed_source = str(getattr(env_cfg, "object_reset_seed_source", "time") or "time").strip().lower()
     if seed_source == "time":
-        episode_seed = int(time.time_ns() & 0xFFFFFFFFFFFFFFFF)
+        episode_seed = int(time.time_ns() & 0x7FFFFFFF)
         return episode_seed, seed_source
 
     if seed_source == "env_seed":
         reset_counter = int(getattr(env_cfg, "_episode_object_seed_counter", 0))
         setattr(env_cfg, "_episode_object_seed_counter", reset_counter + 1)
-        base_seed = int(getattr(env_cfg, "seed", 0) or 0) & 0xFFFFFFFFFFFFFFFF
+        base_seed = int(getattr(env_cfg, "seed", 0) or 0) & 0x7FFFFFFF
         episode_seed = (
             base_seed
-            ^ ((reset_counter + 1) * 0x9E3779B185EBCA87)
-        ) & 0xFFFFFFFFFFFFFFFF
+            ^ (((reset_counter + 1) * 0x9E3779B1) & 0x7FFFFFFF)
+        ) & 0x7FFFFFFF
         return episode_seed, seed_source
 
     raise ValueError(f"Unsupported object_reset_seed_source: {seed_source}")
@@ -484,7 +484,7 @@ def _apply_deterministic_object_resets_with_seed(
 
     env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
     applied: list[str] = []
-    setattr(env_cfg, "_current_episode_object_seed", int(episode_seed))
+    setattr(env_cfg, "_current_episode_object_seed", int(episode_seed) & 0x7FFFFFFF)
     setattr(env_cfg, "_current_episode_object_seed_source", str(seed_source or ""))
 
     scene_object_changed = False

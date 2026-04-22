@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(redis-cli get:*)",
+      "Bash(redis-cli:*)",
+      "Bash(find:*)",
+      "Bash(grep:*)",
+      "Bash(xargs:*)",
+      "Bash(test:*)"
+    ]
+  }
+}

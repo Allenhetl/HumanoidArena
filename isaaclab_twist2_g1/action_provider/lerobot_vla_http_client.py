@@ -3,9 +3,9 @@ import json
 import os
 import ssl
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
-import urllib.error
 from pathlib import Path
 from typing import Any
 
@@ -62,7 +62,7 @@ class LeRobotVLAHttpClient:
             raise RuntimeError(f"HTTP {exc.code} from {self._build_url(path)}: {error_body}") from exc
         return json.loads(raw.decode("utf-8"))
 
-    def infer(self, front_rgb: np.ndarray, observation_state: np.ndarray, robot_type: str) -> np.ndarray:
+    def infer_chunk(self, front_rgb: np.ndarray, observation_state: np.ndarray, robot_type: str) -> np.ndarray:
         rgb = np.asarray(front_rgb)
         state = np.asarray(observation_state, dtype=np.float32).reshape(-1)
         payload = {
@@ -77,32 +77,51 @@ class LeRobotVLAHttpClient:
                 "state": state.tolist(),
             },
             "robot_type": robot_type,
+            "return_chunk": True,
         }
         response = self._post_json("/infer", payload)
-        action = np.asarray(response["action"], dtype=np.float32)
-        if action.ndim != 1:
-            action = action.reshape(-1)
+        action_chunk = response.get("action_chunk")
+        if action_chunk is None:
+            action_chunk = [response["action"]]
+        action_chunk = np.asarray(action_chunk, dtype=np.float32)
+        if action_chunk.ndim == 1:
+            action_chunk = action_chunk.reshape(1, -1)
+        if action_chunk.ndim != 2:
+            raise RuntimeError(f"Expected 2D action chunk from server, got shape {action_chunk.shape}")
         self._append_trace(
             {
-                "event": "infer",
+                "event": "infer_chunk",
                 "timestamp": time.time(),
                 "step_idx": self._trace_step_idx,
                 "robot_type": robot_type,
                 "front_rgb_shape": list(rgb.shape),
                 "observation_state": state.tolist(),
-                "action": action.tolist(),
+                "chunk_size": int(action_chunk.shape[0]),
+                "first_action": action_chunk[0].tolist() if action_chunk.size > 0 else [],
             }
         )
         self._trace_step_idx += 1
-        return action
+        return action_chunk
 
-    def reset(self) -> None:
-        self._post_json("/reset", {})
+    def infer(self, front_rgb: np.ndarray, observation_state: np.ndarray, robot_type: str) -> np.ndarray:
+        action_chunk = self.infer_chunk(
+            front_rgb=front_rgb,
+            observation_state=observation_state,
+            robot_type=robot_type,
+        )
+        return action_chunk[0]
+
+    def reset(self, seed: int | None = None) -> None:
+        payload: dict[str, Any] = {}
+        if seed is not None:
+            payload["seed"] = int(seed)
+        self._post_json("/reset", payload)
         self._append_trace(
             {
                 "event": "reset",
                 "timestamp": time.time(),
                 "step_idx": self._trace_step_idx,
+                "seed": None if seed is None else int(seed),
             }
         )
         self._trace_step_idx = 0

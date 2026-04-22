@@ -115,11 +115,24 @@ class VQBeTPolicy(PreTrainedPolicy):
             ACTION: deque(maxlen=self.config.action_chunk_size),
         }
 
+    def _prepare_batch(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
+        if ACTION in batch:
+            batch = dict(batch)
+            batch.pop(ACTION)
+
+        batch = dict(batch)
+        batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
+        return batch
+
+    def _predict_action_chunk_from_queues(self, batch: dict[str, Tensor]) -> Tensor:
+        batch = {k: torch.stack(list(self._queues[k]), dim=1) for k in batch if k in self._queues}
+        return self.vqbet(batch, rollout=True)[:, : self.config.action_chunk_size]
+
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
-        batch = {k: torch.stack(list(self._queues[k]), dim=1) for k in batch if k in self._queues}
-        actions = self.vqbet(batch, rollout=True)[:, : self.config.action_chunk_size]
-        return actions
+        batch = self._prepare_batch(batch)
+        self._queues = populate_queues(self._queues, batch)
+        return self._predict_action_chunk_from_queues(batch)
 
     @torch.no_grad()
     def select_action(self, batch: dict[str, Tensor]) -> Tensor:
@@ -129,16 +142,7 @@ class VQBeTPolicy(PreTrainedPolicy):
         environment. It works by managing the actions in a queue and only calling `select_actions` when the
         queue is empty.
         """
-        # NOTE: for offline evaluation, we have action in the batch, so we need to pop it out
-        if ACTION in batch:
-            batch.pop(ACTION)
-        batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
-        # NOTE: It's important that this happens after stacking the images into a single key.
-        batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
-        # NOTE: for offline evaluation, we have action in the batch, so we need to pop it out
-        if ACTION in batch:
-            batch.pop(ACTION)
-
+        batch = self._prepare_batch(batch)
         self._queues = populate_queues(self._queues, batch)
 
         if not self.vqbet.action_head.vqvae_model.discretized.item():
@@ -148,7 +152,7 @@ class VQBeTPolicy(PreTrainedPolicy):
             )
 
         if len(self._queues[ACTION]) == 0:
-            actions = self.predict_action_chunk(batch)
+            actions = self._predict_action_chunk_from_queues(batch)
             # since the data in the action queue's dimension is (action_chunk_size, batch_size, action_dim), we transpose the action and fill the queue
             self._queues[ACTION].extend(actions.transpose(0, 1))
 

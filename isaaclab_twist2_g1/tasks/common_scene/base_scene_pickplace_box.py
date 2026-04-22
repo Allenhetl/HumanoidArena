@@ -9,7 +9,8 @@ import os
 project_root = os.environ.get("PROJECT_ROOT")
 ROOM_SCALE = (100.0, 100.0, 100.0)
 BOX_ASSET_SCALE = (0.01, 0.01, 0.01)
-SHELF_ASSET_SCALE = (0.1, 0.1, 0.1)
+# SHELF_ASSET_SCALE = (0.01, 0.01, 0.01)
+SHELF_ASSET_SCALE = (1.0, 1.0, 1.0)
 BOX_INIT_POS = [-3.0, -3.05, 0.82]
 BOX_INIT_ROT = [1.0, 0.0, 0.0, 0.0]
 SHELF_INIT_POS = [-2.7, -0.15, 0.0]

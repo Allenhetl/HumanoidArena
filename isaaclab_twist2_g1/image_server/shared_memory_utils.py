@@ -9,6 +9,7 @@ head + left + right without mislabeling them.
 """
 
 import ctypes
+import os
 import time
 import numpy as np
 import cv2
@@ -16,7 +17,17 @@ from multiprocessing import shared_memory
 from typing import Optional, Dict
 
 # shared memory configuration
-SHM_NAME = "isaac_multi_image_shm"
+DEFAULT_SHM_NAME = "isaac_multi_image_shm"
+
+
+def resolve_shm_name(default_name: str = DEFAULT_SHM_NAME) -> str:
+    override = os.environ.get("ISAAC_MULTI_IMAGE_SHM_NAME", "").strip()
+    if override:
+        return override.lstrip("/")
+    return default_name
+
+
+SHM_NAME = resolve_shm_name()
 # RGB: 640 * 480 * 3 * 4 cameras = 3,686,400 bytes
 # Depth: 640 * 480 * 4 (float32) * 4 cameras = 4,915,200 bytes
 # Total: ~8.6MB + 2KB header

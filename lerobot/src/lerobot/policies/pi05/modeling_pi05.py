@@ -933,6 +933,22 @@ class PI05Policy(PreTrainedPolicy):
 
         self.reset()
 
+    @staticmethod
+    def _resize_loaded_tensor(source: Tensor, target: Tensor, *, copy_dim: int) -> Tensor:
+        resized = target.clone()
+        resized.zero_()
+        copy_size = min(source.shape[copy_dim], target.shape[copy_dim])
+        if source.ndim == 2:
+            if copy_dim == 0:
+                resized[:copy_size, :] = source[:copy_size, :]
+            else:
+                resized[:, :copy_size] = source[:, :copy_size]
+        elif source.ndim == 1:
+            resized[:copy_size] = source[:copy_size]
+        else:
+            raise ValueError(f"Unsupported tensor rank for resize: {source.ndim}")
+        return resized
+
     @classmethod
     def from_pretrained(
         cls: builtins.type[T],
@@ -1020,7 +1036,20 @@ class PI05Policy(PreTrainedPolicy):
             if remap_count > 0:
                 print(f"Remapped {remap_count} state dict keys")
 
-            # Load the remapped state dict into the model
+            target_state_dict = model.state_dict()
+            resize_specs = {
+                "model.action_in_proj.weight": 1,
+                "model.action_out_proj.weight": 0,
+                "model.action_out_proj.bias": 0,
+            }
+            for key, copy_dim in resize_specs.items():
+                loaded_value = remapped_state_dict.get(key)
+                target_value = target_state_dict.get(key)
+                if loaded_value is None or target_value is None or loaded_value.shape == target_value.shape:
+                    continue
+                print(f"Resizing {key} from {tuple(loaded_value.shape)} to {tuple(target_value.shape)}")
+                remapped_state_dict[key] = model._resize_loaded_tensor(loaded_value, target_value, copy_dim=copy_dim)
+
             missing_keys, unexpected_keys = model.load_state_dict(remapped_state_dict, strict=strict)
 
             if missing_keys:

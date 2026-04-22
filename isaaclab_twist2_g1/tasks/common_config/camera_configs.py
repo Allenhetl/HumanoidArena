@@ -5,9 +5,16 @@ public camera configuration
 include the basic configuration for different types of cameras, support scene-specific parameter customization
 """
 
+import os
+
 import isaaclab.sim as sim_utils
 from isaaclab.sensors import CameraCfg
 from isaaclab.utils import configclass
+
+
+def _depth_enabled_from_env() -> bool:
+    value = str(os.environ.get("ENABLE_DEPTH", "1")).strip().lower()
+    return value not in {"0", "false", "no", "off"}
 
 
 @configclass
@@ -51,7 +58,9 @@ class CameraBaseCfg:
             CameraCfg: camera configuration
         """
         if data_types is None:
-            data_types = ["rgb", "distance_to_image_plane"]
+            data_types = ["rgb"]
+            if _depth_enabled_from_env():
+                data_types.append("distance_to_image_plane")
 
         return CameraCfg(
             prim_path=prim_path,
