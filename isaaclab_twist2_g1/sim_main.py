@@ -871,6 +871,9 @@ def main():
         try:
             _trigger_task_reset_event(env_cfg, "reset_all_self", env)
             _restore_replay_initial_env_state_if_needed(env, args_cli)
+            debug_after_startup_reset = getattr(env_cfg, "debug_after_startup_reset", None)
+            if callable(debug_after_startup_reset):
+                debug_after_startup_reset(env, args_cli)
         except Exception as exc:
             print(f"[env_runtime] startup reset_all_self failed: {exc}")
     else:
@@ -1169,6 +1172,7 @@ def main():
         # use torch.inference_mode() and handle KeyboardInterrupt
         try:
             with torch.inference_mode():
+                first_control_step_debug_pending = True
                 while simulation_app.is_running() and controller.is_running:
                     current_time = time.time()
                     loop_count += 1
@@ -1300,6 +1304,15 @@ def main():
                         print(f"[sim_main] {exc}")
                         controller.stop()
                         break
+
+                    if first_control_step_debug_pending:
+                        debug_after_first_control_step = getattr(env_cfg, "debug_after_first_control_step", None)
+                        if callable(debug_after_first_control_step):
+                            try:
+                                debug_after_first_control_step(env, args_cli)
+                            except Exception as exc:
+                                print(f"[env_runtime] debug_after_first_control_step failed: {exc}")
+                        first_control_step_debug_pending = False
 
                     if _should_exit_after_replay_complete(action_provider, args_cli):
                         print("[sim_main] Replay reached EOF and requested exit; stopping controller")

@@ -1,7 +1,7 @@
 import os
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import ArticulationCfg, AssetBaseCfg
+from isaaclab.assets import AssetBaseCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 from isaaclab.utils import configclass
@@ -22,19 +22,18 @@ class OpenDoorSceneCfg(InteractiveSceneCfg):
             rot=[1.0, 0.0, 0.0, 0.0],
         ),
         spawn=UsdFileCfg(
-            usd_path=f"{project_root}/assets/objects/small_warehouse/small_warehouse_digital_twin.usd",
+            usd_path=f"{project_root}/assets/objects/small_warehouse/small_warehouse_digital_twin_opendoor.usd",
         ),
     )
 
-    door = ArticulationCfg(
+    door = AssetBaseCfg(
         prim_path="/World/envs/env_.*/Door",
-        init_state=ArticulationCfg.InitialStateCfg(
+        init_state=AssetBaseCfg.InitialStateCfg(
             pos=DOOR_POS,
             rot=DOOR_ROT,
-            joint_vel={".*": 0.0},
         ),
         spawn=UsdFileCfg(
-            usd_path=f"{project_root}/assets/objects/door001/model_door001.usd",
+            usd_path=f"{project_root}/assets/objects/door001/model_door001_vali.usd",
             activate_contact_sensors=True,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=True,
@@ -58,7 +57,6 @@ class OpenDoorSceneCfg(InteractiveSceneCfg):
                 rest_offset=0.0,
             ),
         ),
-        actuators={},
     )
 
     light = AssetBaseCfg(

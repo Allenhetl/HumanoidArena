@@ -1,14 +1,26 @@
+from __future__ import annotations
+
+import math
+import os
+from typing import Any
+
+import numpy as np
+import torch
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.envs import mdp as base_mdp
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
 
-from . import mdp
+from common_env_objects import apply_deterministic_object_resets
 from tasks.common_config import CameraPresets, G1RobotPresets
+from tasks.common_event.event_manager import SimpleEvent, SimpleEventManager
 from tasks.common_scene.base_scene_open_door import OpenDoorSceneCfg
+
+from . import mdp
 
 ROBOT_INIT_POS = (-1.6, 0.2, 0.8)
 ROBOT_INIT_ROT = (0.70711, 0.0, 0.0, 0.70711)
@@ -18,6 +30,79 @@ DOOR_LEAF_JOINT_VISCOUS_FRICTION = 0.0
 DOOR_HANDLE_JOINT_STATIC_FRICTION = 2.0
 DOOR_HANDLE_JOINT_DYNAMIC_FRICTION = 1.5
 DOOR_HANDLE_JOINT_VISCOUS_FRICTION = 0.5
+
+_OPEN_DOOR_DEBUG_PRIM_PATHS = (
+    "/World/envs/env_0/Door",
+    "/World/envs/env_0/Door/E_bodyM1_1",
+    "/World/envs/env_0/Door/E_leaf_2",
+    "/World/envs/env_0/Door/E_handle_4",
+    "/World/envs/env_0/Door/gate",
+)
+_OPEN_DOOR_JOINT_SAMPLE_STEPS = (1, 5, 10, 20, 30, 40, 50)
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "0").strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _matrix_to_rows(matrix) -> list[list[float]]:
+    return [[float(matrix[row][col]) for col in range(4)] for row in range(4)]
+
+
+def _quat_wxyz_from_matrix(matrix) -> np.ndarray:
+    quat = matrix.ExtractRotationQuat()
+    imag = quat.GetImaginary()
+    return np.array(
+        [
+            float(quat.GetReal()),
+            float(imag[0]),
+            float(imag[1]),
+            float(imag[2]),
+        ],
+        dtype=np.float64,
+    )
+
+
+def _quat_angle_deg_from_matrix(matrix) -> float:
+    quat = _quat_wxyz_from_matrix(matrix)
+    quat_norm = np.linalg.norm(quat)
+    if quat_norm <= 1e-12:
+        return 0.0
+    quat = quat / quat_norm
+    w = float(np.clip(quat[0], -1.0, 1.0))
+    return float(math.degrees(2.0 * math.acos(abs(w))))
+
+
+def _prim_rotate_zyx_deg(prim) -> list[float] | None:
+    attr = prim.GetAttribute("xformOp:rotateZYX")
+    if not attr or not attr.IsValid():
+        return None
+    value = attr.Get()
+    if value is None:
+        return None
+    try:
+        return [float(value[0]), float(value[1]), float(value[2])]
+    except Exception:
+        return None
+
+
+def _first_target_path(prim, rel_name: str) -> str:
+    rel = prim.GetRelationship(rel_name)
+    if rel is None or not rel.IsValid():
+        return ""
+    targets = rel.GetTargets()
+    if not targets:
+        return ""
+    return str(targets[0])
+
+
+def _classify_revolute_joint(body0_path: str, body1_path: str) -> str:
+    endpoints = {body0_path.split("/")[-1], body1_path.split("/")[-1]}
+    if endpoints == {"E_bodyM1_1", "E_leaf_2"}:
+        return "door_leaf_joint"
+    if endpoints == {"E_leaf_2", "E_handle_4"}:
+        return "handle_joint"
+    return "other"
 
 
 @configclass
@@ -97,8 +182,8 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self):
         self.decimation = 4
         self.episode_length_s = 20.0
-        # Allow YAML override via tasks/common_env_config/*.yaml.
-        self.object_reset_seed_source = "env_seed"
+        self.object_reset_seed_source = "time"
+        self.deterministic_object_resets = []
 
         self.sim.dt = 0.005
         self.scene.contact_forces.update_period = self.sim.dt
@@ -113,9 +198,86 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physics_material.friction_combine_mode = "max"
         self.sim.physics_material.restitution_combine_mode = "max"
 
+        self._replay_initial_env_state_active = False
+        self._open_door_transform_debug_enabled = _env_flag("OPEN_DOOR_TRANSFORM_DEBUG")
+        self._open_door_joint_debug_enabled = _env_flag("OPEN_DOOR_JOINT_DEBUG")
+        self._open_door_joint_runtime_logged_steps: set[int] = set()
+        self._open_door_runtime_step_counter = 0
+        self._open_door_first_control_step_debug_done = False
+        self._open_door_joint_catalog_logged = False
+
+        self.event_manager = SimpleEventManager()
+        self.event_manager.register(
+            "reset_object_self",
+            SimpleEvent(func=lambda env: self._reset_object_self(env)),
+        )
+        self.event_manager.register(
+            "reset_all_self",
+            SimpleEvent(func=lambda env: self._reset_all_self(env)),
+        )
+
     def initialize_task_scene(self, env, args_cli=None):
+        self._replay_initial_env_state_active = (
+            bool(getattr(args_cli, "replay_file", "")) if args_cli else False
+        )
+        self._reset_open_door_runtime_debug_state()
         self._disable_overlapping_room_gate_collisions()
         self._configure_door_joint_physics(env)
+        self._debug_transform_phase("initialize_task_scene")
+        self._log_door_joint_catalog_once()
+
+    def _reset_object_self(self, env):
+        self._reset_open_door_runtime_debug_state()
+        applied = apply_deterministic_object_resets(
+            self,
+            env,
+            selected_record_names={"door"},
+        )
+        if applied:
+            print("[object_reset] " + ", ".join(applied))
+        self._debug_transform_phase("after_reset_object_self")
+
+    def _reset_all_self(self, env):
+        self._reset_open_door_runtime_debug_state()
+        base_mdp.reset_scene_to_default(
+            env,
+            torch.arange(env.num_envs, device=env.device),
+        )
+        applied = apply_deterministic_object_resets(
+            self,
+            env,
+            selected_record_names={"door"},
+        )
+        if applied:
+            print("[object_reset] " + ", ".join(applied))
+        self._debug_transform_phase("after_reset_all_self")
+
+    def debug_after_startup_reset(self, env, args_cli=None):
+        self._debug_transform_phase("after_startup_reset")
+        self._log_door_joint_catalog_once()
+
+    def debug_after_first_control_step(self, env, args_cli=None):
+        if self._open_door_first_control_step_debug_done:
+            return
+        self._open_door_first_control_step_debug_done = True
+        self._debug_transform_phase("after_first_control_step")
+
+    def debug_joint_runtime_step(self, env):
+        self._open_door_runtime_step_counter += 1
+        step = int(self._open_door_runtime_step_counter)
+
+        if not self._open_door_first_control_step_debug_done:
+            self.debug_after_first_control_step(env)
+
+        if self._open_door_joint_debug_enabled and step in _OPEN_DOOR_JOINT_SAMPLE_STEPS:
+            if step not in self._open_door_joint_runtime_logged_steps:
+                self._open_door_joint_runtime_logged_steps.add(step)
+                self._log_joint_runtime_state(step)
+
+    def _reset_open_door_runtime_debug_state(self):
+        self._open_door_joint_runtime_logged_steps = set()
+        self._open_door_runtime_step_counter = 0
+        self._open_door_first_control_step_debug_done = False
 
     def _disable_overlapping_room_gate_collisions(self):
         try:
@@ -165,6 +327,14 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
 
             stage = omni.usd.get_context().get_stage()
             door_asset = env.scene["door"]
+            find_joints = getattr(door_asset, "find_joints", None)
+            if not callable(find_joints):
+                print(
+                    "[open_door] scheme_a_assetbase active: door scene asset has no find_joints(); "
+                    "skip articulation joint runtime overrides"
+                )
+                return
+
             door_joint_ids, _ = door_asset.find_joints(["RevoluteJoint_door001"], preserve_order=True)
             handle_joint_ids, _ = door_asset.find_joints(["RevoluteJoint_handle001"], preserve_order=True)
             door_joint = stage.GetPrimAtPath(
@@ -181,10 +351,6 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
             if not angular_drive:
                 angular_drive = UsdPhysics.DriveAPI.Apply(door_joint, "angular")
 
-            # The USD asset ships with a closing drive on the leaf joint
-            # (stiffness=5, damping=20, max_force=5), which makes the door feel
-            # artificially locked during teleoperation. Zero it out so the leaf
-            # behaves as a passive hinge while the articulation uses a fixed base.
             angular_drive.GetTypeAttr().Set("force")
             angular_drive.GetStiffnessAttr().Set(0.0)
             angular_drive.GetDampingAttr().Set(0.0)
@@ -192,8 +358,6 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
             angular_drive.GetTargetPositionAttr().Set(0.0)
             angular_drive.GetTargetVelocityAttr().Set(0.0)
 
-            # Use passive joint physics instead of implicit actuators so the door
-            # is driven purely by contact.
             door_asset.write_joint_stiffness_to_sim(0.0, joint_ids=door_joint_ids)
             door_asset.write_joint_damping_to_sim(0.0, joint_ids=door_joint_ids)
             door_asset.write_joint_friction_coefficient_to_sim(
@@ -203,20 +367,21 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
                 joint_ids=door_joint_ids,
             )
 
-            door_asset.write_joint_stiffness_to_sim(0.0, joint_ids=handle_joint_ids)
-            door_asset.write_joint_damping_to_sim(0.0, joint_ids=handle_joint_ids)
-            door_asset.write_joint_friction_coefficient_to_sim(
-                DOOR_HANDLE_JOINT_STATIC_FRICTION,
-                joint_dynamic_friction_coeff=DOOR_HANDLE_JOINT_DYNAMIC_FRICTION,
-                joint_viscous_friction_coeff=DOOR_HANDLE_JOINT_VISCOUS_FRICTION,
-                joint_ids=handle_joint_ids,
-            )
-
             leaf_joint_api = PhysxSchema.PhysxJointAPI.Apply(door_joint)
             handle_friction_value = None
+            handle_drive_stiffness = None
+            handle_drive_damping = None
+            handle_drive_max_force = None
+            handle_drive_target_position = None
             if handle_joint and handle_joint.IsValid():
+                handle_drive = UsdPhysics.DriveAPI.Get(handle_joint, "angular")
                 handle_joint_api = PhysxSchema.PhysxJointAPI.Apply(handle_joint)
                 handle_friction_value = handle_joint_api.GetJointFrictionAttr().Get()
+                if handle_drive:
+                    handle_drive_stiffness = handle_drive.GetStiffnessAttr().Get()
+                    handle_drive_damping = handle_drive.GetDampingAttr().Get()
+                    handle_drive_max_force = handle_drive.GetMaxForceAttr().Get()
+                    handle_drive_target_position = handle_drive.GetTargetPositionAttr().Get()
 
             leaf_stiffness = door_asset.data.joint_stiffness[0, door_joint_ids[0]].item()
             leaf_damping = door_asset.data.joint_damping[0, door_joint_ids[0]].item()
@@ -242,7 +407,151 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
                 f"leaf_joint_friction_attr={leaf_joint_api.GetJointFrictionAttr().Get()}, "
                 f"handle_runtime=(stiffness={handle_stiffness}, damping={handle_damping}, "
                 f"static_friction={handle_static_friction}), "
-                f"handle_joint_friction_attr={handle_friction_value}"
+                f"handle_joint_friction_attr={handle_friction_value}, "
+                f"handle_drive=(target={handle_drive_target_position}, stiffness={handle_drive_stiffness}, "
+                f"damping={handle_drive_damping}, max_force={handle_drive_max_force})"
             )
         except Exception as exc:
             print(f"[open_door] failed to configure door joint physics: {exc}")
+
+    def _debug_transform_phase(self, phase: str):
+        if not self._open_door_transform_debug_enabled:
+            return
+        try:
+            import omni.usd
+            from pxr import Usd, UsdGeom
+
+            stage = omni.usd.get_context().get_stage()
+            if stage is None:
+                print(f"[open_door_transform_debug] phase={phase} stage unavailable")
+                return
+
+            print(
+                "[open_door_transform_debug] "
+                f"phase={phase} stage_metadata="
+                f"root={stage.GetPseudoRoot().GetPath()} default_prim={stage.GetDefaultPrim().GetPath() if stage.GetDefaultPrim() else '<none>'}"
+            )
+            cache = UsdGeom.XformCache(Usd.TimeCode.Default())
+            for path in _OPEN_DOOR_DEBUG_PRIM_PATHS:
+                prim = stage.GetPrimAtPath(path)
+                if prim is None or not prim.IsValid():
+                    print(
+                        f"[open_door_transform_debug] phase={phase} path={path} "
+                        "status=missing"
+                    )
+                    continue
+                local_matrix = UsdGeom.Xformable(prim).GetLocalTransformation()[0]
+                world_matrix = cache.GetLocalToWorldTransform(prim)
+                print(
+                    f"[open_door_transform_debug] phase={phase} path={path} "
+                    f"local_matrix={_matrix_to_rows(local_matrix)} "
+                    f"world_matrix={_matrix_to_rows(world_matrix)}"
+                )
+        except Exception as exc:
+            print(f"[open_door_transform_debug] phase={phase} failed: {exc}")
+
+    def _iter_door_revolute_joints(self) -> list[dict[str, Any]]:
+        try:
+            import omni.usd
+            from pxr import PhysxSchema, Usd, UsdPhysics
+
+            stage = omni.usd.get_context().get_stage()
+            if stage is None:
+                return []
+
+            door_root = stage.GetPrimAtPath("/World/envs/env_0/Door")
+            if door_root is None or not door_root.IsValid():
+                return []
+
+            joints: list[dict[str, Any]] = []
+            for prim in Usd.PrimRange(door_root):
+                type_name = prim.GetTypeName()
+                if type_name not in {"PhysicsRevoluteJoint", "PhysicsJoint"} and not prim.GetName().startswith(
+                    "RevoluteJoint"
+                ):
+                    continue
+                body0_path = _first_target_path(prim, "physics:body0")
+                body1_path = _first_target_path(prim, "physics:body1")
+                classification = _classify_revolute_joint(body0_path, body1_path)
+                angular_drive = UsdPhysics.DriveAPI.Get(prim, "angular")
+                joint_api = PhysxSchema.PhysxJointAPI(prim)
+                joints.append(
+                    {
+                        "path": str(prim.GetPath()),
+                        "classification": classification,
+                        "body0": body0_path,
+                        "body1": body1_path,
+                        "axis": prim.GetAttribute("physics:axis").Get(),
+                        "lower": prim.GetAttribute("physics:lowerLimit").Get(),
+                        "upper": prim.GetAttribute("physics:upperLimit").Get(),
+                        "drive_type": angular_drive.GetTypeAttr().Get() if angular_drive else None,
+                        "drive_target_position": angular_drive.GetTargetPositionAttr().Get()
+                        if angular_drive
+                        else None,
+                        "drive_stiffness": angular_drive.GetStiffnessAttr().Get() if angular_drive else None,
+                        "drive_damping": angular_drive.GetDampingAttr().Get() if angular_drive else None,
+                        "drive_max_force": angular_drive.GetMaxForceAttr().Get() if angular_drive else None,
+                        "joint_friction": joint_api.GetJointFrictionAttr().Get()
+                        if joint_api and joint_api.GetJointFrictionAttr().IsValid()
+                        else None,
+                    }
+                )
+            return joints
+        except Exception as exc:
+            print(f"[open_door_joint_debug] phase=joint_catalog failed: {exc}")
+            return []
+
+    def _log_door_joint_catalog_once(self):
+        if not self._open_door_joint_debug_enabled or self._open_door_joint_catalog_logged:
+            return
+        joints = self._iter_door_revolute_joints()
+        self._open_door_joint_catalog_logged = True
+        for joint in joints:
+            print(
+                "[open_door_joint_debug] phase=joint_catalog "
+                f"path={joint['path']} classification={joint['classification']} "
+                f"body0={joint['body0']} body1={joint['body1']} axis={joint['axis']} "
+                f"lower={joint['lower']} upper={joint['upper']} "
+                f"drive_type={joint['drive_type']} drive_target_position={joint['drive_target_position']} "
+                f"drive_stiffness={joint['drive_stiffness']} drive_damping={joint['drive_damping']} "
+                f"drive_max_force={joint['drive_max_force']} joint_friction={joint['joint_friction']}"
+            )
+
+    def _log_joint_runtime_state(self, step: int):
+        try:
+            import omni.usd
+            from pxr import Usd, UsdGeom
+
+            stage = omni.usd.get_context().get_stage()
+            if stage is None:
+                print(f"[open_door_joint_debug] phase=runtime_sample step={step} stage unavailable")
+                return
+
+            cache = UsdGeom.XformCache(Usd.TimeCode.Default())
+            body_prim = stage.GetPrimAtPath("/World/envs/env_0/Door/E_bodyM1_1")
+            leaf_prim = stage.GetPrimAtPath("/World/envs/env_0/Door/E_leaf_2")
+            handle_prim = stage.GetPrimAtPath("/World/envs/env_0/Door/E_handle_4")
+            if not body_prim or not body_prim.IsValid() or not leaf_prim or not leaf_prim.IsValid():
+                print(f"[open_door_joint_debug] phase=runtime_sample step={step} missing door prims")
+                return
+
+            leaf_rotate = _prim_rotate_zyx_deg(leaf_prim)
+            handle_rotate = _prim_rotate_zyx_deg(handle_prim) if handle_prim and handle_prim.IsValid() else None
+            body_world = cache.GetLocalToWorldTransform(body_prim)
+            leaf_world = cache.GetLocalToWorldTransform(leaf_prim)
+            handle_world = cache.GetLocalToWorldTransform(handle_prim) if handle_prim and handle_prim.IsValid() else None
+
+            body_to_leaf = body_world.GetInverse() * leaf_world
+            leaf_to_handle_angle = None
+            if handle_world is not None:
+                leaf_to_handle = leaf_world.GetInverse() * handle_world
+                leaf_to_handle_angle = _quat_angle_deg_from_matrix(leaf_to_handle)
+
+            print(
+                "[open_door_joint_debug] phase=runtime_sample "
+                f"step={step} leaf_rotateZYX_deg={leaf_rotate} handle_rotateZYX_deg={handle_rotate} "
+                f"body_to_leaf_angle_deg={_quat_angle_deg_from_matrix(body_to_leaf):.4f} "
+                f"leaf_to_handle_angle_deg={leaf_to_handle_angle}"
+            )
+        except Exception as exc:
+            print(f"[open_door_joint_debug] phase=runtime_sample step={step} failed: {exc}")
