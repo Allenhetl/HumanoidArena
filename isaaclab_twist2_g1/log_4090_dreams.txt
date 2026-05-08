@@ -1,0 +1,104 @@
+[robot_usd] mode=box
+[robot_usd] path=/ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2.usd
+[twist2] task=Isaac-Move-PickPlace-Box-G129-Dex3-Wholedoby
+[twist2] env_config=tasks/common_env_config/pickplace_box_twist2.yaml
+[twist2] recording_save_dir=/ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2/yb
+Loading user config located at: '/ai/Yichi/taowen/isaac-sim/kit/data/Kit/Isaac-Sim/4.5/user.config.json'
+[Info] [carb] Logging to file: /ai/Yichi/taowen/isaac-sim/kit/logs/Kit/Isaac-Sim/4.5/kit_20260418_225126.log
+2026-04-18 14:51:26 [0ms] [Warning] [omni.kit.app.plugin] No crash reporter present, dumps uploading isn't available.
+2026-04-18 14:51:26 [20ms] [Warning] [omni.ext.plugin] [ext: rendering_modes] Extensions config 'extension.toml' doesn't exist '/ai/Yichi/taowen/IsaacLab/apps/rendering_modes' or '/ai/Yichi/taowen/IsaacLab/apps/rendering_modes/config'
+2026-04-18 14:51:27 [768ms] [Warning] [omni.datastore] OmniHub is inaccessible
+2026-04-18 14:51:27 [792ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-04-18 14:51:27 [792ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-04-18 14:51:27 [936ms] [Warning] [omni.platforminfo.plugin] failed to open the default display.  Can't verify X Server version.
+2026-04-18 14:51:27 [1,207ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-04-18 14:51:27 [1,207ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-04-18 14:51:27 [1,208ms] [Error] [carb.glinterop.plugin] GLInteropContext::init: carb::windowing is not available
+/ai/Yichi/0_Systems/miniconda3/envs/unitree_sim_env/lib/python3.10/site-packages/wandb/sdk/internal/internal_api.py:13: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  from pkg_resources import parse_version
+
+|---------------------------------------------------------------------------------------------|
+| Driver Version: 570.181       | Graphics API: Vulkan
+|=============================================================================================|
+| GPU | Name                             | Active | LDA | GPU Memory | Vendor-ID | LUID       |
+|     |                                  |        |     |            | Device-ID | UUID       |
+|     |                                  |        |     |            | Bus-ID    |            |
+|---------------------------------------------------------------------------------------------|
+| 0   | NVIDIA GeForce RTX 4090          | Yes: 0 |     | 49386   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2684      | 14bd7ad3.. |
+|     |                                  |        |     |            | 25        |            |
+|---------------------------------------------------------------------------------------------|
+| 1   | NVIDIA GeForce RTX 4090          |        |     | 49386   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2684      | de2ae603.. |
+|     |                                  |        |     |            | 26        |            |
+|---------------------------------------------------------------------------------------------|
+| 2   | NVIDIA GeForce RTX 4090          |        |     | 49386   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2684      | 5dfb7534.. |
+|     |                                  |        |     |            | 2b        |            |
+|---------------------------------------------------------------------------------------------|
+| 3   | NVIDIA GeForce RTX 4090          |        |     | 49386   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2684      | 4d6675ac.. |
+|     |                                  |        |     |            | 2e        |            |
+|---------------------------------------------------------------------------------------------|
+| 4   | NVIDIA GeForce RTX 4090          |        |     | 49386   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2684      | de335851.. |
+|     |                                  |        |     |            | a5        |            |
+|---------------------------------------------------------------------------------------------|
+| 5   | NVIDIA GeForce RTX 4090          |        |     | 49386   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2684      | bb983281.. |
+|     |                                  |        |     |            | ab        |            |
+|---------------------------------------------------------------------------------------------|
+| 6   | NVIDIA GeForce RTX 4090          |        |     | 49386   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2684      | 62924c3e.. |
+|     |                                  |        |     |            | ae        |            |
+|---------------------------------------------------------------------------------------------|
+| 7   | NVIDIA GeForce RTX 4090          |        |     | 49386   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2684      | b59980fb.. |
+|     |                                  |        |     |            | af        |            |
+|=============================================================================================|
+| OS: 20.04.4 LTS (Focal Fossa) ubuntu, Version: 20.04.4, Kernel: 5.15.0-94-generic
+| Processor: AMD EPYC 9654 96-Core Processor
+| Bare Metal Cores: 112 | Bare Metal Logical Cores: 224
+| Core Usage Quota: 192
+|---------------------------------------------------------------------------------------------|
+| Total Memory (MB): 917504 | Free Memory: 839632
+| Total Page/Swap (MB): 0 | Free Page/Swap: 0
+|---------------------------------------------------------------------------------------------|
+2026-04-18 14:51:30 [3,898ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-04-18 14:51:30 [3,898ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-04-18 14:51:30 [3,932ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-04-18 14:51:30 [3,933ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-04-18 14:51:30 [3,939ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-04-18 14:51:30 [3,939ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-04-18 14:51:30 [4,025ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-04-18 14:51:30 [4,025ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-04-18 14:51:30 [4,026ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-04-18 14:51:30 [4,026ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-04-18 14:51:30 [4,027ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-04-18 14:51:30 [4,027ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-04-18 14:51:30 [4,296ms] [Warning] [omni.isaac.dynamic_control] omni.isaac.dynamic_control is deprecated as of Isaac Sim 4.5. No action is needed from end-users.
+2026-04-18 14:51:31 [4,764ms] [Warning] [omni.log] Source: omni.hydra was already registered.
+2026-04-18 14:51:32 [5,939ms] [Warning] [omni.replicator.core.scripts.extension] No material configuration file, adding configuration to material settings directly.
+2026-04-18 14:51:46 [19,829ms] [Warning] [omni.usd-abi.plugin] No setting was found for '/rtx-defaults/ambientOcclusion/enabled'
+2026-04-18 14:51:46 [19,829ms] [Warning] [omni.usd-abi.plugin] No setting was found for '/rtx-defaults/directLighting/sampledLighting/enabled'
+2026-04-18 14:51:46 [19,829ms] [Warning] [omni.usd-abi.plugin] No setting was found for '/rtx-defaults/indirectDiffuse/enabled'
+2026-04-18 14:51:46 [19,829ms] [Warning] [omni.usd-abi.plugin] No setting was found for '/rtx-defaults/raytracing/cached/enabled'
+2026-04-18 14:51:46 [19,829ms] [Warning] [omni.usd-abi.plugin] No setting was found for '/rtx-defaults/reflections/enabled'
+2026-04-18 14:51:46 [19,829ms] [Warning] [omni.usd-abi.plugin] No setting was found for '/rtx-defaults/sceneDb/ambientLightIntensity'
+2026-04-18 14:51:46 [19,830ms] [Warning] [omni.usd-abi.plugin] No setting was found for '/rtx-defaults/translucency/enabled'
+2026-04-18 14:51:46 [19,830ms] [Warning] [omni.usd-abi.plugin] No setting was found for '/rtx-defaults/viewTile/limit'
+2026-04-18 14:51:46 [20,459ms] [Warning] [rtx.scenedb.plugin] SceneDbContext : TLAS limit buffer size 2908577024
+2026-04-18 14:51:46 [20,459ms] [Warning] [rtx.scenedb.plugin] SceneDbContext : TLAS limit : valid true, within: false
+2026-04-18 14:51:48 [21,539ms] [Warning] [omni.usd-abi.plugin] No setting was found for '/rtx-defaults/directLighting/sampledLighting/samplesPerPixel'
+2026-04-18 14:51:48 [21,539ms] [Warning] [omni.usd-abi.plugin] No setting was found for '/rtx-defaults/pathtracing/maxSamplesPerLaunch'
+2026-04-18 14:51:48 [21,539ms] [Warning] [omni.usd-abi.plugin] No setting was found for '/rtx-defaults-transient/meshlights/fException ignored in: <function ManagerBasedEnv.__del__ at 0x7ef5c21c7760>
+Traceback (most recent call last):
+  File "/ai/Yichi/taowen/IsaacLab/source/isaaclab/isaaclab/envs/manager_based_env.py", line 181, in __del__
+    self.close()
+  File "/ai/Yichi/taowen/IsaacLab/source/isaaclab/isaaclab/envs/manager_based_rl_env.py", line 312, in close
+    del self.command_manager
+AttributeError: command_manager
+orceDisable'
+2026-04-18 14:51:48 [21,822ms] [Warning] [omni.usd-abi.plugin] No setting was found for '/rtx-defaults/post/dlss/execMode'
+/ai/Yichi/0_Systems/miniconda3/envs/unitree_sim_env/lib/python3.10/multiprocessing/resource_tracker.py:224: UserWarning: resource_tracker: There appear to be 1 leaked shared_memory objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '

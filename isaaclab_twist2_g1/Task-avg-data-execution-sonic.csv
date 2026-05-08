@@ -1,0 +1,31 @@
+task,model_label,arch,backend,seeds,repeats_per_seed,seed_0,seed_1,seed_2,mean,std,total_eps,total_successes
+test1w_execution_boxing_20260503_044525,act_sonic_boxing_0424__100000,act,sonic,3,20,0.8000,0.6500,0.7000,0.7167,0.0764,60,43
+test1w_execution_boxing_20260503_044525,diffusion_sonic_boxing_0424__100000,diffusion,sonic,3,20,0.8000,0.6500,0.8000,0.7500,0.0866,60,45
+test1w_execution_boxing_20260503_044525,mtp_sonic_boxing_0424__100000,mtp,sonic,3,20,0.6000,0.5000,0.4500,0.5167,0.0764,60,31
+test1w_execution_doubledesk_20260503_032122,act_sonic_doubledesk_0418__100000,act,sonic,3,20,0.2500,0.1000,0.3000,0.2167,0.1041,60,13
+test1w_execution_doubledesk_20260503_032122,diffusion_sonic_doubledesk_0418__100000,diffusion,sonic,3,20,0.5000,0.3000,0.4500,0.4167,0.1041,60,25
+test1w_execution_doubledesk_20260503_032122,mtp_sonic_doubledesk_0418__100000,mtp,sonic,3,20,0.1000,0.2500,0.2000,0.1833,0.0764,60,11
+test1w_execution_football_single_20260502_154923,act_sonic_football_0416__100000,act,sonic,3,20,0.0500,0.0500,0.1000,0.0667,0.0289,60,4
+test1w_execution_football_single_20260502_154923,diffusion_sonic_football_0416__100000,diffusion,sonic,3,20,0.3000,0.3500,0.3000,0.3167,0.0289,60,19
+test1w_execution_football_single_20260502_154923,mtp_sonic_football_0416__100000,mtp,sonic,3,20,0.1000,0.3000,0.1500,0.1833,0.1041,60,11
+test1w_execution_open_door_20260503_073746,act_sonic_opendoor_0421__100000,act,sonic,3,20,0.2000,0.1000,0.1500,0.1500,0.0500,60,9
+test1w_execution_open_door_20260503_073746,diffusion_sonic_opendoor_0421__100000,diffusion,sonic,3,20,0.0000,0.0500,0.0500,0.0333,0.0289,60,2
+test1w_execution_open_door_20260503_073746,mtp_sonic_opendoor_0421__100000,mtp,sonic,3,20,0.1000,0.2000,0.2500,0.1833,0.0764,60,11
+test1w_execution_pp_box_20260503_035753,act_sonic_ppbox_0421__100000,act,sonic,3,20,0.5500,0.6000,0.5000,0.5500,0.0500,60,33
+test1w_execution_pp_box_20260503_035753,diffusion_sonic_ppbox_0421__100000,diffusion,sonic,3,20,0.7500,0.7500,0.8000,0.7667,0.0289,60,46
+test1w_execution_pp_box_20260503_035753,mtp_sonic_ppbox_0421__100000,mtp,sonic,3,20,0.6500,0.7500,0.5000,0.6333,0.1258,60,38
+test1w_execution_sit_sofa_20260503_050816,act_sonic_sitsofa_0423__100000,act,sonic,3,20,0.5000,0.6500,0.3500,0.5000,0.1500,60,30
+test1w_execution_sit_sofa_20260503_050816,diffusion_sonic_sitsofa_0423__100000,diffusion,sonic,3,20,0.5000,0.7500,0.6500,0.6333,0.1258,60,38
+test1w_execution_sit_sofa_20260503_050816,mtp_sonic_sitsofa_0423__100000,mtp,sonic,3,20,0.1500,0.0000,0.0000,0.0500,0.0866,60,3
+test1w_execution_vision_navi_20260503_053616,act_sonic_visionnavi_0419__100000,act,sonic,3,20,0.3500,0.3000,0.5000,0.3833,0.1041,60,23
+test1w_execution_vision_navi_20260503_053616,diffusion_sonic_visionnavi_0419__100000,diffusion,sonic,3,20,0.6000,0.4500,0.6500,0.5667,0.1041,60,34
+test1w_execution_vision_navi_20260503_053616,mtp_sonic_visionnavi_0419__100000,mtp,sonic,3,20,0.2000,0.3000,0.2000,0.2333,0.0577,60,14
+
+SUMMARY (aggregate by arch + HOI/HSI group)
+arch,group,num_tasks,task_means,aggregate_mean,aggregate_std
+act,HOI,3,0.2167 | 0.0667 | 0.5500,0.2778,0.2474
+act,HSI,4,0.7167 | 0.1500 | 0.5000 | 0.3833,0.4375,0.2362
+diffusion,HOI,3,0.4167 | 0.3167 | 0.7667,0.5000,0.2363
+diffusion,HSI,4,0.7500 | 0.0333 | 0.6333 | 0.5667,0.4958,0.3175
+mtp,HOI,3,0.1833 | 0.1833 | 0.6333,0.3333,0.2598
+mtp,HSI,4,0.5167 | 0.1833 | 0.0500 | 0.2333,0.2458,0.1964

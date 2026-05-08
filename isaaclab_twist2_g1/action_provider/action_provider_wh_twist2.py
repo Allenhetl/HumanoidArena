@@ -2,6 +2,7 @@
 # License: Apache License, Version 2.0
 from action_provider.action_base import ActionProvider, ReplayComplete
 from action_provider.reset_control import get_input_ready_key
+from collections import deque
 from typing import Optional
 import torch
 import os
@@ -798,6 +799,13 @@ class TWIST2ActionProvider(ActionProvider):
         self._lerobot_vla_runtime = UnifiedSMPLActionRuntime()
         self._lerobot_gripper_threshold = float(getattr(args_cli, "lerobot_gripper_threshold", 0.5))
         self._latest_vla_action = None
+        self._lerobot_action_chunk_queue = deque()
+        self._twist2_onnx_requested_device = str(getattr(args_cli, "device", "") or "")
+        self._twist2_onnx_device_id = self._resolve_onnx_device_id(self._twist2_onnx_requested_device)
+        print(
+            f"[{self.name}] TWIST2 ONNX requested_device={self._twist2_onnx_requested_device or 'auto'} "
+            f"resolved_cuda_device_id={self._twist2_onnx_device_id}"
+        )
         self.policy_path = self._resolve_policy_path(args_cli.model_path)
         if (not self._replay_enabled or self._replay_mode != "direct_replay") and not os.path.exists(self.policy_path):
             raise FileNotFoundError(f"[{self.name}] Policy file not found: {self.policy_path}")
@@ -854,6 +862,7 @@ class TWIST2ActionProvider(ActionProvider):
         # --- TWIST2 (Redis teleop / motion tracker) quick integration ---
         self.redis_client = None
         self.redis_pipeline = None
+        self._redis_state_publish_disabled = False
         try:
             self.redis_client = redis.Redis(host='localhost', port=6379, db=0)
             self.redis_pipeline = self.redis_client.pipeline()
@@ -1341,6 +1350,22 @@ class TWIST2ActionProvider(ActionProvider):
             return os.path.join(project_root, model_path)
         return model_path
 
+    def _resolve_onnx_device_id(self, requested_device: str) -> int:
+        value = (requested_device or "").strip().lower()
+        if value.startswith("cuda:"):
+            try:
+                return int(value.split(":", 1)[1])
+            except Exception:
+                return 0
+        if value.startswith("cuda"):
+            return 0
+        if value.isdigit():
+            try:
+                return int(value)
+            except Exception:
+                return 0
+        return 0
+
     def load_policy(self, path):
         ext = os.path.splitext(path)[1].lower()
         if ext == ".onnx":
@@ -1358,12 +1383,29 @@ class TWIST2ActionProvider(ActionProvider):
         except Exception:
             available = []
 
+        requested_device = self._twist2_onnx_requested_device or 'auto'
         providers = []
-        if "CUDAExecutionProvider" in available:
-            providers.append("CUDAExecutionProvider")
+        expected_gpu_providers = []
+        if str(requested_device).startswith('cuda') or str(requested_device).isdigit():
+            if "TensorrtExecutionProvider" in available:
+                providers.append(("TensorrtExecutionProvider", {"device_id": self._twist2_onnx_device_id}))
+                expected_gpu_providers.append("TensorrtExecutionProvider")
+            if "CUDAExecutionProvider" in available:
+                providers.append(("CUDAExecutionProvider", {"device_id": self._twist2_onnx_device_id}))
+                expected_gpu_providers.append("CUDAExecutionProvider")
+            if not expected_gpu_providers:
+                raise RuntimeError(
+                    f"[{self.name}] requested GPU ONNX session on {requested_device}, "
+                    f"but available providers are {available}"
+                )
         providers.append("CPUExecutionProvider")
+        selected_provider_names = [item[0] if isinstance(item, tuple) else item for item in providers]
         print(f"[{self.name}] ONNX available providers: {available}")
-        print(f"[{self.name}] ONNX selected providers: {providers}")
+        print(
+            f"[{self.name}] ONNX selected providers: {selected_provider_names} "
+            f"(requested_device={requested_device}, "
+            f"cuda_device_id={self._twist2_onnx_device_id})"
+        )
 
         # Configure session options for deterministic inference
         sess_options = ort.SessionOptions()
@@ -1375,6 +1417,12 @@ class TWIST2ActionProvider(ActionProvider):
             print(f"[{self.name}] ONNX Runtime configured for deterministic inference (seed={self.onnx_seed})")
 
         model = ort.InferenceSession(path, sess_options=sess_options, providers=providers)
+        loaded_providers = model.get_providers()
+        if expected_gpu_providers and not any(name in loaded_providers for name in expected_gpu_providers):
+            raise RuntimeError(
+                f"[{self.name}] ONNX model loaded on CPU instead of {requested_device}; "
+                f"providers={loaded_providers}"
+            )
         input_name = model.get_inputs()[0].name
 
         def run_inference(input_tensor: torch.Tensor):
@@ -1383,7 +1431,7 @@ class TWIST2ActionProvider(ActionProvider):
             ort_outs = model.run(None, ort_inputs)
             return torch.tensor(ort_outs[0], device=self.env.device, dtype=torch.float32)
 
-        print(f"[{self.name}] ONNX policy loaded with providers: {model.get_providers()}")
+        print(f"[{self.name}] ONNX policy loaded with providers: {loaded_providers}")
         return run_inference
 
     def _normalize_replay_mode(self, replay_mode: str) -> str:
@@ -1492,12 +1540,12 @@ class TWIST2ActionProvider(ActionProvider):
             raise RuntimeError(f"[{self.name}] Expected canonical VLA state shape {(VLA_SMPL_STATE_DIM,)}, got {state.shape}")
         return state
 
-    def _infer_lerobot_high_level_command(self) -> torch.Tensor:
+    def _fetch_lerobot_action_chunk(self) -> np.ndarray:
         rgb = self._get_front_camera_rgb_for_vla()
         proprio = self._build_lerobot_vla_observation_state()
 
         if self._lerobot_http_client is not None:
-            action = self._lerobot_http_client.infer(
+            action_chunk = self._lerobot_http_client.infer_chunk(
                 front_rgb=rgb,
                 observation_state=proprio,
                 robot_type=self.enable_robot,
@@ -1521,15 +1569,36 @@ class TWIST2ActionProvider(ActionProvider):
                 task=None,
                 robot_type=self.enable_robot,
             )
+            if isinstance(action, torch.Tensor):
+                action_chunk = action.detach().cpu().numpy().astype(np.float32)
+            else:
+                action_chunk = np.asarray(action, dtype=np.float32)
 
-        if not isinstance(action, torch.Tensor):
-            action = torch.as_tensor(action)
-        action_np = action.detach().cpu().numpy().astype(np.float32).reshape(-1)
+        action_chunk = np.asarray(action_chunk, dtype=np.float32)
+        if action_chunk.ndim == 1:
+            action_chunk = action_chunk.reshape(1, -1)
+        if action_chunk.ndim != 2 or action_chunk.shape[1] != VLA_SMPL_ACTION_DIM:
+            raise ValueError(
+                f"[{self.name}] Expected canonical VLA action chunk shape [N, {VLA_SMPL_ACTION_DIM}], got {action_chunk.shape}"
+            )
+        return action_chunk
+
+    def _pop_lerobot_action(self) -> np.ndarray:
+        if not self._lerobot_action_chunk_queue:
+            for action in self._fetch_lerobot_action_chunk():
+                self._lerobot_action_chunk_queue.append(np.asarray(action, dtype=np.float32).copy())
+        action_np = np.asarray(self._lerobot_action_chunk_queue.popleft(), dtype=np.float32).reshape(-1)
         if action_np.shape != (VLA_SMPL_ACTION_DIM,):
             raise ValueError(
                 f"[{self.name}] Expected canonical VLA action dim {VLA_SMPL_ACTION_DIM}, got {action_np.shape}"
             )
+        return action_np
 
+    def _should_refresh_lerobot_visuals_next_step(self) -> bool:
+        return (not self._use_lerobot_vla) or (len(self._lerobot_action_chunk_queue) == 0)
+
+    def _infer_lerobot_high_level_command(self) -> torch.Tensor:
+        action_np = self._pop_lerobot_action()
         self._latest_vla_action = action_np.copy()
         runtime_frame = self._lerobot_vla_runtime.step(action_np)
         self._vla_gripper_binary.copy_(
@@ -2227,7 +2296,7 @@ class TWIST2ActionProvider(ActionProvider):
             return self._default_mimic_obs.clone()
 
     def _twist2_publish_state(self, state_body, state_hand_left, state_hand_right, state_neck) -> None:
-        if self.redis_pipeline is None:
+        if self.redis_pipeline is None or self._redis_state_publish_disabled:
             return
         try:
             self.redis_pipeline.set("state_body_unitree_g1_with_hands", json.dumps(state_body))
@@ -2237,7 +2306,10 @@ class TWIST2ActionProvider(ActionProvider):
             self.redis_pipeline.set("t_state", int(time.time() * 1000))
             self.redis_pipeline.execute()
         except Exception as e:
-            print(f"[{self.name}] Redis state publish failed: {e}")
+            print(f"[{self.name}] Redis state publish failed once, disabling Redis state publish for this run: {e}")
+            self._redis_state_publish_disabled = True
+            self.redis_pipeline = None
+            self.redis_client = None
 
     def get_human_smplx_data(self):
         """Get the most recent human SMPLX data (before GMR retargeting) from Redis.
@@ -2417,8 +2489,10 @@ class TWIST2ActionProvider(ActionProvider):
         import time
         total_start = time.perf_counter()
 
+        recording_enabled = not getattr(self, "_disable_eval_recording", False)
+
         # Auto-start recording on first call (after env.reset() has been called)
-        if hasattr(self, '_should_start_recording_on_first_call') and self._should_start_recording_on_first_call:
+        if recording_enabled and hasattr(self, '_should_start_recording_on_first_call') and self._should_start_recording_on_first_call:
             print(f"[{self.name}] 🔴 Starting recording on first get_action() call")
             print(f"[{self.name}] This ensures Frame 0 captures real physics state")
             self.recording_manager.start_recording()
@@ -2541,9 +2615,11 @@ class TWIST2ActionProvider(ActionProvider):
 
             # 2.5. Collect recording data (before decimation loop)
             # This captures the state before physics simulation steps
-            recording_data_start = time.perf_counter()
-            recording_data = self.collect_recording_data(obs_buf, target_29)
-            recording_data_time = time.perf_counter() - recording_data_start
+            recording_data = None
+            if recording_enabled:
+                recording_data_start = time.perf_counter()
+                recording_data = self.collect_recording_data(obs_buf, target_29)
+                recording_data_time = time.perf_counter() - recording_data_start
 
             # 2.6. Recording state machine
             # Debug: Print recording command state
@@ -2555,12 +2631,12 @@ class TWIST2ActionProvider(ActionProvider):
             # If recording is already running locally, that edge is only an ack and
             # must not be reinterpreted as "save", otherwise we immediately flush a
             # 1-frame episode and break save_and_reset semantics.
-            if self._recording_command == "start" and self.recording_manager.is_recording:
+            if recording_enabled and self._recording_command == "start" and self.recording_manager.is_recording:
                 print(f"[{self.name}] 🔄 Already recording: ignoring duplicate 'start' edge")
                 self._recording_command = "none"
 
             # Handle recording commands from Redis
-            if self._recording_command == "start" and not self.recording_manager.is_recording:
+            if recording_enabled and self._recording_command == "start" and not self.recording_manager.is_recording:
                 self.recording_manager.start_recording()
                 self._recording_display_state = "recording"
                 self._recording_display_counter = 0
@@ -2568,7 +2644,7 @@ class TWIST2ActionProvider(ActionProvider):
                 # Reset command after processing (one-time trigger)
                 self._recording_command = "none"
 
-            elif self._recording_command == "save":
+            elif recording_enabled and self._recording_command == "save":
                 # Define callback to update display state when save completes
                 def on_save_complete(success: bool):
                     # Set completion flag (thread-safe: single write operation)
@@ -2589,7 +2665,7 @@ class TWIST2ActionProvider(ActionProvider):
                 # Reset command after processing
                 self._recording_command = "none"
 
-            elif self._recording_command == "cancel":
+            elif recording_enabled and self._recording_command == "cancel":
                 self.recording_manager.cancel_recording()
                 self._recording_display_state = "discard"
                 self._recording_display_counter = 0
@@ -2598,7 +2674,7 @@ class TWIST2ActionProvider(ActionProvider):
                 # Reset command after processing
                 self._recording_command = "none"
 
-            elif self._recording_command == "save_and_reset":
+            elif recording_enabled and self._recording_command == "save_and_reset":
                 # Save recording asynchronously, then trigger reset immediately
                 print(f"[{self.name}] 💾 save_and_reset command received")
 
@@ -2625,7 +2701,7 @@ class TWIST2ActionProvider(ActionProvider):
                 # Reset command after processing
                 self._recording_command = "none"
 
-            elif self._recording_command == "discard_and_reset":
+            elif recording_enabled and self._recording_command == "discard_and_reset":
                 # Discard recording, then trigger reset
                 print(f"[{self.name}] ❌ discard_and_reset command received")
 
@@ -2649,7 +2725,7 @@ class TWIST2ActionProvider(ActionProvider):
                 self._recording_command = "none"
 
             # Check for reset complete signal from sim_main
-            if self._waiting_for_reset_complete:
+            if recording_enabled and self._waiting_for_reset_complete:
                 reset_complete = self._check_reset_complete()
                 if reset_complete:
                     print(f"[{self.name}] ✅ Reset complete signal received")
@@ -2670,13 +2746,18 @@ class TWIST2ActionProvider(ActionProvider):
             # Priority order: check save completion > saving > saved/discard countdown > recording > idle
 
             # Debug: print state before transitions
-            if self.sim_step_counter % 10 == 0 and (self._save_in_progress or self._recording_display_state != "idle"):
+            if recording_enabled and self.sim_step_counter % 10 == 0 and (self._save_in_progress or self._recording_display_state != "idle"):
                 print(f"[{self.name}] 🔍 State check (step {self.sim_step_counter}): display={self._recording_display_state}, save_in_progress={self._save_in_progress}, is_recording={self.recording_manager.is_recording}, completion={self._save_completion_state}")
 
             # Check if save completed (set by background thread callback)
-            self._pending_save_jobs = self.recording_manager.get_pending_save_count()
-            self._save_in_progress = self._pending_save_jobs > 0
-            if self._save_completion_state is not None:
+            if recording_enabled:
+                self._pending_save_jobs = self.recording_manager.get_pending_save_count()
+                self._save_in_progress = self._pending_save_jobs > 0
+            else:
+                self._pending_save_jobs = 0
+                self._save_in_progress = False
+                self._recording_display_state = "idle"
+            if recording_enabled and self._save_completion_state is not None:
                 if self._save_completion_state == "success":
                     self._recording_display_state = "saved"
                 else:  # "failure"
@@ -2685,21 +2766,21 @@ class TWIST2ActionProvider(ActionProvider):
                 self._save_completion_state = None  # Clear the flag
                 print(f"[{self.name}] 🔄 Display state updated to: {self._recording_display_state}")
             # Normal state transitions (only if save didn't just complete)
-            elif self._save_in_progress:
+            elif recording_enabled and self._save_in_progress:
                 # Keep showing "saving" while save is in progress
                 # State will be updated when _save_completion_state is set
                 # Don't change _recording_display_state here
                 pass
-            elif self._recording_display_state in ["saved", "discard"]:
+            elif recording_enabled and self._recording_display_state in ["saved", "discard"]:
                 # Count down the display duration for saved/discard states
                 self._recording_display_counter += 1
                 if self._recording_display_counter >= self._recording_display_duration:
                     self._recording_display_state = "idle"
                     self._recording_display_counter = 0
-            elif self.recording_manager.is_recording:
+            elif recording_enabled and self.recording_manager.is_recording:
                 # Currently recording
                 self._recording_display_state = "recording"
-            elif not self.recording_manager.is_recording and self._recording_display_state == "recording":
+            elif recording_enabled and not self.recording_manager.is_recording and self._recording_display_state == "recording":
                 # Recording stopped but no save/cancel command yet (shouldn't happen normally)
                 # Only transition to idle if we're not in the middle of saving
                 if not self._save_in_progress:
@@ -2707,7 +2788,7 @@ class TWIST2ActionProvider(ActionProvider):
                     self._recording_display_state = "idle"
 
             # Add frame to recording buffer if recording is active
-            if self.recording_manager.is_recording:
+            if recording_enabled and self.recording_manager.is_recording and recording_data is not None:
                 self.recording_manager.add_frame(recording_data)
 
             # 3. Physics simulation loop
@@ -2723,7 +2804,7 @@ class TWIST2ActionProvider(ActionProvider):
 
                 # Physics step with optional rendering
                 is_last_step = (i == self._twist2_decimation - 1)
-                should_render = is_last_step and (self._render_counter % self._render_interval == 0)
+                should_render = is_last_step and (self._should_refresh_lerobot_visuals_next_step() if self._use_lerobot_vla else (self._render_counter % self._render_interval == 0))
 
                 if should_render:
                     render_start = time.perf_counter()
@@ -2764,7 +2845,8 @@ class TWIST2ActionProvider(ActionProvider):
             # 4. Observation computation
             obs_start = time.perf_counter()
             self._obs_counter += 1
-            if self._obs_counter % self._obs_interval == 0:
+            should_compute_obs = self._should_refresh_lerobot_visuals_next_step() if self._use_lerobot_vla else (self._obs_counter % self._obs_interval == 0)
+            if should_compute_obs:
                 self.env.observation_manager.compute()
                 obs_time = time.perf_counter() - obs_start
 
@@ -3298,6 +3380,15 @@ class TWIST2ActionProvider(ActionProvider):
             # Reset recording command state
             self._recording_command = "none"
             self._recording_active = False
+            if getattr(self, "_disable_eval_recording", False):
+                self._should_start_recording_on_first_call = False
+                self._recording_display_state = "idle"
+                self._save_in_progress = False
+                self._pending_save_jobs = 0
+                try:
+                    self.recording_manager.cancel_recording()
+                except Exception:
+                    pass
             self._input_ready_timestamp_ms = 0
             self._input_ready_epoch_id = -1
             self._stale_input_drop_logged_epoch = -1
@@ -3309,6 +3400,7 @@ class TWIST2ActionProvider(ActionProvider):
             self._replay_reward_max = None
             self._replay_any_success = False
             if self._use_lerobot_vla:
+                self._lerobot_action_chunk_queue.clear()
                 self._lerobot_vla_runtime.reset()
                 if self._lerobot_http_client is not None:
                     self._lerobot_http_client.reset()

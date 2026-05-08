@@ -1,11 +1,8 @@
-from __future__ import annotations
-
-import math
 import os
-from typing import Any
 
-import numpy as np
 import torch
+
+import isaaclab.envs.mdp as base_mdp
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.envs import mdp as base_mdp
@@ -15,6 +12,7 @@ from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
 
+from . import mdp
 from common_env_objects import apply_deterministic_object_resets
 from tasks.common_config import CameraPresets, G1RobotPresets
 from tasks.common_event.event_manager import SimpleEvent, SimpleEventManager
@@ -181,8 +179,10 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self):
         self.decimation = 4
         self.episode_length_s = 20.0
-        self.object_reset_seed_source = "time"
+        # Allow YAML override via tasks/common_env_config/*.yaml.
+        self.object_reset_seed_source = "env_seed"
         self.deterministic_object_resets = []
+        self._replay_initial_env_state_active = False
 
         self.sim.dt = 0.005
         self.scene.contact_forces.update_period = self.sim.dt
@@ -197,14 +197,6 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physics_material.friction_combine_mode = "max"
         self.sim.physics_material.restitution_combine_mode = "max"
 
-        self._replay_initial_env_state_active = False
-        self._open_door_transform_debug_enabled = _env_flag("OPEN_DOOR_TRANSFORM_DEBUG")
-        self._open_door_joint_debug_enabled = _env_flag("OPEN_DOOR_JOINT_DEBUG")
-        self._open_door_joint_runtime_logged_steps: set[int] = set()
-        self._open_door_runtime_step_counter = 0
-        self._open_door_first_control_step_debug_done = False
-        self._open_door_joint_catalog_logged = False
-
         self.event_manager = SimpleEventManager()
         self.event_manager.register(
             "reset_object_self",
@@ -216,10 +208,7 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
         )
 
     def initialize_task_scene(self, env, args_cli=None):
-        self._replay_initial_env_state_active = (
-            bool(getattr(args_cli, "replay_file", "")) if args_cli else False
-        )
-        self._reset_open_door_runtime_debug_state()
+        self._replay_initial_env_state_active = bool(getattr(args_cli, "replay_file", "")) if args_cli else False
         self._disable_overlapping_room_gate_collisions()
         self._configure_door_joint_physics(env)
         self._debug_transform_phase("initialize_task_scene")
@@ -278,6 +267,28 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
         self._open_door_runtime_step_counter = 0
         self._open_door_first_control_step_debug_done = False
 
+    def _reset_object_self(self, env):
+        applied = apply_deterministic_object_resets(
+            self,
+            env,
+            selected_record_names={"door"},
+        )
+        if applied:
+            print("[object_reset] " + ", ".join(applied))
+
+    def _reset_all_self(self, env):
+        base_mdp.reset_scene_to_default(
+            env,
+            torch.arange(env.num_envs, device=env.device),
+        )
+        applied = apply_deterministic_object_resets(
+            self,
+            env,
+            selected_record_names={"door"},
+        )
+        if applied:
+            print("[object_reset] " + ", ".join(applied))
+
     def _disable_overlapping_room_gate_collisions(self):
         try:
             import omni.usd
@@ -326,8 +337,7 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
 
             stage = omni.usd.get_context().get_stage()
             door_asset = env.scene["door"]
-            find_joints = getattr(door_asset, "find_joints", None)
-            if not callable(find_joints):
+            if not hasattr(door_asset, "find_joints"):
                 print(
                     "[open_door] scheme_a_assetbase active: door scene asset has no find_joints(); "
                     "skip articulation joint runtime overrides"

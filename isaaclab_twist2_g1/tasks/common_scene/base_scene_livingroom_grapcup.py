@@ -17,7 +17,7 @@ INTERACTION_OBJ_ROOT = (
 
 ROOM_USD_PATH = f"{project_root}/assets/objects/small_warehouse/small_warehouse_grapcup/small_warehouse_digital_twin_grapcup.usd"
 DRINK016_USD_PATH = f"{INTERACTION_OBJ_ROOT}/drink016/model_drink016.usd"
-DRINK_INIT_POS = (-0.18, 0.5, 0.8)
+DRINK_INIT_POS = (-0.18, 0.5, 0.82)
 DRINK_INIT_ROT = (0.78, 0.0, 0.0, -0.61)
 
 CHAIR001_USD_PATH = f"{INTERACTION_OBJ_ROOT}/chair001/model_chair1.usd"
@@ -67,7 +67,7 @@ class LivingroomGrapCupSceneCfg(InteractiveSceneCfg):
                 disable_gravity=False,
                 retain_accelerations=False,
             ),
-            mass_props=sim_utils.MassPropertiesCfg(mass=0.35),
+            mass_props=sim_utils.MassPropertiesCfg(mass=0.7),
             collision_props=sim_utils.CollisionPropertiesCfg(
                 collision_enabled=True,
                 contact_offset=0.1,

@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import torch
-
 try:
     from tasks.common_scene.base_scene_open_door import DOOR_POS
 except Exception:
+    # Keep this module importable in lightweight unit tests where the runtime
+    # package layout is not available.
     DOOR_POS = [-1.614, 2.314, 0.002]
 
 if TYPE_CHECKING:
@@ -17,8 +17,6 @@ _MIN_STANDING_ROOT_HEIGHT_M = 0.45
 _MIN_STANDING_UP_AXIS_Z = 0.60
 _DOOR_FRAME_HALF_WIDTH_M = 0.55
 _DOOR_PASSING_FORWARD_CLEARANCE_M = 0.02
-
-
 def _root_up_axis_z(root_quat_wxyz: torch.Tensor) -> torch.Tensor:
     quat = root_quat_wxyz / torch.linalg.vector_norm(root_quat_wxyz, dim=1, keepdim=True).clamp_min(1e-8)
     x = quat[:, 1]
@@ -44,19 +42,11 @@ def _yaw_from_quat_wxyz(quat_wxyz: torch.Tensor) -> torch.Tensor:
     return torch.atan2(siny_cosp, cosy_cosp)
 
 
-def _log_pose_source_once(env: "ManagerBasedRLEnv", source: str, detail: str) -> None:
-    key = f"{source}:{detail}"
-    logged = getattr(env, "_open_door_pose_source_logged", None)
-    if logged is None:
-        logged = set()
-        setattr(env, "_open_door_pose_source_logged", logged)
-    if key in logged:
-        return
-    logged.add(key)
-    print(f"[open_door] door pose source={source}: {detail}")
+def _log_door_pose_source_once(source: str, detail: str) -> None:
+    return
 
 
-def _static_fallback_pose(env: "ManagerBasedRLEnv") -> tuple[torch.Tensor, torch.Tensor]:
+def _static_door_pose_batch(env: "ManagerBasedRLEnv") -> tuple[torch.Tensor, torch.Tensor]:
     door_pos_w = torch.tensor(DOOR_POS, device=env.device, dtype=torch.float32).repeat(env.num_envs, 1)
     door_quat_wxyz = torch.tensor([1.0, 0.0, 0.0, 0.0], device=env.device, dtype=torch.float32).repeat(
         env.num_envs, 1
@@ -64,90 +54,90 @@ def _static_fallback_pose(env: "ManagerBasedRLEnv") -> tuple[torch.Tensor, torch
     return door_pos_w, door_quat_wxyz
 
 
-def _try_asset_pose_tensor(
-    env: "ManagerBasedRLEnv",
-    value,
-    *,
-    width: int,
-) -> torch.Tensor | None:
-    if value is None:
-        return None
-    tensor = torch.as_tensor(value, device=env.device, dtype=torch.float32)
-    if tensor.ndim == 1:
-        tensor = tensor.unsqueeze(0)
-    if tensor.shape[0] != env.num_envs or tensor.shape[1] < width:
-        return None
-    return tensor[:, :width]
-
-
-def _try_resolve_door_pose_from_asset_data(
-    env: "ManagerBasedRLEnv",
-    door_asset,
-) -> tuple[torch.Tensor, torch.Tensor, str] | None:
+def _try_resolve_door_pose_from_asset_data(env: "ManagerBasedRLEnv", door_asset):
     data = getattr(door_asset, "data", None)
     if data is None:
         return None
 
-    root_state_w = _try_asset_pose_tensor(env, getattr(data, "root_state_w", None), width=7)
+    root_state_w = getattr(data, "root_state_w", None)
     if root_state_w is not None:
-        return root_state_w[:, 0:3], root_state_w[:, 3:7], "root_state_w"
+        _log_door_pose_source_once("asset_data", "using root_state_w")
+        return root_state_w[:, 0:3], root_state_w[:, 3:7]
 
-    root_pos_w = _try_asset_pose_tensor(env, getattr(data, "root_pos_w", None), width=3)
-    root_quat_w = _try_asset_pose_tensor(env, getattr(data, "root_quat_w", None), width=4)
+    root_pos_w = getattr(data, "root_pos_w", None)
+    root_quat_w = getattr(data, "root_quat_w", None)
     if root_pos_w is not None and root_quat_w is not None:
-        return root_pos_w, root_quat_w, "root_pos_w+root_quat_w"
+        _log_door_pose_source_once("asset_data", "using root_pos_w/root_quat_w")
+        return root_pos_w, root_quat_w
 
-    root_pose_w = _try_asset_pose_tensor(env, getattr(data, "root_pose_w", None), width=7)
+    root_pose_w = getattr(data, "root_pose_w", None)
     if root_pose_w is not None:
-        return root_pose_w[:, 0:3], root_pose_w[:, 3:7], "root_pose_w"
+        _log_door_pose_SOURCE = "using root_pose_w"
+        _log_door_pose_source_once("asset_data", _log_door_pose_SOURCE)
+        return root_pose_w[:, 0:3], root_pose_w[:, 3:7]
 
     return None
 
 
-def _read_stage_door_pose_w(env_idx: int) -> tuple[tuple[float, float, float], tuple[float, float, float, float]] | None:
+def _try_resolve_door_pose_from_stage(env: "ManagerBasedRLEnv"):
     try:
         import omni.usd
-        from pxr import Usd, UsdGeom
-    except Exception:
-        return None
-
-    stage = omni.usd.get_context().get_stage()
-    if stage is None:
-        return None
-
-    prim = stage.GetPrimAtPath(f"/World/envs/env_{env_idx}/Door")
-    if prim is None or not prim.IsValid() or not prim.IsActive():
+        from pxr import UsdGeom
+    except Exception as exc:
+        _log_door_pose_source_once("stage_unavailable", f"imports_failed={exc}")
         return None
 
     try:
-        cache = UsdGeom.XformCache(Usd.TimeCode.Default())
-        matrix = cache.GetLocalToWorldTransform(prim)
-        translation = matrix.ExtractTranslation()
-        quat = matrix.ExtractRotationQuat()
-        imag = quat.GetImaginary()
-        return (
-            (float(translation[0]), float(translation[1]), float(translation[2])),
-            (float(quat.GetReal()), float(imag[0]), float(imag[1]), float(imag[2])),
-        )
-    except Exception:
-        return None
-
-
-def _try_resolve_door_pose_from_stage_world_transform(
-    env: "ManagerBasedRLEnv",
-) -> tuple[torch.Tensor, torch.Tensor] | None:
-    positions = torch.zeros((env.num_envs, 3), device=env.device, dtype=torch.float32)
-    quats = torch.zeros((env.num_envs, 4), device=env.device, dtype=torch.float32)
-
-    for env_idx in range(env.num_envs):
-        pose = _read_stage_door_pose_w(env_idx)
-        if pose is None:
+        stage = omni.usd.get_context().get_stage()
+        if stage is None:
+            _log_door_pose_source_once("stage_unavailable", "stage_is_none")
             return None
-        pos, quat = pose
-        positions[env_idx] = torch.tensor(pos, device=env.device, dtype=torch.float32)
-        quats[env_idx] = torch.tensor(quat, device=env.device, dtype=torch.float32)
 
-    return positions, quats
+        cache = UsdGeom.XformCache()
+        pos_rows: list[list[float]] = []
+        quat_rows: list[list[float]] = []
+        missing_paths: list[str] = []
+        for env_idx in range(int(env.num_envs)):
+            prim_path = f"/World/envs/env_{env_idx}/Door"
+            prim = stage.GetPrimAtPath(prim_path)
+            if prim is None or not prim.IsValid() or not prim.IsActive():
+                missing_paths.append(prim_path)
+                pos_rows.append([float(DOOR_POS[0]), float(DOOR_POS[1]), float(DOOR_POS[2])])
+                quat_rows.append([1.0, 0.0, 0.0, 0.0])
+                continue
+
+            world_matrix = cache.GetLocalToWorldTransform(prim)
+            translation = world_matrix.ExtractTranslation()
+            quat_wxyz = [1.0, 0.0, 0.0, 0.0]
+            try:
+                quat = world_matrix.ExtractRotationQuat()
+                imag = quat.GetImaginary()
+                quat_wxyz = [float(quat.GetReal()), float(imag[0]), float(imag[1]), float(imag[2])]
+            except Exception:
+                try:
+                    rotation = world_matrix.ExtractRotation().GetQuat()
+                    imag = rotation.GetImaginary()
+                    quat_wxyz = [float(rotation.GetReal()), float(imag[0]), float(imag[1]), float(imag[2])]
+                except Exception:
+                    quat_wxyz = [1.0, 0.0, 0.0, 0.0]
+
+            pos_rows.append([float(translation[0]), float(translation[1]), float(translation[2])])
+            quat_rows.append(quat_wxyz)
+
+        if missing_paths:
+            _log_door_pose_source_once(
+                "stage_world_transform_partial",
+                f"using stage transform with static fallback for missing prims: {missing_paths}",
+            )
+        else:
+            _log_door_pose_source_once("stage_world_transform", "using /World/envs/env_i/Door world transform")
+
+        door_pos_w = torch.tensor(pos_rows, device=env.device, dtype=torch.float32)
+        door_quat_wxyz = torch.tensor(quat_rows, device=env.device, dtype=torch.float32)
+        return door_pos_w, door_quat_wxyz
+    except Exception as exc:
+        _log_door_pose_source_once("stage_world_transform_failed", str(exc))
+        return None
 
 
 def _resolve_door_root_pose_w(env: "ManagerBasedRLEnv") -> tuple[torch.Tensor, torch.Tensor]:
@@ -160,19 +150,26 @@ def _resolve_door_root_pose_w(env: "ManagerBasedRLEnv") -> tuple[torch.Tensor, t
             continue
 
     if door_asset is not None:
-        asset_pose = _try_resolve_door_pose_from_asset_data(env, door_asset)
-        if asset_pose is not None:
-            door_pos_w, door_quat_wxyz, detail = asset_pose
-            _log_pose_source_once(env, "asset_data", detail)
-            return door_pos_w, door_quat_wxyz
+        pose_from_asset = _try_resolve_door_pose_from_asset_data(env, door_asset)
+        if pose_from_asset is not None:
+            return pose_from_asset
 
-    stage_pose = _try_resolve_door_pose_from_stage_world_transform(env)
-    if stage_pose is not None:
-        _log_pose_source_once(env, "stage_world_transform", "/World/envs/env_{env_idx}/Door")
-        return stage_pose
+        pose_from_stage = _try_resolve_door_pose_from_stage(env)
+        if pose_from_stage is not None:
+            return pose_from_stage
 
-    _log_pose_source_once(env, "static_fallback", f"DOOR_POS={DOOR_POS}")
-    return _static_fallback_pose(env)
+        _log_door_pose_source_once(
+            "static_fallback",
+            "scene asset found but no runtime world-pose tensors or stage transform were available",
+        )
+        return _static_door_pose_batch(env)
+
+    pose_from_stage = _try_resolve_door_pose_from_stage(env)
+    if pose_from_stage is not None:
+        return pose_from_stage
+
+    _log_door_pose_source_once("static_fallback", "door scene asset missing; using DOOR_POS constant")
+    return _static_door_pose_batch(env)
 
 
 def compute_success_mask(env: "ManagerBasedRLEnv") -> torch.Tensor:
@@ -194,13 +191,6 @@ def compute_success_mask(env: "ManagerBasedRLEnv") -> torch.Tensor:
 
 
 def compute_reward_open_door(env: "ManagerBasedRLEnv") -> torch.Tensor:
-    debug_hook = getattr(getattr(env, "cfg", None), "debug_joint_runtime_step", None)
-    if callable(debug_hook):
-        try:
-            debug_hook(env)
-        except Exception as exc:
-            print(f"[open_door_joint_debug] phase=runtime_hook failed: {exc}")
-
     reward = torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
     success = compute_success_mask(env)
     reward[success] = 1.0

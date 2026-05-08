@@ -90,14 +90,29 @@ class DiffusionPolicy(PreTrainedPolicy):
         if self.config.env_state_feature:
             self._queues[OBS_ENV_STATE] = deque(maxlen=self.config.n_obs_steps)
 
+    def _prepare_batch(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
+        if ACTION in batch:
+            batch = dict(batch)
+            batch.pop(ACTION)
+
+        if self.config.image_features:
+            batch = dict(batch)
+            batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
+
+        return batch
+
+    def _predict_action_chunk_from_queues(
+        self, batch: dict[str, Tensor], noise: Tensor | None = None
+    ) -> Tensor:
+        batch = {k: torch.stack(list(self._queues[k]), dim=1) for k in batch if k in self._queues}
+        return self.diffusion.generate_actions(batch, noise=noise)
+
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
         """Predict a chunk of actions given environment observations."""
-        # stack n latest observations from the queue
-        batch = {k: torch.stack(list(self._queues[k]), dim=1) for k in batch if k in self._queues}
-        actions = self.diffusion.generate_actions(batch, noise=noise)
-
-        return actions
+        batch = self._prepare_batch(batch)
+        self._queues = populate_queues(self._queues, batch)
+        return self._predict_action_chunk_from_queues(batch, noise=noise)
 
     @torch.no_grad()
     def select_action(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
@@ -121,18 +136,11 @@ class DiffusionPolicy(PreTrainedPolicy):
         "horizon" may not the best name to describe what the variable actually means, because this period is
         actually measured from the first observation which (if `n_obs_steps` > 1) happened in the past.
         """
-        # NOTE: for offline evaluation, we have action in the batch, so we need to pop it out
-        if ACTION in batch:
-            batch.pop(ACTION)
-
-        if self.config.image_features:
-            batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
-            batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
-        # NOTE: It's important that this happens after stacking the images into a single key.
+        batch = self._prepare_batch(batch)
         self._queues = populate_queues(self._queues, batch)
 
         if len(self._queues[ACTION]) == 0:
-            actions = self.predict_action_chunk(batch, noise=noise)
+            actions = self._predict_action_chunk_from_queues(batch, noise=noise)
             self._queues[ACTION].extend(actions.transpose(0, 1))
 
         action = self._queues[ACTION].popleft()

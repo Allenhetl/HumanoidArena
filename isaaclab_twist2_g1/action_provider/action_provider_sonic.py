@@ -37,6 +37,7 @@ Usage:
 import json
 import os
 import time
+from collections import deque
 from bisect import bisect_left, bisect_right
 from pathlib import Path
 from typing import Any, Optional
@@ -1547,6 +1548,7 @@ class SonicActionProvider(ActionProvider):
             max_root_delta_deg=self._vla_root_max_delta_deg,
         )
         self._lerobot_hand_binary_threshold = float(getattr(args_cli, "lerobot_gripper_threshold", 0.5))
+        self._lerobot_action_chunk_queue = deque()
         self._vla_root_debug = bool(
             getattr(
                 args_cli,
@@ -2102,45 +2104,77 @@ class SonicActionProvider(ActionProvider):
             return "inference_replay"
         raise ValueError(f"[SonicActionProvider] Unsupported replay_mode: {replay_mode}")
 
+    def _resolve_ort_device_id(self) -> int | None:
+        device_name = str(getattr(self, "device", "") or "").strip().lower()
+        if not device_name or device_name == "cpu":
+            return None
+        if device_name == "cuda":
+            return 0
+        if device_name.isdigit():
+            return int(device_name)
+        if device_name.startswith("cuda:"):
+            suffix = device_name.split(":", 1)[1]
+            if suffix.isdigit():
+                return int(suffix)
+        return None
+
     def _make_session(self, path: str):
-        """创建 ONNX InferenceSession，优先使用 CUDA。"""
+        """创建 ONNX InferenceSession，并显式绑定当前 worker GPU。"""
         if not path:
-            print(f"[SonicActionProvider] model path is empty, skipping load")
-            return None
+            raise ValueError("[SonicActionProvider] model path is empty")
         if not os.path.isfile(path):
-            print(f"[SonicActionProvider] model file not found: {path}")
-            return None
+            raise FileNotFoundError(f"[SonicActionProvider] model file not found: {path}")
         if not _HAS_ORT:
-            return None
-        # Provider 选择逻辑：
-        # - 如果当前 onnxruntime 没编译 CUDA，则 get_available_providers() 不会包含 CUDAExecutionProvider
-        # - 这里明确打印可用 provider，便于定位环境问题
+            raise RuntimeError("[SonicActionProvider] onnxruntime is not available")
+
         avail = ort.get_available_providers()
         if not hasattr(self, "_ort_avail_logged"):
             self._ort_avail_logged = True
             print(f"[SonicActionProvider] onnxruntime available_providers={avail}")
 
-        providers: list[str] = []
-        if "CUDAExecutionProvider" in avail:
-            providers.append("CUDAExecutionProvider")
+        device_id = self._resolve_ort_device_id()
+        requested_device = f"cuda:{device_id}" if device_id is not None else "cpu"
+        providers = []
+        expected_gpu_providers = []
+        if device_id is not None:
+            if "TensorrtExecutionProvider" in avail:
+                providers.append(("TensorrtExecutionProvider", {"device_id": device_id}))
+                expected_gpu_providers.append("TensorrtExecutionProvider")
+            if "CUDAExecutionProvider" in avail:
+                providers.append(("CUDAExecutionProvider", {"device_id": device_id}))
+                expected_gpu_providers.append("CUDAExecutionProvider")
+            if not expected_gpu_providers:
+                raise RuntimeError(
+                    f"[SonicActionProvider] requested GPU session on {requested_device}, "
+                    f"but onnxruntime available_providers={avail}"
+                )
         providers.append("CPUExecutionProvider")
+
         try:
             sess = ort.InferenceSession(path, providers=providers)
-            print(f"[SonicActionProvider] loaded {os.path.basename(path)} "
-                  f"providers={sess.get_providers()}")
-            return sess
-        except Exception as e:
-            print(f"[SonicActionProvider] failed to load {path}: {e}")
-            return None
+        except Exception as exc:
+            raise RuntimeError(
+                f"[SonicActionProvider] failed to load {path} on {requested_device}: {exc}"
+            ) from exc
+
+        loaded_providers = sess.get_providers()
+        if device_id is not None and not any(name in loaded_providers for name in expected_gpu_providers):
+            raise RuntimeError(
+                f"[SonicActionProvider] loaded {os.path.basename(path)} on CPU instead of {requested_device}; "
+                f"providers={loaded_providers}"
+            )
+
+        print(
+            f"[SonicActionProvider] loaded {os.path.basename(path)} "
+            f"requested_device={requested_device} providers={loaded_providers}"
+        )
+        return sess
 
     def _setup_policy(self):
         """加载 GEAR-SONIC encoder 和 decoder ONNX 模型。"""
         self._encoder = self._make_session(self.encoder_path)
         self._decoder = self._make_session(self.decoder_path)
         print('Successful load sonic model')
-        if self._encoder is None or self._decoder is None:
-            print("[SonicActionProvider] encoder/decoder not loaded, "
-                  "will hold default standing pose.")
 
     def _setup_lerobot_vla(self, args_cli) -> None:
         if self._lerobot_server_url:
@@ -2254,11 +2288,11 @@ class SonicActionProvider(ActionProvider):
             )
         return state
 
-    def _infer_lerobot_semantic_action(self) -> np.ndarray:
+    def _fetch_lerobot_action_chunk(self) -> np.ndarray:
         rgb = self._get_front_camera_rgb_for_vla()
         state = self._build_lerobot_vla_observation_state()
         if self._lerobot_http_client is not None:
-            action = self._lerobot_http_client.infer(
+            action_chunk = self._lerobot_http_client.infer_chunk(
                 front_rgb=rgb,
                 observation_state=state,
                 robot_type=self.enable_robot,
@@ -2280,15 +2314,36 @@ class SonicActionProvider(ActionProvider):
                 task=None,
                 robot_type=self.enable_robot,
             )
+            if isinstance(action, torch.Tensor):
+                action_chunk = action.detach().cpu().numpy().astype(np.float32)
+            else:
+                action_chunk = np.asarray(action, dtype=np.float32)
 
-        if isinstance(action, torch.Tensor):
-            action = action.detach().cpu().numpy()
-        action = np.asarray(action, dtype=np.float32).reshape(-1)
+        action_chunk = np.asarray(action_chunk, dtype=np.float32)
+        if action_chunk.ndim == 1:
+            action_chunk = action_chunk.reshape(1, -1)
+        if action_chunk.ndim != 2 or action_chunk.shape[1] != SONIC_VLA_ACTION_DIM:
+            raise ValueError(
+                f"[SonicActionProvider] Expected canonical VLA action chunk shape [N, {SONIC_VLA_ACTION_DIM}], got {action_chunk.shape}"
+            )
+        return action_chunk
+
+    def _pop_lerobot_semantic_action(self) -> np.ndarray:
+        if not self._lerobot_action_chunk_queue:
+            for action in self._fetch_lerobot_action_chunk():
+                self._lerobot_action_chunk_queue.append(np.asarray(action, dtype=np.float32).copy())
+        action = np.asarray(self._lerobot_action_chunk_queue.popleft(), dtype=np.float32).reshape(-1)
         if action.shape != (SONIC_VLA_ACTION_DIM,):
             raise ValueError(
                 f"[SonicActionProvider] Expected canonical VLA action dim {SONIC_VLA_ACTION_DIM}, got {action.shape}"
             )
         return action
+
+    def _should_refresh_lerobot_visuals_next_step(self) -> bool:
+        return (not self._use_lerobot_vla) or (len(self._lerobot_action_chunk_queue) == 0)
+
+    def _infer_lerobot_semantic_action(self) -> np.ndarray:
+        return self._pop_lerobot_semantic_action()
 
     def _apply_lerobot_semantic_action(self, action: np.ndarray) -> None:
         action = np.asarray(action, dtype=np.float32).reshape(-1)
@@ -2506,6 +2561,8 @@ class SonicActionProvider(ActionProvider):
             self._apply_hand_binary_targets(left_closed=False, right_closed=False)
 
     def _recording_enabled_for_current_mode(self) -> bool:
+        if getattr(self, "_disable_eval_recording", False):
+            return False
         return (not self._replay_enabled) or self._record_during_replay
 
     def _finalize_replay_if_needed(self) -> None:
@@ -2987,8 +3044,16 @@ class SonicActionProvider(ActionProvider):
 
         self._episode_init_env_state = self._collect_env_state()
         self._replay_completion_requested = False
-        self._replay_reward_max = None
-        self._replay_any_success = False
+        if getattr(self, "_disable_eval_recording", False):
+            try:
+                self.recording_manager.cancel_recording()
+            except Exception:
+                pass
+            self._recording_active = False
+            self._recording_command = "none"
+            self._recording_display_state = "idle"
+            self._save_in_progress = False
+            self._pending_save_jobs = 0
 
         self._frame_count = 0
         self._smpl_data_valid = False
@@ -3046,6 +3111,7 @@ class SonicActionProvider(ActionProvider):
         self._vla_prev_root_rot6d_action = None
         self._canonical_pose_recorder.reset()
         if self._use_lerobot_vla:
+            self._lerobot_action_chunk_queue.clear()
             self._lerobot_vla_runtime.reset()
             self._apply_hand_binary_targets(left_closed=False, right_closed=False)
             if self._lerobot_http_client is not None:
@@ -3117,6 +3183,8 @@ class SonicActionProvider(ActionProvider):
             self._replay_any_success = True
 
     def _begin_episode_recording(self) -> None:
+        if getattr(self, "_disable_eval_recording", False):
+            return
         if not self.recording_manager.is_recording:
             self.recording_manager.start_recording()
         self._recording_active = True
@@ -4685,8 +4753,10 @@ class SonicActionProvider(ActionProvider):
             print(f"[SONIC] _smpl_data_valid={self._smpl_data_valid}")
 
         if self._encoder is None or self._decoder is None:
-            print(f"[SONIC] Encoder/Decoder not loaded, returning default pose")
-            return self._sonic_default_np.copy()
+            raise RuntimeError(
+                "[SonicActionProvider] Encoder/Decoder missing during runtime; "
+                "refusing to fall back to default pose"
+            )
 
         reference_hist_sum = (
             np.abs(self._motion_joint_pos_hist).sum()
@@ -5299,11 +5369,16 @@ class SonicActionProvider(ActionProvider):
             self._advance_stream_playback_cursor()
 
             t_render0 = time.perf_counter()
-            t0 = time.perf_counter()
-            env.sim.render()
-            t1 = time.perf_counter()
-            env.observation_manager.compute()
-            t2 = time.perf_counter()
+            if self._should_refresh_lerobot_visuals_next_step():
+                t0 = time.perf_counter()
+                env.sim.render()
+                t1 = time.perf_counter()
+                env.observation_manager.compute()
+                t2 = time.perf_counter()
+            else:
+                t0 = time.perf_counter()
+                t1 = t0
+                t2 = t0
             if self._sonic_debug or self._frame_count % self._perf_report_interval == 0:
                 print(f"render: {(t1 - t0) * 1000:.3f} ms")
                 print(f"obs: {(t2 - t1) * 1000:.3f} ms")
@@ -5412,9 +5487,10 @@ class SonicActionProvider(ActionProvider):
             self.recording_manager.shutdown()
         except Exception:
             pass
-        if self._zmq_poller is not None:
+        zmq_poller = getattr(self, "_zmq_poller", None)
+        if zmq_poller is not None:
             try:
-                self._zmq_poller.close()
+                zmq_poller.close()
             except Exception:
                 pass
         if getattr(self, "_redis_client", None) is not None:

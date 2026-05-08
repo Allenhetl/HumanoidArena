@@ -7,6 +7,7 @@ Records and combines:
 - SMPL visualization
 """
 
+import os
 import numpy as np
 from pathlib import Path
 import cv2
@@ -216,43 +217,68 @@ class VideoRecorder:
 
 class SimpleVideoRecorder:
     """
-    Simple video recorder that saves only one stream.
-    Useful as a lightweight alternative.
+    Simple single-stream recorder that writes frames incrementally to disk.
+    This avoids holding an entire episode video in RAM during persistent eval.
     """
 
     def __init__(self, save_path: str, fps: int = 30):
         self.save_path = Path(save_path)
         self.save_path.parent.mkdir(parents=True, exist_ok=True)
         self.fps = fps
-        self.frames = []
+        self.frames = []  # compatibility sentinel for legacy callers
         self.writer = None
+        self.frame_count = 0
+        self._frame_size = None
+
+    def _ensure_writer(self, img: np.ndarray):
+        h, w = img.shape[:2]
+        size = (w, h)
+        if self.writer is None:
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            self.writer = cv2.VideoWriter(str(self.save_path), fourcc, self.fps, size)
+            self._frame_size = size
+        elif self._frame_size != size:
+            img = cv2.resize(img, self._frame_size)
+        return img
 
     def add_frame(self, img: np.ndarray):
-        """Add a frame to the recording."""
+        """Add a frame to the recording and write it immediately."""
         if img.dtype != np.uint8:
             img = (img * 255).astype(np.uint8) if img.max() <= 1.0 else img.astype(np.uint8)
-        self.frames.append(img.copy())
+        img = self._ensure_writer(img)
+        self.writer.write(cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+        if self.frame_count == 0:
+            self.frames = [True]
+        self.frame_count += 1
 
-    def save(self):
-        """Save video."""
-        if len(self.frames) == 0:
+    def save(self, output_path: Optional[str] = None):
+        """Finalize the writer and optionally move the temp video to a final path."""
+        if self.frame_count == 0:
             print("No frames to save!")
             return
+        self.close()
+        if output_path is not None:
+            output_path = Path(output_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            if output_path != self.save_path:
+                if output_path.exists():
+                    output_path.unlink()
+                os.replace(self.save_path, output_path)
+                self.save_path = output_path
+        print(f"Video saved: {self.save_path} (frames={self.frame_count})")
 
-        h, w = self.frames[0].shape[:2]
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        writer = cv2.VideoWriter(str(self.save_path), fourcc, self.fps, (w, h))
-
-        for frame in self.frames:
-            # Convert RGB to BGR for OpenCV
-            writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-
-        writer.release()
-        print(f"Video saved: {self.save_path}")
+    def clear(self):
+        self.frames = []
+        self.frame_count = 0
+        self._frame_size = None
+        if self.writer is not None:
+            self.writer.release()
+            self.writer = None
 
     def close(self):
         if self.writer is not None:
             self.writer.release()
+            self.writer = None
 
 
 if __name__ == "__main__":

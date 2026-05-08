@@ -1,0 +1,65 @@
+name: grap_cup_twist2_test
+description: Test-only TWIST2 eval config for Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody.
+task_name: Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody
+backend: twist2
+
+test_defaults:
+  seeds: [0, 1, 2]
+  repeats_per_seed: 20
+  persistent_sim: true
+  episode_seed_formula: sha256(task_name|group_seed|repeat_idx)_positive_int32
+
+overrides:
+  scene.room_walls.spawn.usd_path: "${PROJECT_ROOT}/assets/objects/small_warehouse/small_warehouse_grapcup/small_warehouse_digital_twin_grapcup_semantic.usd"
+  wait_for_textures: false
+  sim:
+    dt: 0.001
+  decimation: 20
+  object_reset_seed_source: env_seed
+  deterministic_object_resets:
+    - record_name: drink016
+      scene_keys: [object, Object]
+      pose_range:
+        x: [-0.18, -0.18]
+        y: [0.5, 0.5]
+        z: [0.865, 0.865]
+      zero_velocity_on_reset: true
+    - record_name: obstacle_01
+      scene_keys: [obstacle_01, Obstacle01]
+      pose_range:
+        x: [-2.7, -2.2]
+        y: [-1.8, -1.2]
+        z: [0.0, 0.1]
+        yaw: [-0.35, 0.35]
+      zero_velocity_on_reset: true
+    - record_name: obstacle_02
+      scene_keys: [obstacle_02, Obstacle02]
+      pose_range:
+        x: [-1.75, -1.55]
+        y: [-1.7, -1.1]
+        z: [0.0, 0.1]
+        yaw: [-0.20, 0.20]
+      zero_velocity_on_reset: true
+    - record_name: obstacle_03
+      scene_keys: [obstacle_03, Obstacle03]
+      pose_range:
+        x: [-3.55, -3.10]
+        y: [-1.0, -0.5]
+        z: [0.0, 0.0]
+      zero_velocity_on_reset: true
+    - record_name: obstacle_04
+      scene_keys: [obstacle_04, Obstacle04]
+      pose_range:
+        x: [-3.30, -2.85]
+        y: [-1.5, -1.14]
+        z: [0.0, 0.1]
+        yaw: [-0.25, 0.25]
+      zero_velocity_on_reset: true
+    - record_name: obstacle_05
+      scene_keys: [obstacle_05, Obstacle05]
+      pose_range:
+        x: [-1.8, -1.2]
+        y: [-1.14, -0.6]
+        z: [0.0, 0.1]
+        yaw: [-0.25, 0.25]
+      zero_velocity_on_reset: true

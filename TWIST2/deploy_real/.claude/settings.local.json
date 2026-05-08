@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /home/dreams/Users/taowen/HumanoidArena/TWIST2 -type f -name \"*.py\" -exec grep -l \"XRobotStreamer\" {})",
+      "Bash(find /home/dreams/Users/taowen/HumanoidArena/TWIST2 -type f -name \"*.py\" -exec grep -l \"get_body_joints_pose\" {})"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

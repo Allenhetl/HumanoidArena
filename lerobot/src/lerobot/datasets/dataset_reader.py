@@ -276,8 +276,12 @@ class DatasetReader:
             for cam in image_keys:
                 item[cam] = self._image_transforms(item[cam])
 
-        # Add task as a string
+        # Add task as a string. Some merged local datasets may contain multiple
+        # task_index values while sharing a single task prompt row. In that narrow
+        # case, fall back to the sole prompt instead of failing the DataLoader.
         task_idx = item["task_index"].item()
+        if task_idx >= len(self._meta.tasks) and len(self._meta.tasks) == 1:
+            task_idx = 0
         item["task"] = self._meta.tasks.iloc[task_idx].name
 
         # add subtask information if available

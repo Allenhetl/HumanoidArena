@@ -366,6 +366,7 @@ def _initialize_task_scene(env, env_cfg, args_cli):
         print(f"[vision_randomization] init setup failed: {exc}")
 
 
+
 def _resolve_wrist_camera_pair(args_cli, env_cfg):
     from tasks.common_config import CameraPresets
 
@@ -1403,14 +1404,6 @@ def main():
                         controller.stop()
                         break
 
-                    if first_control_step_debug_pending:
-                        debug_after_first_control_step = getattr(env_cfg, "debug_after_first_control_step", None)
-                        if callable(debug_after_first_control_step):
-                            try:
-                                debug_after_first_control_step(env, args_cli)
-                            except Exception as exc:
-                                print(f"[env_runtime] debug_after_first_control_step failed: {exc}")
-                        first_control_step_debug_pending = False
 
                     if _should_exit_after_replay_complete(action_provider, args_cli):
                         print("[sim_main] Replay reached EOF and requested exit; stopping controller")

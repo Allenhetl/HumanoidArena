@@ -18,29 +18,46 @@ from typing import Optional, Dict
 
 # shared memory configuration
 DEFAULT_SHM_NAME = "isaac_multi_image_shm"
-SHM_NAME_ENV_VAR = "ISAAC_IMAGE_SHM_NAME"
-SHM_NAME = DEFAULT_SHM_NAME
-MAX_CAMERA_WIDTH = 1280
-MAX_CAMERA_HEIGHT = 720
-MAX_CAMERA_SLOTS = 4
-SHM_HEADER_BYTES = 2048
+
+# SHM_NAME_ENV_VAR = "ISAAC_IMAGE_SHM_NAME"
+# SHM_NAME = DEFAULT_SHM_NAME
+# MAX_CAMERA_WIDTH = 1280
+# MAX_CAMERA_HEIGHT = 720
+# MAX_CAMERA_SLOTS = 4
+# SHM_HEADER_BYTES = 2048
 
 
-def compute_shm_size(
-    width: int = MAX_CAMERA_WIDTH,
-    height: int = MAX_CAMERA_HEIGHT,
-    camera_slots: int = MAX_CAMERA_SLOTS,
-) -> int:
-    """Compute the required shared-memory size for RGB + float32 depth slots."""
-    rgb_bytes = int(width) * int(height) * 3 * int(camera_slots)
-    depth_bytes = int(width) * int(height) * 4 * int(camera_slots)
-    return rgb_bytes + depth_bytes + SHM_HEADER_BYTES
+# def compute_shm_size(
+#     width: int = MAX_CAMERA_WIDTH,
+#     height: int = MAX_CAMERA_HEIGHT,
+#     camera_slots: int = MAX_CAMERA_SLOTS,
+# ) -> int:
+#     """Compute the required shared-memory size for RGB + float32 depth slots."""
+#     rgb_bytes = int(width) * int(height) * 3 * int(camera_slots)
+#     depth_bytes = int(width) * int(height) * 4 * int(camera_slots)
+#     return rgb_bytes + depth_bytes + SHM_HEADER_BYTES
 
 
-# RGB: 1280 * 720 * 3 * 4 cameras = 11,059,200 bytes
-# Depth: 1280 * 720 * 4 (float32) * 4 cameras = 14,745,600 bytes
-# Total: ~24.6MB + 2KB header
-SHM_SIZE = compute_shm_size()
+# # RGB: 1280 * 720 * 3 * 4 cameras = 11,059,200 bytes
+# # Depth: 1280 * 720 * 4 (float32) * 4 cameras = 14,745,600 bytes
+# # Total: ~24.6MB + 2KB header
+# SHM_SIZE = compute_shm_size()
+
+
+
+def resolve_shm_name(default_name: str = DEFAULT_SHM_NAME) -> str:
+    override = os.environ.get("ISAAC_MULTI_IMAGE_SHM_NAME", "").strip()
+    if override:
+        return override.lstrip("/")
+    return default_name
+
+
+SHM_NAME = resolve_shm_name()
+# RGB: 640 * 480 * 3 * 4 cameras = 3,686,400 bytes
+# Depth: 640 * 480 * 4 (float32) * 4 cameras = 4,915,200 bytes
+# Total: ~8.6MB + 2KB header
+SHM_SIZE = 640 * 480 * 3 * 4 + 640 * 480 * 4 * 4 + 2048
+
 
 
 # define the enhanced header structure with depth support

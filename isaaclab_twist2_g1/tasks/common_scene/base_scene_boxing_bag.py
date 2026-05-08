@@ -5,7 +5,6 @@ from isaaclab.assets import AssetBaseCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 from isaaclab.utils import configclass
-from tasks.common_config import CameraBaseCfg
 
 
 project_root = os.environ.get("PROJECT_ROOT")

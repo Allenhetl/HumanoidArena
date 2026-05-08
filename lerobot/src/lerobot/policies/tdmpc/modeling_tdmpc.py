@@ -103,9 +103,18 @@ class TDMPCPolicy(PreTrainedPolicy):
         # CEM for the next step.
         self._prev_mean: torch.Tensor | None = None
 
-    @torch.no_grad()
-    def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
-        """Predict a chunk of actions given environment observations."""
+    def _prepare_batch(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
+        if ACTION in batch:
+            batch = dict(batch)
+            batch.pop(ACTION)
+
+        if self.config.image_features:
+            batch = dict(batch)
+            batch[OBS_IMAGE] = batch[next(iter(self.config.image_features))]
+
+        return batch
+
+    def _predict_action_chunk_from_queues(self, batch: dict[str, Tensor]) -> Tensor:
         batch = {key: torch.stack(list(self._queues[key]), dim=1) for key in batch if key in self._queues}
 
         # Remove the time dimensions as it is not handled yet.
@@ -133,24 +142,21 @@ class TDMPCPolicy(PreTrainedPolicy):
         return actions
 
     @torch.no_grad()
+    def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
+        """Predict a chunk of actions given environment observations."""
+        batch = self._prepare_batch(batch)
+        self._queues = populate_queues(self._queues, batch)
+        return self._predict_action_chunk_from_queues(batch)
+
+    @torch.no_grad()
     def select_action(self, batch: dict[str, Tensor]) -> Tensor:
         """Select a single action given environment observations."""
-        # NOTE: for offline evaluation, we have action in the batch, so we need to pop it out
-        if ACTION in batch:
-            batch.pop(ACTION)
-
-        if self.config.image_features:
-            batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
-            batch[OBS_IMAGE] = batch[next(iter(self.config.image_features))]
-        # NOTE: for offline evaluation, we have action in the batch, so we need to pop it out
-        if ACTION in batch:
-            batch.pop(ACTION)
-
+        batch = self._prepare_batch(batch)
         self._queues = populate_queues(self._queues, batch)
 
         # When the action queue is depleted, populate it again by querying the policy.
         if len(self._queues[ACTION]) == 0:
-            actions = self.predict_action_chunk(batch)
+            actions = self._predict_action_chunk_from_queues(batch)
 
             if self.config.n_action_repeats > 1:
                 for _ in range(self.config.n_action_repeats):

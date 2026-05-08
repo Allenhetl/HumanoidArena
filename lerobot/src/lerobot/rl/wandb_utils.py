@@ -49,6 +49,13 @@ def cfg_to_group(
         lst.append(f"dataset:{cfg.dataset.repo_id}")
     if cfg.env is not None:
         lst.append(f"env:{cfg.env.type}")
+    job_name = getattr(cfg, "job_name", None)
+    if isinstance(job_name, str):
+        parts = job_name.split("_")
+        if len(parts) >= 3:
+            lst.append(f"model:{parts[0]}")
+            lst.append("task:" + "_".join(parts[1:-1]))
+            lst.append(f"dataset_kind:{parts[-1]}")
     if truncate_tags:
         lst = [_maybe_truncate(tag) for tag in lst]
     return lst if return_list else "-".join(lst)

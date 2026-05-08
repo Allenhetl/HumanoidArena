@@ -8,9 +8,15 @@
 /lerobot/outputs
 /isaaclab_twist2_g1/script/eval_scripts/twist2/eval_results
 /isaaclab_twist2_g1/script/eval_scripts/sonic/eval_results
+/isaaclab_twist2_g1/script/eval_scripts/sonic_pi05/eval_results
+/isaaclab_twist2_g1/script/eval_scripts/twist2_pi05/eval_results
 /isaaclab_twist2_g1/outputs
 /isaaclab_twist2_g1/smpl
 /isaaclab_twist2_g1/smpl/SMPL_NEUTRAL.pkl
 /isaaclab_twist2_g1/recording4pic
+/lerobot/results
+/isaaclab_twist2_g1/script/eval_scripts/sonic/eval_results
+/isaaclab_twist2_g1/script/eval_scripts/twist2/eval_results
+
 GMR
 .omx/
