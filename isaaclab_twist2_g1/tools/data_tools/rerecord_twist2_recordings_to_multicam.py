@@ -4,13 +4,55 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import os
+import pickle
 import signal
 import subprocess
+import threading
 import time
 from pathlib import Path
+from typing import Any
+import zipfile
 
 import numpy as np
+
+try:
+    from tools.data_tools.rerecord_parallel_utils import (
+        DEFAULT_RERECORD_SUMMARY_FILENAME,
+        DEFAULT_IMAGE_DDS_TOPIC,
+        DEFAULT_IMAGE_REDIS_KEY_PREFIX,
+        DEFAULT_IMAGE_XROBOT_PORT_BASE,
+        DEFAULT_SHM_PREFIX,
+        allocate_job_output_dir,
+        append_text_log,
+        append_image_runtime_args,
+        build_worker_env,
+        build_worker_runtime_config,
+        chunk_round_robin,
+        format_rerecord_summary_entry,
+        move_tree_contents,
+        remove_dir_if_empty,
+        reset_text_log,
+    )
+except ModuleNotFoundError:
+    from rerecord_parallel_utils import (
+        DEFAULT_RERECORD_SUMMARY_FILENAME,
+        DEFAULT_IMAGE_DDS_TOPIC,
+        DEFAULT_IMAGE_REDIS_KEY_PREFIX,
+        DEFAULT_IMAGE_XROBOT_PORT_BASE,
+        DEFAULT_SHM_PREFIX,
+        allocate_job_output_dir,
+        append_text_log,
+        append_image_runtime_args,
+        build_worker_env,
+        build_worker_runtime_config,
+        chunk_round_robin,
+        format_rerecord_summary_entry,
+        move_tree_contents,
+        remove_dir_if_empty,
+        reset_text_log,
+    )
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -27,9 +69,9 @@ DEFAULT_FOURPOINTS_ROBOT_USD = (
     ISAACLAB_ROOT
     / "assets/robots/g1-29dof_wholebody_dex3/temp/g1_29dof_with_dex3_rev_1_0_fourpoints.usd"
 ).resolve()
-DEFAULT_INPUT_ROOT = ISAACLAB_ROOT / "recording_data/HOI_double_desk/twist2"
+DEFAULT_INPUT_ROOT = ISAACLAB_ROOT / "recording_data/HSI_boxing/twist2"
 DEFAULT_ENV_CONFIG_YAML = (
-    ISAACLAB_ROOT / "tasks/common_env_config/doubledesk_twist2.yaml"
+    ISAACLAB_ROOT / "tasks/common_env_config/boxing_bag_twist2.yaml"
 ).resolve()
 
 
@@ -82,6 +124,60 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--recording-save-workers", type=int, default=1)
     parser.add_argument("--recording-save-queue-size", type=int, default=4)
     parser.add_argument("--headless", action="store_true", default=True)
+    parser.add_argument(
+        "--parallel-jobs",
+        type=int,
+        default=5,
+        help="Number of concurrent headless Isaac Lab rerecord jobs.",
+    )
+    parser.add_argument(
+        "--image-port-base",
+        type=int,
+        default=5555,
+        help="Base ZMQ image port for worker 0. Each worker gets its own port bundle.",
+    )
+    parser.add_argument(
+        "--image-port-stride",
+        type=int,
+        default=10,
+        help="Port stride reserved per worker for image/world/wrist streams.",
+    )
+    parser.add_argument(
+        "--image-xrobot-port-base",
+        type=int,
+        default=DEFAULT_IMAGE_XROBOT_PORT_BASE,
+        help="Base XRobot image port for worker 0.",
+    )
+    parser.add_argument(
+        "--image-xrobot-port-stride",
+        type=int,
+        default=10,
+        help="XRobot port stride reserved per worker.",
+    )
+    parser.add_argument(
+        "--image-redis-key-prefix",
+        type=str,
+        default=DEFAULT_IMAGE_REDIS_KEY_PREFIX,
+        help="Base Redis key prefix for image transport; worker runtime suffix is appended automatically.",
+    )
+    parser.add_argument(
+        "--image-dds-topic",
+        type=str,
+        default=DEFAULT_IMAGE_DDS_TOPIC,
+        help="Base DDS topic for image transport; worker runtime suffix is appended automatically.",
+    )
+    parser.add_argument(
+        "--shm-prefix",
+        type=str,
+        default=DEFAULT_SHM_PREFIX,
+        help="Shared-memory name prefix; worker runtime suffix is appended automatically.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Print planned commands without launching Isaac Lab.",
+    )
     return parser.parse_args()
 
 
@@ -113,7 +209,11 @@ def build_env(robot_usd_override: str | None) -> dict[str, str]:
 
 
 def find_npz_files(input_root: Path) -> list[Path]:
-    return sorted(path.resolve() for path in input_root.rglob("*.npz"))
+    return sorted(
+        path.resolve()
+        for path in input_root.rglob("*.npz")
+        if not path.name.endswith("_temp.npz")
+    )
 
 
 def read_task_name(npz_path: Path) -> str:
@@ -126,14 +226,32 @@ def read_task_name(npz_path: Path) -> str:
         return str(task)
 
 
-def read_rerecord_final_reward(npz_path: Path) -> float | None:
+def read_rerecord_metrics(npz_path: Path) -> tuple[float | None, float | None, bool | None]:
     with np.load(npz_path, allow_pickle=True) as data:
-        if "rerecord_final_reward" not in data:
-            return None
-        value = np.asarray(data["rerecord_final_reward"], dtype=np.float32).reshape(-1)
-        if value.size == 0:
-            return None
-        return float(value[0])
+        def _read_float(key: str) -> float | None:
+            if key not in data:
+                return None
+            value = np.asarray(data[key], dtype=np.float32).reshape(-1)
+            if value.size == 0:
+                return None
+            return float(value[0])
+
+        def _read_bool(key: str) -> bool | None:
+            if key not in data:
+                return None
+            value = np.asarray(data[key]).reshape(-1)
+            if value.size == 0:
+                return None
+            return bool(value[0])
+
+        final_reward = _read_float("rerecord_final_reward")
+        max_reward = _read_float("rerecord_max_reward")
+        if max_reward is None:
+            max_reward = final_reward
+        any_success = _read_bool("rerecord_any_success")
+        if any_success is None and max_reward is not None:
+            any_success = bool(max_reward > 1e-6)
+        return final_reward, max_reward, any_success
 
 
 def find_new_npz_files(output_dir: Path, before_files: set[Path]) -> list[Path]:
@@ -148,6 +266,7 @@ def build_command(
     replay_file: Path,
     output_dir: Path,
     task_name: str,
+    runtime_config,
 ) -> list[str]:
     command = [
         python_bin,
@@ -183,6 +302,7 @@ def build_command(
         "--enable_wrist_cameras",
         "--enable_dex3_dds",
     ]
+    append_image_runtime_args(command, runtime_config)
     if args.headless:
         command.append("--headless")
     return command
@@ -269,8 +389,234 @@ def wait_for_rerecord_completion(
     return process.returncode, bool(new_npz_files), timed_out
 
 
+def build_jobs(input_root: Path, output_root: Path, npz_paths: list[Path]) -> list[dict[str, Any]]:
+    jobs: list[dict[str, Any]] = []
+    for index, npz_path in enumerate(npz_paths, start=1):
+        try:
+            task_name = read_task_name(npz_path)
+        except (zipfile.BadZipFile, pickle.UnpicklingError, OSError, EOFError, ValueError, KeyError) as exc:
+            print(f"[skip] unreadable source npz: {npz_path} ({exc})")
+            continue
+        rel_parent = npz_path.relative_to(input_root).parent
+        output_dir = (output_root / rel_parent).resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        jobs.append(
+            {
+                "index": index,
+                "source_file": npz_path,
+                "output_dir": output_dir,
+                "task_name": task_name,
+            }
+        )
+    return jobs
+
+
+def log_runtime_details(log_handle, runtime_config) -> None:
+    log_handle.write(f"RUNTIME_TAG: {runtime_config.runtime_tag}\n")
+    log_handle.write(f"SHM_NAME: {runtime_config.shm_name}\n")
+    log_handle.write(
+        "IMAGE_PORTS: "
+        f"front={runtime_config.image_zmq_port} "
+        f"world={runtime_config.world_camera_port} "
+        f"left={runtime_config.left_wrist_camera_port} "
+        f"right={runtime_config.right_wrist_camera_port} "
+        f"xrobot={runtime_config.image_xrobot_port}\n"
+    )
+    log_handle.write(f"IMAGE_REDIS_KEY_PREFIX: {runtime_config.image_redis_key_prefix}\n")
+    log_handle.write(f"IMAGE_DDS_TOPIC: {runtime_config.image_dds_topic}\n")
+
+
+def print_job_header(
+    *,
+    print_lock: threading.Lock,
+    total_jobs: int,
+    job: dict[str, Any],
+    log_path: Path,
+    temp_output_dir: Path,
+    runtime_config,
+) -> None:
+    with print_lock:
+        print(f"[{job['index']}/{total_jobs}] rerecording {job['source_file']}")
+        print(f"  output_dir={job['output_dir']}")
+        print(f"  temp_output_dir={temp_output_dir}")
+        print(f"  log={log_path}")
+        print(
+            "  runtime="
+            f"{runtime_config.runtime_tag} "
+            f"ports={runtime_config.image_zmq_port}/{runtime_config.world_camera_port}/"
+            f"{runtime_config.left_wrist_camera_port}/{runtime_config.right_wrist_camera_port}"
+        )
+        print(f"  shm={runtime_config.shm_name}")
+
+
+def execute_job(
+    *,
+    args: argparse.Namespace,
+    total_jobs: int,
+    job: dict[str, Any],
+    python_bin: str,
+    base_env: dict[str, str],
+    output_root: Path,
+    runtime_config,
+    print_lock: threading.Lock,
+    summary_lock: threading.Lock,
+    summary_path: Path,
+) -> dict[str, Any]:
+    source_file = Path(job["source_file"]).resolve()
+    output_dir = Path(job["output_dir"]).resolve()
+    temp_output_dir = allocate_job_output_dir(output_root, source_file.stem, runtime_config.runtime_tag)
+    temp_output_dir.mkdir(parents=True, exist_ok=True)
+    command = build_command(
+        args,
+        python_bin=python_bin,
+        replay_file=source_file,
+        output_dir=temp_output_dir,
+        task_name=str(job["task_name"]),
+        runtime_config=runtime_config,
+    )
+    log_dir = output_root / "rerecord_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{source_file.stem}.log"
+    print_job_header(
+        print_lock=print_lock,
+        total_jobs=total_jobs,
+        job=job,
+        log_path=log_path,
+        temp_output_dir=temp_output_dir,
+        runtime_config=runtime_config,
+    )
+    if args.dry_run:
+        with print_lock:
+            print("  command=" + " ".join(command))
+        return {"status": "dry_run", "source_file": source_file}
+
+    before_npz = {path.resolve() for path in temp_output_dir.glob("*.npz")}
+    started_at = time.time()
+    with log_path.open("w", encoding="utf-8") as log_handle:
+        log_handle.write("COMMAND: " + " ".join(command) + "\n")
+        log_runtime_details(log_handle, runtime_config)
+        log_handle.flush()
+        return_code, detected_output, timed_out = wait_for_rerecord_completion(
+            command=command,
+            cwd=REPO_ROOT,
+            env=build_worker_env(base_env, runtime_config),
+            log_handle=log_handle,
+            output_dir=temp_output_dir,
+            timeout_seconds=args.timeout_seconds,
+        )
+    elapsed = time.time() - started_at
+    new_npz_files = find_new_npz_files(temp_output_dir, before_npz)
+    rerecorded_tmp_npz = new_npz_files[-1] if new_npz_files else None
+
+    if timed_out:
+        status = "timeout"
+    elif return_code not in {0, 130, -2, 143, -15} and not detected_output:
+        status = "failed"
+    elif rerecorded_tmp_npz is None:
+        status = "missing_output"
+    else:
+        status = "success"
+
+    rerecorded_npz = None
+    final_reward = None
+    max_reward = None
+    any_success = None
+    if status == "success" and rerecorded_tmp_npz is not None:
+        move_tree_contents(temp_output_dir, output_dir)
+        remove_dir_if_empty(temp_output_dir, output_root / ".tmp_rerecord")
+        rerecorded_npz = (output_dir / rerecorded_tmp_npz.name).resolve()
+        final_reward, max_reward, any_success = read_rerecord_metrics(rerecorded_npz)
+
+    with print_lock:
+        if status == "success":
+            if final_reward is None and max_reward is None:
+                print(f"  ok elapsed={elapsed:.1f}s -> {rerecorded_npz}")
+            else:
+                final_text = "<missing>" if final_reward is None else f"{final_reward:.4f}"
+                max_text = "<missing>" if max_reward is None else f"{max_reward:.4f}"
+                any_success_text = "<missing>" if any_success is None else str(bool(any_success)).lower()
+                print(
+                    f"  ok elapsed={elapsed:.1f}s -> {rerecorded_npz}"
+                    f" final_reward={final_text}"
+                    f" max_reward={max_text}"
+                    f" any_success={any_success_text}"
+                )
+        elif status == "dry_run":
+            pass
+        elif status == "timeout":
+            print(f"  FAILED timeout elapsed={elapsed:.1f}s")
+        elif status == "missing_output":
+            print(f"  FAILED missing_output elapsed={elapsed:.1f}s temp_output_dir={temp_output_dir}")
+        else:
+            print(f"  FAILED return_code={return_code} elapsed={elapsed:.1f}s temp_output_dir={temp_output_dir}")
+
+    with summary_lock:
+        append_text_log(
+            summary_path,
+            format_rerecord_summary_entry(
+                index=int(job["index"]),
+                total_jobs=total_jobs,
+                source_file=source_file,
+                output_dir=output_dir,
+                log_path=log_path,
+                status=status,
+                rerecorded_npz=rerecorded_npz,
+                final_reward=final_reward,
+                max_reward=max_reward,
+                any_success=any_success,
+                return_code=return_code,
+            ),
+        )
+
+    return {
+        "status": status,
+        "source_file": source_file,
+        "return_code": return_code,
+        "elapsed": elapsed,
+    }
+
+
+def worker_loop(
+    *,
+    args: argparse.Namespace,
+    jobs: list[dict[str, Any]],
+    total_jobs: int,
+    python_bin: str,
+    base_env: dict[str, str],
+    output_root: Path,
+    runtime_config,
+    print_lock: threading.Lock,
+    stop_event: threading.Event,
+    summary_lock: threading.Lock,
+    summary_path: Path,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for job in jobs:
+        if stop_event.is_set():
+            break
+        result = execute_job(
+            args=args,
+            total_jobs=total_jobs,
+            job=job,
+            python_bin=python_bin,
+            base_env=base_env,
+            output_root=output_root,
+            runtime_config=runtime_config,
+            print_lock=print_lock,
+            summary_lock=summary_lock,
+            summary_path=summary_path,
+        )
+        results.append(result)
+        if result["status"] not in {"success", "dry_run"}:
+            stop_event.set()
+            break
+    return results
+
+
 def main() -> int:
     args = parse_args()
+    if args.parallel_jobs <= 0:
+        raise SystemExit("--parallel-jobs must be >= 1")
     input_root = Path(args.input_root).expanduser().resolve()
     if not input_root.exists():
         raise FileNotFoundError(f"Input root not found: {input_root}")
@@ -301,58 +647,67 @@ def main() -> int:
     if not npz_paths:
         print("No TWIST2 recordings found.")
         return 0
+    jobs = build_jobs(input_root, output_root, npz_paths)
+    worker_count = min(args.parallel_jobs, len(jobs))
+    summary_path = output_root / DEFAULT_RERECORD_SUMMARY_FILENAME
+    if not args.dry_run:
+        reset_text_log(summary_path)
+    worker_configs = [
+        build_worker_runtime_config(
+            worker_index=worker_index,
+            image_port_base=args.image_port_base,
+            image_port_stride=args.image_port_stride,
+            image_xrobot_port_base=args.image_xrobot_port_base,
+            image_xrobot_port_stride=args.image_xrobot_port_stride,
+            shm_prefix=args.shm_prefix,
+            image_redis_key_prefix=args.image_redis_key_prefix,
+            image_dds_topic=args.image_dds_topic,
+        )
+        for worker_index in range(worker_count)
+    ]
+    job_chunks = chunk_round_robin(jobs, worker_count)
 
     print(f"python_bin={python_bin}")
     print(f"input_root={input_root}")
     print(f"output_root={output_root}")
-    print(f"jobs={len(npz_paths)}")
+    print(f"jobs={len(jobs)}")
+    print(f"parallel_jobs={worker_count}")
+    if not args.dry_run:
+        print(f"summary_log={summary_path}")
 
-    for index, npz_path in enumerate(npz_paths, start=1):
-        rel_parent = npz_path.relative_to(input_root).parent
-        output_dir = (output_root / rel_parent).resolve()
-        output_dir.mkdir(parents=True, exist_ok=True)
-        task_name = read_task_name(npz_path)
-        command = build_command(
-            args,
-            python_bin=python_bin,
-            replay_file=npz_path,
-            output_dir=output_dir,
-            task_name=task_name,
-        )
-        log_dir = output_root / "rerecord_logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_path = log_dir / f"{npz_path.stem}.log"
-
-        print(f"[{index}/{len(npz_paths)}] rerecording {npz_path}")
-        print(f"  output_dir={output_dir}")
-        print(f"  log={log_path}")
-
-        with log_path.open("w", encoding="utf-8") as log_handle:
-            log_handle.write("COMMAND: " + " ".join(command) + "\n")
-            log_handle.flush()
-            started_at = time.time()
-            return_code, detected_output, timed_out = wait_for_rerecord_completion(
-                command=command,
-                cwd=REPO_ROOT,
-                env=subprocess_env,
-                log_handle=log_handle,
-                output_dir=output_dir,
-                timeout_seconds=args.timeout_seconds,
+    print_lock = threading.Lock()
+    summary_lock = threading.Lock()
+    stop_event = threading.Event()
+    results: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [
+            executor.submit(
+                worker_loop,
+                args=args,
+                jobs=chunk,
+                total_jobs=len(jobs),
+                python_bin=python_bin,
+                base_env=subprocess_env,
+                output_root=output_root,
+                runtime_config=runtime_config,
+                print_lock=print_lock,
+                stop_event=stop_event,
+                summary_lock=summary_lock,
+                summary_path=summary_path,
             )
-            elapsed = time.time() - started_at
-        if timed_out:
-            print(f"  FAILED timeout elapsed={elapsed:.1f}s")
-            return 1
-        if return_code not in {0, 130, -2, 143, -15} and not detected_output:
-            print(f"  FAILED return_code={return_code} elapsed={elapsed:.1f}s")
-            return int(return_code or 1)
-        rerecorded_npz = sorted(output_dir.glob("*.npz"), key=lambda path: path.stat().st_mtime)[-1]
-        final_reward = read_rerecord_final_reward(rerecorded_npz)
-        if final_reward is None:
-            print(f"  ok elapsed={elapsed:.1f}s")
-        else:
-            print(f"  ok elapsed={elapsed:.1f}s final_reward={final_reward:.4f}")
+            for chunk, runtime_config in zip(job_chunks, worker_configs)
+            if chunk
+        ]
+        for future in futures:
+            results.extend(future.result())
 
+    failure_result = next((result for result in results if result["status"] not in {"success", "dry_run"}), None)
+    success_count = sum(1 for result in results if result["status"] == "success")
+    failed_count = sum(1 for result in results if result["status"] not in {"success", "dry_run"})
+    skipped_count = max(0, len(jobs) - len(results))
+    print(f"done: success={success_count} failed={failed_count} skipped={skipped_count}")
+    if failure_result is not None:
+        return int(failure_result.get("return_code") or 1)
     return 0
 
 

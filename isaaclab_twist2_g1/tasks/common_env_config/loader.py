@@ -11,14 +11,16 @@ import yaml
 
 COMMON_ENV_CONFIG_DIR = Path(__file__).resolve().parent
 ISAACLAB_ROOT = COMMON_ENV_CONFIG_DIR.parents[1]
+COMMON_TEST_CONFIG_DIR = ISAACLAB_ROOT / "tasks" / "common_test_config"
+_DYNAMIC_OVERRIDE_ROOTS = {"vision_randomization"}
 
 
 def resolve_env_config_yaml_path(config_path: str | None) -> Path | None:
     """Resolve a YAML path from CLI input.
 
     If ``config_path`` is relative, this first checks it relative to the current
-    working directory, then relative to the IsaacLab package root, and finally
-    relative to ``tasks/common_env_config``.
+    working directory, then relative to the IsaacLab package root, then relative
+    to ``tasks/common_env_config`` and ``tasks/common_test_config``.
     """
 
     if not config_path:
@@ -44,6 +46,15 @@ def resolve_env_config_yaml_path(config_path: str | None) -> Path | None:
         tried_paths.append(common_candidate)
         if common_candidate.is_file():
             return common_candidate.resolve()
+
+        test_rel_parts = candidate.parts
+        test_prefix = COMMON_TEST_CONFIG_DIR.parts[-2:]
+        if test_rel_parts[: len(test_prefix)] == test_prefix:
+            test_rel_parts = test_rel_parts[len(test_prefix) :]
+        test_candidate = COMMON_TEST_CONFIG_DIR.joinpath(*test_rel_parts)
+        tried_paths.append(test_candidate)
+        if test_candidate.is_file():
+            return test_candidate.resolve()
 
     raise FileNotFoundError(
         f"Environment config YAML not found: {config_path}. "
@@ -196,7 +207,25 @@ def _collect_yaml_overrides(
                 )
             merged = _deep_merge_dict(merged, task_data)
 
+    test_defaults = raw_cfg.get("test_defaults", {})
+    if isinstance(test_defaults, dict):
+        vision_randomization = test_defaults.get("vision_randomization")
+        if isinstance(vision_randomization, dict) and "vision_randomization" not in merged:
+            merged["vision_randomization"] = deepcopy(vision_randomization)
+
     return merged
+
+
+def _prepare_dynamic_override_roots(env_cfg: Any, merged_overrides: dict[str, Any]) -> None:
+    for root_name in _DYNAMIC_OVERRIDE_ROOTS:
+        root_value = merged_overrides.get(root_name)
+        if not isinstance(root_value, dict):
+            continue
+        current_value = getattr(env_cfg, root_name, None)
+        if isinstance(current_value, dict):
+            setattr(env_cfg, root_name, _deep_merge_dict(current_value, root_value))
+        else:
+            setattr(env_cfg, root_name, deepcopy(root_value))
 
 
 def apply_env_config_yaml(
@@ -228,6 +257,7 @@ def apply_env_config_yaml(
         task_name=task_name,
         route_name=route_name,
     )
+    _prepare_dynamic_override_roots(env_cfg, merged_overrides)
     flat_overrides = _flatten_overrides(merged_overrides)
     changed_paths: set[str] = set()
 

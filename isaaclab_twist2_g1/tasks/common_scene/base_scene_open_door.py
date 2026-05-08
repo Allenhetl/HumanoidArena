@@ -22,7 +22,7 @@ class OpenDoorSceneCfg(InteractiveSceneCfg):
             rot=[1.0, 0.0, 0.0, 0.0],
         ),
         spawn=UsdFileCfg(
-            usd_path=f"{project_root}/assets/objects/small_warehouse/small_warehouse_digital_twin_opendoor.usd",
+            usd_path=f"{project_root}/assets/objects/small_warehouse/small_warehouse_opendoor/small_warehouse_digital_twin_opendoor.usd",
         ),
     )
 
@@ -33,7 +33,7 @@ class OpenDoorSceneCfg(InteractiveSceneCfg):
             rot=DOOR_ROT,
         ),
         spawn=UsdFileCfg(
-            usd_path=f"{project_root}/assets/objects/door001/model_door001_vali.usd",
+            usd_path=f"{project_root}/assets/objects/small_warehouse/small_warehouse_opendoor/interaction_obj/door001/model_door001_vali.usd",
             activate_contact_sensors=True,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=True,
@@ -67,8 +67,11 @@ class OpenDoorSceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    world_camera = CameraBaseCfg.get_camera_config(
-        prim_path="/World/PerspectiveCamera",
-        pos_offset=(-1.9, -5.0, 1.8),
-        rot_offset=(-0.40614, 0.78544, 0.4277, -0.16986),
+    world_camera = CameraBaseCfg.get_world_camera_config(
+        pos_offset=(0.26556, 1.33827, 3.77471),
+        rot_offset=(0.6811, 0.21343, 0.20944, 0.66834),
+        focal_length=12,
+        horizontal_aperture=27,
+        convention="opengl"
     )
+

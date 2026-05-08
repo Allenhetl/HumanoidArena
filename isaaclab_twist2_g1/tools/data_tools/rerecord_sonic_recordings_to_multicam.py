@@ -4,15 +4,57 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
+import pickle
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
+from typing import Any
+import zipfile
 
 import numpy as np
+
+try:
+    from tools.data_tools.rerecord_parallel_utils import (
+        DEFAULT_RERECORD_SUMMARY_FILENAME,
+        DEFAULT_IMAGE_DDS_TOPIC,
+        DEFAULT_IMAGE_REDIS_KEY_PREFIX,
+        DEFAULT_IMAGE_XROBOT_PORT_BASE,
+        DEFAULT_SHM_PREFIX,
+        allocate_job_output_dir,
+        append_text_log,
+        append_image_runtime_args,
+        build_worker_env,
+        build_worker_runtime_config,
+        chunk_round_robin,
+        format_rerecord_summary_entry,
+        move_tree_contents,
+        remove_dir_if_empty,
+        reset_text_log,
+    )
+except ModuleNotFoundError:
+    from rerecord_parallel_utils import (
+        DEFAULT_RERECORD_SUMMARY_FILENAME,
+        DEFAULT_IMAGE_DDS_TOPIC,
+        DEFAULT_IMAGE_REDIS_KEY_PREFIX,
+        DEFAULT_IMAGE_XROBOT_PORT_BASE,
+        DEFAULT_SHM_PREFIX,
+        allocate_job_output_dir,
+        append_text_log,
+        append_image_runtime_args,
+        build_worker_env,
+        build_worker_runtime_config,
+        chunk_round_robin,
+        format_rerecord_summary_entry,
+        move_tree_contents,
+        remove_dir_if_empty,
+        reset_text_log,
+    )
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -31,21 +73,44 @@ DEFAULT_BOX_ROBOT_USD = (
     ISAACLAB_ROOT
     / "assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2.usd"
 ).resolve()
+# DEFAULT_BOX_ROBOT_USD = (
+#     ISAACLAB_ROOT
+#     / "assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2_thumd.usd"
+# ).resolve()
 DEFAULT_FOURPOINTS_ROBOT_USD = (
     ISAACLAB_ROOT
     / "assets/robots/g1-29dof_wholebody_dex3/temp/g1_29dof_with_dex3_rev_1_0_fourpoints.usd"
 ).resolve()
 DEFAULT_SOURCE_ROOTS = [
-    ISAACLAB_ROOT / "recording_data/HOI_football_v2/sonic",
-    ISAACLAB_ROOT / "recording_data/HOI_double_desk/sonic",
+    ISAACLAB_ROOT / "recording_data/HOI_grapcup/sonic_v2",
 ]
 TASK_TO_ENV_CONFIG = {
-    "Isaac-Move-Football-Single-G129-Dex3-Wholebody": (
-        ISAACLAB_ROOT / "tasks/common_env_config/football_single_sonic.yaml"
-    ).resolve(),
-    "Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody": (
-        ISAACLAB_ROOT / "tasks/common_env_config/doubledesk_sonic.yaml"
-    ).resolve(),
+      "Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody": (
+          ISAACLAB_ROOT / "tasks/common_env_config/small_warehouse_vision_navigation_sonic.yaml"
+      ).resolve(),
+      "Isaac-Move-Football-Single-G129-Dex3-Wholebody": (
+          ISAACLAB_ROOT / "tasks/common_env_config/football_single_sonic.yaml"
+      ).resolve(),
+      "Isaac-Move-PickPlace-Box-G129-Dex3-Wholedoby": (
+          ISAACLAB_ROOT / "tasks/common_env_config/pickplace_box_sonic.yaml"
+      ).resolve(),
+      "Isaac-Move-Open-Door-G129-Dex3-Wholebody": (
+          ISAACLAB_ROOT / "tasks/common_env_config/opendoor_sonic.yaml"
+      ).resolve(),
+      "Isaac-Move-Sit-Sofa-G129-Dex3-Wholebody": (
+          ISAACLAB_ROOT / "tasks/common_env_config/livingroom_sitsofa_sonic.yaml"
+      ).resolve(),
+      "Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody": (
+          ISAACLAB_ROOT / "tasks/common_env_config/livingroom_grapcup_sonic.yaml"
+      ).resolve(),""
+      "Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody": (
+          ISAACLAB_ROOT / "tasks/common_env_config/boxing_bag_sonic.yaml"
+      ).resolve(),
+      "Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody": (
+          ISAACLAB_ROOT / "tasks/common_env_config/doubledesk_sonic.yaml"
+      ).resolve(),
+      
+
 }
 
 
@@ -161,6 +226,27 @@ def parse_args() -> argparse.Namespace:
         help="Disable cameras during rerecord. By default cameras stay enabled so vision data is regenerated.",
     )
     parser.add_argument(
+        "--enable-perspective-camera",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable the third-person /World/PerspectiveCamera stream and save it "
+            "as vision_world_* data beside the enabled front and wrist cameras."
+        ),
+    )
+    parser.add_argument(
+        "--disable-front-camera",
+        action="store_true",
+        default=False,
+        help="Do not create or record the front camera during rerecord.",
+    )
+    parser.add_argument(
+        "--disable-wrist-cameras",
+        action="store_true",
+        default=False,
+        help="Do not create or record left/right wrist cameras during rerecord.",
+    )
+    parser.add_argument(
         "--disable-dex3",
         action="store_true",
         default=False,
@@ -177,6 +263,54 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         default=False,
         help="Print the planned commands without launching Isaac Lab.",
+    )
+    parser.add_argument(
+        "--parallel-jobs",
+        type=int,
+        default=5,
+        help="Number of concurrent headless Isaac Lab rerecord jobs.",
+    )
+    parser.add_argument(
+        "--image-port-base",
+        type=int,
+        default=5555,
+        help="Base ZMQ image port for worker 0. Each worker gets its own port bundle.",
+    )
+    parser.add_argument(
+        "--image-port-stride",
+        type=int,
+        default=10,
+        help="Port stride reserved per worker for image/world/wrist streams.",
+    )
+    parser.add_argument(
+        "--image-xrobot-port-base",
+        type=int,
+        default=DEFAULT_IMAGE_XROBOT_PORT_BASE,
+        help="Base XRobot image port for worker 0.",
+    )
+    parser.add_argument(
+        "--image-xrobot-port-stride",
+        type=int,
+        default=10,
+        help="XRobot port stride reserved per worker.",
+    )
+    parser.add_argument(
+        "--image-redis-key-prefix",
+        type=str,
+        default=DEFAULT_IMAGE_REDIS_KEY_PREFIX,
+        help="Base Redis key prefix for image transport; worker runtime suffix is appended automatically.",
+    )
+    parser.add_argument(
+        "--image-dds-topic",
+        type=str,
+        default=DEFAULT_IMAGE_DDS_TOPIC,
+        help="Base DDS topic for image transport; worker runtime suffix is appended automatically.",
+    )
+    parser.add_argument(
+        "--shm-prefix",
+        type=str,
+        default=DEFAULT_SHM_PREFIX,
+        help="Shared-memory name prefix; worker runtime suffix is appended automatically.",
     )
     return parser.parse_args()
 
@@ -207,14 +341,32 @@ def read_npz_meta(path: Path) -> tuple[str, str]:
     return schema, task
 
 
-def read_rerecord_final_reward(path: Path) -> float | None:
+def read_rerecord_metrics(path: Path) -> tuple[float | None, float | None, bool | None]:
     with np.load(path, allow_pickle=True) as data:
-        if "rerecord_final_reward" not in data:
-            return None
-        value = np.asarray(data["rerecord_final_reward"], dtype=np.float32).reshape(-1)
-        if value.size == 0:
-            return None
-        return float(value[0])
+        def _read_float(key: str) -> float | None:
+            if key not in data:
+                return None
+            value = np.asarray(data[key], dtype=np.float32).reshape(-1)
+            if value.size == 0:
+                return None
+            return float(value[0])
+
+        def _read_bool(key: str) -> bool | None:
+            if key not in data:
+                return None
+            value = np.asarray(data[key]).reshape(-1)
+            if value.size == 0:
+                return None
+            return bool(value[0])
+
+        final_reward = _read_float("rerecord_final_reward")
+        max_reward = _read_float("rerecord_max_reward")
+        if max_reward is None:
+            max_reward = final_reward
+        any_success = _read_bool("rerecord_any_success")
+        if any_success is None and max_reward is not None:
+            any_success = bool(max_reward > 1e-6)
+        return final_reward, max_reward, any_success
 
 
 def resolve_robot_usd_override(args: argparse.Namespace) -> str:
@@ -305,9 +457,16 @@ def build_jobs(args: argparse.Namespace) -> list[dict[str, object]]:
         completed_sources = set() if args.force else read_successful_sources(manifest_path)
         for source_file in sorted(source_root.rglob("*.npz")):
             source_file = source_file.resolve()
+            if source_file.name.endswith("_temp.npz"):
+                print(f"[skip] ignoring temporary source file: {source_file}")
+                continue
             if not args.force and str(source_file) in completed_sources:
                 continue
-            schema_version, task_name = read_npz_meta(source_file)
+            try:
+                schema_version, task_name = read_npz_meta(source_file)
+            except (zipfile.BadZipFile, pickle.UnpicklingError, OSError, EOFError, ValueError) as exc:
+                print(f"[skip] unreadable source npz: {source_file} ({exc})")
+                continue
             if schema_version not in {"sonic_episode_v2", "sonic_episode_v3", "sonic_episode_v4_multicam"}:
                 continue
             env_config = TASK_TO_ENV_CONFIG.get(task_name)
@@ -333,7 +492,13 @@ def find_new_npz_files(output_dir: Path, before_files: set[Path]) -> list[Path]:
     return sorted(after_files - before_files, key=lambda path: path.stat().st_mtime)
 
 
-def build_command(args: argparse.Namespace, job: dict[str, object], output_dir: Path, python_bin: str) -> list[str]:
+def build_command(
+    args: argparse.Namespace,
+    job: dict[str, object],
+    output_dir: Path,
+    python_bin: str,
+    runtime_config,
+) -> list[str]:
     source_file = Path(job["source_file"])
     command = [
         python_bin,
@@ -370,9 +535,17 @@ def build_command(args: argparse.Namespace, job: dict[str, object], output_dir: 
         "--seed",
         str(args.seed),
     ]
+    append_image_runtime_args(command, runtime_config)
     if not args.disable_cameras:
         command.append("--enable_cameras")
-        command.append("--enable_wrist_cameras")
+        if args.disable_front_camera:
+            command.append("--disable_front_camera")
+        if args.disable_wrist_cameras:
+            command.append("--disable_wrist_cameras")
+        else:
+            command.append("--enable_wrist_cameras")
+        if args.enable_perspective_camera:
+            command.append("--enable_perspective_camera")
     if not args.disable_dex3:
         command.append("--enable_dex3_dds")
     if args.headless:
@@ -461,8 +634,224 @@ def wait_for_rerecord_completion(
     return process.returncode, bool(new_npz_files), timed_out
 
 
+def log_runtime_details(log_handle, runtime_config) -> None:
+    log_handle.write(f"RUNTIME_TAG: {runtime_config.runtime_tag}\n")
+    log_handle.write(f"SHM_NAME: {runtime_config.shm_name}\n")
+    log_handle.write(
+        "IMAGE_PORTS: "
+        f"front={runtime_config.image_zmq_port} "
+        f"world={runtime_config.world_camera_port} "
+        f"left={runtime_config.left_wrist_camera_port} "
+        f"right={runtime_config.right_wrist_camera_port} "
+        f"xrobot={runtime_config.image_xrobot_port}\n"
+    )
+    log_handle.write(f"IMAGE_REDIS_KEY_PREFIX: {runtime_config.image_redis_key_prefix}\n")
+    log_handle.write(f"IMAGE_DDS_TOPIC: {runtime_config.image_dds_topic}\n")
+
+
+def print_job_header(
+    *,
+    print_lock: threading.Lock,
+    total_jobs: int,
+    job: dict[str, object],
+    log_path: Path,
+    temp_output_dir: Path,
+    runtime_config,
+) -> None:
+    with print_lock:
+        print(f"[{job['index']}/{total_jobs}] rerecording {job['source_file']}")
+        print(f"  output_dir={job['output_dir']}")
+        print(f"  temp_output_dir={temp_output_dir}")
+        print(f"  log={log_path}")
+        print(
+            "  runtime="
+            f"{runtime_config.runtime_tag} "
+            f"ports={runtime_config.image_zmq_port}/{runtime_config.world_camera_port}/"
+            f"{runtime_config.left_wrist_camera_port}/{runtime_config.right_wrist_camera_port}"
+        )
+        print(f"  shm={runtime_config.shm_name}")
+
+
+def execute_job(
+    *,
+    args: argparse.Namespace,
+    total_jobs: int,
+    job: dict[str, object],
+    python_bin: str,
+    base_env: dict[str, str],
+    runtime_config,
+    print_lock: threading.Lock,
+    manifest_lock: threading.Lock,
+    summary_lock: threading.Lock,
+) -> dict[str, object]:
+    source_file = Path(job["source_file"]).resolve()
+    output_root = Path(job["output_root"]).resolve()
+    output_dir = Path(job["output_dir"]).resolve()
+    manifest_path = Path(job["manifest_path"]).resolve()
+    summary_path = Path(job["summary_path"]).resolve()
+    temp_output_dir = allocate_job_output_dir(output_root, source_file.stem, runtime_config.runtime_tag)
+    temp_output_dir.mkdir(parents=True, exist_ok=True)
+    command = build_command(args, job, temp_output_dir, python_bin, runtime_config)
+    log_dir = output_root / "rerecord_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{source_file.stem}.log"
+
+    print_job_header(
+        print_lock=print_lock,
+        total_jobs=total_jobs,
+        job=job,
+        log_path=log_path,
+        temp_output_dir=temp_output_dir,
+        runtime_config=runtime_config,
+    )
+    if args.dry_run:
+        with print_lock:
+            print("  command=" + " ".join(command))
+        return {"status": "dry_run", "source_file": source_file}
+
+    before_npz = {path.resolve() for path in temp_output_dir.glob("*.npz")}
+    started_at = time.time()
+    with log_path.open("w", encoding="utf-8") as log_handle:
+        log_handle.write("COMMAND: " + " ".join(command) + "\n")
+        log_handle.write(f"ROBOT_USD_OVERRIDE: {base_env.get('ROBOT_USD_OVERRIDE', '<default>')}\n")
+        log_runtime_details(log_handle, runtime_config)
+        log_handle.flush()
+        return_code, detected_output, timed_out = wait_for_rerecord_completion(
+            command=command,
+            cwd=REPO_ROOT,
+            env=build_worker_env(base_env, runtime_config),
+            log_handle=log_handle,
+            output_dir=temp_output_dir,
+            timeout_seconds=args.timeout_seconds,
+        )
+
+    rerecorded_tmp_npz = None
+    new_npz_files = find_new_npz_files(temp_output_dir, before_npz)
+    if new_npz_files:
+        rerecorded_tmp_npz = new_npz_files[-1]
+
+    rerecorded_schema = ""
+    if rerecorded_tmp_npz is not None:
+        rerecorded_schema, _ = read_npz_meta(rerecorded_tmp_npz)
+    final_reward = None
+    max_reward = None
+    any_success = None
+    if rerecorded_tmp_npz is not None:
+        final_reward, max_reward, any_success = read_rerecord_metrics(rerecorded_tmp_npz)
+
+    status = "success"
+    if timed_out:
+        status = "timeout"
+    elif rerecorded_tmp_npz is None:
+        status = "missing_output"
+    elif rerecorded_schema not in {"sonic_episode_v3", "sonic_episode_v4_multicam"}:
+        status = f"unexpected_schema:{rerecorded_schema or 'missing'}"
+    elif detected_output and return_code in {130, -2, 143, -15}:
+        status = "success"
+
+    rerecorded_npz = None
+    if status == "success" and rerecorded_tmp_npz is not None:
+        move_tree_contents(temp_output_dir, output_dir)
+        remove_dir_if_empty(temp_output_dir, output_root / ".tmp_rerecord")
+        rerecorded_npz = (output_dir / rerecorded_tmp_npz.name).resolve()
+
+    payload = {
+        "duration_sec": round(time.time() - started_at, 3),
+        "env_config": str(job["env_config"]),
+        "log_path": str(log_path.resolve()),
+        "rerecorded_npz": str(rerecorded_npz.resolve()) if rerecorded_npz is not None else "",
+        "return_code": return_code,
+        "rerecord_final_reward": final_reward,
+        "rerecord_max_reward": max_reward,
+        "rerecord_any_success": any_success,
+        "source": str(source_file),
+        "status": status,
+        "task_name": job["task_name"],
+        "timestamp": int(time.time()),
+    }
+    if status == "missing_output":
+        inferred_status = infer_failure_status_from_log(log_path)
+        if inferred_status:
+            payload["status"] = inferred_status
+            status = inferred_status
+
+    with manifest_lock:
+        append_manifest(manifest_path, payload)
+
+    with summary_lock:
+        append_text_log(
+            summary_path,
+            format_rerecord_summary_entry(
+                index=int(job["index"]),
+                total_jobs=total_jobs,
+                source_file=source_file,
+                output_dir=output_dir,
+                log_path=log_path,
+                status=status,
+                rerecorded_npz=rerecorded_npz,
+                final_reward=final_reward,
+                max_reward=max_reward,
+                any_success=any_success,
+                return_code=return_code,
+            ),
+        )
+
+    with print_lock:
+        if status == "success":
+            if final_reward is None and max_reward is None:
+                print(f"  success -> {rerecorded_npz}")
+            else:
+                final_text = "<missing>" if final_reward is None else f"{final_reward:.4f}"
+                max_text = "<missing>" if max_reward is None else f"{max_reward:.4f}"
+                any_success_text = "<missing>" if any_success is None else str(bool(any_success)).lower()
+                print(
+                    f"  success -> {rerecorded_npz}"
+                    f" final_reward={final_text}"
+                    f" max_reward={max_text}"
+                    f" any_success={any_success_text}"
+                )
+        else:
+            print(f"  {status}")
+
+    return payload
+
+
+def worker_loop(
+    *,
+    args: argparse.Namespace,
+    jobs: list[dict[str, object]],
+    total_jobs: int,
+    python_bin: str,
+    base_env: dict[str, str],
+    runtime_config,
+    print_lock: threading.Lock,
+    manifest_lock: threading.Lock,
+    summary_lock: threading.Lock,
+) -> list[dict[str, object]]:
+    results: list[dict[str, object]] = []
+    for job in jobs:
+        results.append(
+            execute_job(
+                args=args,
+                total_jobs=total_jobs,
+                job=job,
+                python_bin=python_bin,
+                base_env=base_env,
+                runtime_config=runtime_config,
+                print_lock=print_lock,
+                manifest_lock=manifest_lock,
+                summary_lock=summary_lock,
+            )
+        )
+    return results
+
+
 def main() -> int:
     args = parse_args()
+    if args.parallel_jobs <= 0:
+        raise SystemExit("--parallel-jobs must be >= 1")
+    if args.enable_perspective_camera and args.disable_cameras:
+        raise SystemExit("--enable-perspective-camera requires camera rendering; remove --disable-cameras")
     python_bin = resolve_python_bin(args.python_bin)
     robot_usd_override = resolve_robot_usd_override(args)
     subprocess_env = build_subprocess_env(robot_usd_override)
@@ -486,96 +875,70 @@ def main() -> int:
             f"  output_root={output_root}"
         )
 
-    print(f"python_bin={python_bin}")
-    print(f"robot_usd_override={robot_usd_override or '<default>'}")
-    print(f"jobs={len(jobs)}")
-
-    success_count = 0
-    failure_count = 0
     for index, job in enumerate(jobs, start=1):
         source_root = Path(job["source_root"])
         source_file = Path(job["source_file"])
         output_root = Path(job["output_root"])
-        manifest_path = Path(job["manifest_path"])
         rel_parent = source_file.relative_to(source_root).parent
         output_dir = (output_root / rel_parent).resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
+        job["index"] = index
+        job["output_dir"] = output_dir
+        job["summary_path"] = output_root / DEFAULT_RERECORD_SUMMARY_FILENAME
 
-        command = build_command(args, job, output_dir, python_bin)
-        log_dir = output_root / "rerecord_logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_path = log_dir / f"{source_file.stem}.log"
+    worker_count = min(args.parallel_jobs, len(jobs))
+    if not args.dry_run:
+        for summary_path in sorted({Path(job["summary_path"]).resolve() for job in jobs}):
+            reset_text_log(summary_path)
+    worker_configs = [
+        build_worker_runtime_config(
+            worker_index=worker_index,
+            image_port_base=args.image_port_base,
+            image_port_stride=args.image_port_stride,
+            image_xrobot_port_base=args.image_xrobot_port_base,
+            image_xrobot_port_stride=args.image_xrobot_port_stride,
+            shm_prefix=args.shm_prefix,
+            image_redis_key_prefix=args.image_redis_key_prefix,
+            image_dds_topic=args.image_dds_topic,
+        )
+        for worker_index in range(worker_count)
+    ]
+    job_chunks = chunk_round_robin(jobs, worker_count)
 
-        print(f"[{index}/{len(jobs)}] rerecording {source_file}")
-        print(f"  output_dir={output_dir}")
-        print(f"  log={log_path}")
-        if args.dry_run:
-            print("  command=" + " ".join(command))
-            continue
+    print(f"python_bin={python_bin}")
+    print(f"robot_usd_override={robot_usd_override or '<default>'}")
+    print(f"jobs={len(jobs)}")
+    print(f"parallel_jobs={worker_count}")
+    if not args.dry_run:
+        for summary_path in sorted({Path(job["summary_path"]).resolve() for job in jobs}):
+            print(f"summary_log={summary_path}")
 
-        before_npz = {path.resolve() for path in output_dir.glob("*.npz")}
-        started_at = time.time()
-        timed_out = False
-        return_code = None
-
-        with log_path.open("w", encoding="utf-8") as log_handle:
-            log_handle.write("COMMAND: " + " ".join(command) + "\n")
-            log_handle.write(f"ROBOT_USD_OVERRIDE: {robot_usd_override or '<default>'}\n")
-            log_handle.flush()
-            return_code, detected_output, timed_out = wait_for_rerecord_completion(
-                command=command,
-                cwd=REPO_ROOT,
-                env=subprocess_env,
-                log_handle=log_handle,
-                output_dir=output_dir,
-                timeout_seconds=args.timeout_seconds,
+    print_lock = threading.Lock()
+    manifest_lock = threading.Lock()
+    summary_lock = threading.Lock()
+    results: list[dict[str, object]] = []
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [
+            executor.submit(
+                worker_loop,
+                args=args,
+                jobs=chunk,
+                total_jobs=len(jobs),
+                python_bin=python_bin,
+                base_env=subprocess_env,
+                runtime_config=runtime_config,
+                print_lock=print_lock,
+                manifest_lock=manifest_lock,
+                summary_lock=summary_lock,
             )
+            for chunk, runtime_config in zip(job_chunks, worker_configs)
+            if chunk
+        ]
+        for future in futures:
+            results.extend(future.result())
 
-        new_npz_files = find_new_npz_files(output_dir, before_npz)
-        rerecorded_npz = new_npz_files[-1] if new_npz_files else None
-        rerecorded_schema = ""
-        if rerecorded_npz is not None:
-            rerecorded_schema, _ = read_npz_meta(rerecorded_npz)
-        final_reward = read_rerecord_final_reward(rerecorded_npz) if rerecorded_npz is not None else None
-
-        status = "success"
-        if timed_out:
-            status = "timeout"
-        elif rerecorded_npz is None:
-            status = "missing_output"
-        elif rerecorded_schema not in {"sonic_episode_v3", "sonic_episode_v4_multicam"}:
-            status = f"unexpected_schema:{rerecorded_schema or 'missing'}"
-        elif detected_output and return_code in {130, -2, 143, -15}:
-            status = "success"
-
-        payload = {
-            "duration_sec": round(time.time() - started_at, 3),
-            "env_config": str(job["env_config"]),
-            "log_path": str(log_path.resolve()),
-            "rerecorded_npz": str(rerecorded_npz.resolve()) if rerecorded_npz is not None else "",
-            "return_code": return_code,
-            "rerecord_final_reward": final_reward,
-            "source": str(source_file),
-            "status": status,
-            "task_name": job["task_name"],
-            "timestamp": int(time.time()),
-        }
-        if status == "missing_output":
-            inferred_status = infer_failure_status_from_log(log_path)
-            if inferred_status:
-                payload["status"] = inferred_status
-                status = inferred_status
-        append_manifest(manifest_path, payload)
-
-        if status == "success":
-            success_count += 1
-            if final_reward is None:
-                print(f"  success -> {rerecorded_npz}")
-            else:
-                print(f"  success -> {rerecorded_npz} final_reward={final_reward:.4f}")
-        else:
-            failure_count += 1
-            print(f"  {status}")
+    success_count = sum(1 for result in results if result["status"] == "success")
+    failure_count = sum(1 for result in results if result["status"] not in {"success", "dry_run"})
 
     print(f"done: success={success_count} failure={failure_count}")
     return 0 if failure_count == 0 else 1

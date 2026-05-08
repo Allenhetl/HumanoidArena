@@ -9,6 +9,13 @@ import isaaclab.sim as sim_utils
 from isaaclab.sensors import CameraCfg
 from isaaclab.utils import configclass
 
+FRONT_CAMERA_WIDTH = 640
+FRONT_CAMERA_HEIGHT = 480
+WRIST_CAMERA_WIDTH = 640
+WRIST_CAMERA_HEIGHT = 480
+WORLD_CAMERA_WIDTH = 1920
+WORLD_CAMERA_HEIGHT = 1080
+
 
 @configclass
 class CameraBaseCfg:
@@ -30,6 +37,7 @@ class CameraBaseCfg:
         clipping_range: tuple = (0.1, 1.0e5),
         pos_offset: tuple = (0, 0.0, 0),
         rot_offset: tuple = (0.5, -0.5, 0.5, -0.5),
+        convention: str = "ros",
         data_types: list = None
     ) -> CameraCfg:
         """get the front camera configuration
@@ -44,7 +52,8 @@ class CameraBaseCfg:
             horizontal_aperture: horizontal aperture
             clipping_range: clipping range (near clipping plane, far clipping plane)
             pos_offset: position offset (x, y, z)
-            rot_offset: rotation offset quaternion
+            rot_offset: rotation offset quaternion in (w, x, y, z)
+            convention: camera orientation convention: "ros", "opengl", or "world"
             data_types: data type list
             
         Returns:
@@ -68,8 +77,39 @@ class CameraBaseCfg:
             offset=CameraCfg.OffsetCfg(
                 pos=pos_offset,
                 rot=rot_offset,
-                convention="ros"
+                convention=convention
             )
+        )
+
+    @classmethod
+    def get_world_camera_config(
+        cls,
+        update_period: float = 0.01,
+        height: int = WORLD_CAMERA_HEIGHT,
+        width: int = WORLD_CAMERA_WIDTH,
+        focal_length: float = 12,
+        focus_distance: float = 400.0,
+        horizontal_aperture: float = 27,
+        clipping_range: tuple = (0.1, 1.0e5),
+        pos_offset: tuple = (0, 0.0, 0),
+        rot_offset: tuple = (0.5, -0.5, 0.5, -0.5),
+        convention: str = "opengl",
+        data_types: list = None
+    ) -> CameraCfg:
+        """get the third-person world camera configuration"""
+        return cls.get_camera_config(
+            prim_path="/World/PerspectiveCamera",
+            update_period=update_period,
+            height=height,
+            width=width,
+            focal_length=focal_length,
+            focus_distance=focus_distance,
+            horizontal_aperture=horizontal_aperture,
+            clipping_range=clipping_range,
+            pos_offset=pos_offset,
+            rot_offset=rot_offset,
+            convention=convention,
+            data_types=data_types,
         )
     
 
@@ -85,17 +125,31 @@ class CameraPresets:
     @classmethod
     def g1_front_camera(cls) -> CameraCfg:
         """front camera configuration"""
-        return CameraBaseCfg.get_camera_config()
-    @classmethod
-    def g1_world_camera(cls) -> CameraCfg:
-        """world camera configuration (third-person view, fixed in world space)"""
         return CameraBaseCfg.get_camera_config(
-            prim_path="/World/PerspectiveCamera",
-            pos_offset=(-2.01826, 3.33365, 1.26749),  # Shifted right (y: -5.0 -> -4.0)
-            rot_offset=(-0.18516, 0.30284,-0.62933,0.69916),  # Rotated slightly right
-
-            focal_length=12,
-            horizontal_aperture=27
+            height=FRONT_CAMERA_HEIGHT,
+            width=FRONT_CAMERA_WIDTH,
+        )
+    @classmethod
+    def g1_world_camera(
+        cls,
+        *,
+        pos_offset: tuple = (-2.01826, 3.33365, 1.26749),
+        rot_offset: tuple = (0.85990, 0.24942, -0.43352, -0.10206),
+        height: int = WORLD_CAMERA_HEIGHT,
+        width: int = WORLD_CAMERA_WIDTH,
+        focal_length: float = 12,
+        horizontal_aperture: float = 27,
+        convention: str = "opengl",
+    ) -> CameraCfg:
+        """world camera configuration (third-person view, fixed in world space)"""
+        return CameraBaseCfg.get_world_camera_config(
+            pos_offset=pos_offset,
+            rot_offset=rot_offset,
+            height=height,
+            width=width,
+            focal_length=focal_length,
+            horizontal_aperture=horizontal_aperture,
+            convention=convention,
         )
     
     @classmethod
@@ -103,8 +157,8 @@ class CameraPresets:
         """left wrist camera configuration"""
         return CameraBaseCfg.get_camera_config(
             prim_path="/World/envs/env_.*/Robot/left_hand_base_link/left_wrist_camera",
-            height=480,
-            width=640,
+            height=WRIST_CAMERA_HEIGHT,
+            width=WRIST_CAMERA_WIDTH,
             update_period=0.01,
             data_types=["rgb", "distance_to_image_plane"],
             focal_length=12,
@@ -119,8 +173,8 @@ class CameraPresets:
         """right wrist camera configuration"""
         return CameraBaseCfg.get_camera_config(
             prim_path="/World/envs/env_.*/Robot/right_hand_base_link/right_wrist_camera",
-            height=480,
-            width=640,
+            height=WRIST_CAMERA_HEIGHT,
+            width=WRIST_CAMERA_WIDTH,
             update_period=0.01,
             data_types=["rgb", "distance_to_image_plane"],
             focal_length=12,
@@ -135,8 +189,8 @@ class CameraPresets:
         """left wrist camera configuration"""
         return CameraBaseCfg.get_camera_config(
             prim_path="/World/envs/env_.*/Robot/left_hand_camera_base_link/left_wrist_camera",
-            height=480,
-            width=640,
+            height=WRIST_CAMERA_HEIGHT,
+            width=WRIST_CAMERA_WIDTH,
             update_period=0.01,
             data_types=["rgb", "distance_to_image_plane"],
             focal_length=12.0,
@@ -151,8 +205,8 @@ class CameraPresets:
         """right wrist camera configuration"""
         return CameraBaseCfg.get_camera_config(
             prim_path="/World/envs/env_.*/Robot/right_hand_camera_base_link/right_wrist_camera",
-            height=480,
-            width=640,
+            height=WRIST_CAMERA_HEIGHT,
+            width=WRIST_CAMERA_WIDTH,
             update_period=0.01,
             data_types=["rgb", "distance_to_image_plane"],
             focal_length=12.0,
@@ -168,8 +222,8 @@ class CameraPresets:
         """left wrist camera configuration"""
         return CameraBaseCfg.get_camera_config(
             prim_path="/World/envs/env_.*/Robot/left_hand_camera_base_link/left_wrist_camera",
-            height=480,
-            width=640,
+            height=WRIST_CAMERA_HEIGHT,
+            width=WRIST_CAMERA_WIDTH,
             update_period=0.01,
             data_types=["rgb", "distance_to_image_plane"],
             focal_length=12.0,
@@ -184,8 +238,8 @@ class CameraPresets:
         """right wrist camera configuration"""
         return CameraBaseCfg.get_camera_config(
             prim_path="/World/envs/env_.*/Robot/right_hand_camera_base_link/right_wrist_camera",
-            height=480,
-            width=640,
+            height=WRIST_CAMERA_HEIGHT,
+            width=WRIST_CAMERA_WIDTH,
             update_period=0.01,
             data_types=["rgb", "distance_to_image_plane"],
             focal_length=12.0,

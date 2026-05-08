@@ -1011,6 +1011,13 @@ def _reward_scalar(env) -> float:
         return 0.0
 
 
+def _reward_success_flag(reward: float, tol: float = 1e-6) -> bool:
+    try:
+        return float(reward) > float(tol)
+    except Exception:
+        return False
+
+
 def _extract_controller_binary_signals(controller_data: dict | None) -> dict[str, bool]:
     def _get_side_data(side_name: str) -> dict:
         if not isinstance(controller_data, dict):
@@ -1322,10 +1329,19 @@ def _organize_sonic_episode(
     rerecord_final_reward = last.get("rerecord_final_reward")
     if rerecord_final_reward is not None:
         organized["rerecord_final_reward"] = np.array(float(rerecord_final_reward), dtype=np.float32)
+    rerecord_max_reward = last.get("rerecord_max_reward")
+    if rerecord_max_reward is not None:
+        organized["rerecord_max_reward"] = np.array(float(rerecord_max_reward), dtype=np.float32)
+    rerecord_any_success = last.get("rerecord_any_success")
+    if rerecord_any_success is not None:
+        organized["rerecord_any_success"] = np.array(bool(rerecord_any_success), dtype=np.bool_)
 
     front_rgb_frames = []
     front_depth_frames = []
     front_vision_indices = []
+    world_rgb_frames = []
+    world_depth_frames = []
+    world_vision_indices = []
     left_wrist_rgb_frames = []
     left_wrist_depth_frames = []
     left_wrist_indices = []
@@ -1342,6 +1358,14 @@ def _organize_sonic_episode(
         if depth is not None:
             front_depth_frames.append(depth)
 
+        world_rgb = vision.get("world_rgb")
+        world_depth = vision.get("world_depth")
+        if world_rgb is not None:
+            world_rgb_frames.append(world_rgb)
+            world_vision_indices.append(idx)
+        if world_depth is not None:
+            world_depth_frames.append(world_depth)
+
         left_rgb = vision.get("left_wrist_rgb")
         left_depth = vision.get("left_wrist_depth")
         if left_rgb is not None:
@@ -1357,7 +1381,7 @@ def _organize_sonic_episode(
             right_wrist_indices.append(idx)
         if right_depth is not None:
             right_wrist_depth_frames.append(right_depth)
-    if front_rgb_frames:
+    if front_rgb_frames or world_rgb_frames or left_wrist_rgb_frames or right_wrist_rgb_frames:
         organized["vision_storage_format"] = np.array("video_v1")
         control_dt = float(meta.get("control_dt", 0.0) or 0.0)
         video_fps = float(1.0 / control_dt) if control_dt > 1e-6 else 30.0
@@ -1378,6 +1402,24 @@ def _organize_sonic_episode(
             raw_rgb_key="vision_rgb",
             video_suffix="front_rgb",
         )
+        if _store_sonic_camera_stream(
+            organized,
+            save_dir=save_dir,
+            task_name=task_name or meta["task"],
+            timestamp_us=timestamp_us,
+            fps=video_fps,
+            frames=world_rgb_frames,
+            depth_frames=world_depth_frames,
+            frame_indices=world_vision_indices,
+            indices_key="vision_world_frame_indices",
+            video_path_key="vision_world_rgb_video_path",
+            video_fps_key="vision_world_rgb_video_fps",
+            video_num_frames_key="vision_world_rgb_video_num_frames",
+            depth_key="vision_world_depth",
+            raw_rgb_key="vision_world_rgb",
+            video_suffix="world_rgb",
+        ):
+            organized["schema_version"] = np.array("sonic_episode_v4_multicam")
         if _store_sonic_camera_stream(
             organized,
             save_dir=save_dir,
@@ -1570,6 +1612,12 @@ class SonicActionProvider(ActionProvider):
         self._replay_joint_err_log_interval = 10
         self._replay_object_err_sums = {}
         self._replay_object_err_counts = {}
+        self._replay_reward_max = None
+        self._replay_any_success = False
+        self._record_world_camera = bool(
+            getattr(args_cli, "enable_world_camera", False)
+            or getattr(args_cli, "enable_perspective_camera", False)
+        )
         self._episode_init_env_state = self._collect_env_state()
         self.recording_manager = AsyncEpisodeRecorder(
             save_dir=getattr(args_cli, "recording_save_dir", "./recording_data"),
@@ -2470,10 +2518,17 @@ class SonicActionProvider(ActionProvider):
         except Exception:
             pass
         if self._record_during_replay and self.recording_manager.is_recording:
+            self._update_replay_reward_stats()
             final_reward = _reward_scalar(self.env)
+            max_reward = final_reward if self._replay_reward_max is None else max(self._replay_reward_max, final_reward)
+            any_success = bool(self._replay_any_success or _reward_success_flag(max_reward))
             if self.recording_manager.recording_buffer:
-                self.recording_manager.recording_buffer[-1]["rerecord_final_reward"] = final_reward
+                last_frame = self.recording_manager.recording_buffer[-1]
+                last_frame["rerecord_final_reward"] = final_reward
+                last_frame["rerecord_max_reward"] = max_reward
+                last_frame["rerecord_any_success"] = any_success
             print(f"[SonicActionProvider] Final rerecord reward={final_reward:.4f}")
+            print(f"[SonicActionProvider] Max rerecord reward={max_reward:.4f} any_success={str(any_success).lower()}")
             print("[SonicActionProvider] Finalizing replay rerecord before exit")
             self.recording_manager.save_recording()
         if self._exit_when_replay_complete:
@@ -2932,6 +2987,8 @@ class SonicActionProvider(ActionProvider):
 
         self._episode_init_env_state = self._collect_env_state()
         self._replay_completion_requested = False
+        self._replay_reward_max = None
+        self._replay_any_success = False
 
         self._frame_count = 0
         self._smpl_data_valid = False
@@ -3045,6 +3102,19 @@ class SonicActionProvider(ActionProvider):
 
     def on_env_objects_reset(self):
         self._episode_init_env_state = self._collect_env_state()
+
+    def _update_replay_reward_stats(self) -> None:
+        if not (self._replay_enabled and self._record_during_replay):
+            return
+        if self._replay_cursor <= 0:
+            return
+        reward = _reward_scalar(self.env)
+        if self._replay_reward_max is None:
+            self._replay_reward_max = reward
+        else:
+            self._replay_reward_max = max(self._replay_reward_max, reward)
+        if _reward_success_flag(reward):
+            self._replay_any_success = True
 
     def _begin_episode_recording(self) -> None:
         if not self.recording_manager.is_recording:
@@ -3302,6 +3372,8 @@ class SonicActionProvider(ActionProvider):
         vision = {
             "rgb": None,
             "depth": None,
+            "world_rgb": None,
+            "world_depth": None,
             "left_wrist_rgb": None,
             "left_wrist_depth": None,
             "right_wrist_rgb": None,
@@ -3314,6 +3386,13 @@ class SonicActionProvider(ActionProvider):
                     vision["rgb"] = camera.data.output["rgb"][0].cpu().numpy().copy()
                 if "distance_to_image_plane" in camera.data.output:
                     vision["depth"] = camera.data.output["distance_to_image_plane"][0].cpu().numpy().copy()
+
+            if self._record_world_camera and "world_camera" in self.env.scene.keys():
+                camera = self.env.scene["world_camera"]
+                if "rgb" in camera.data.output:
+                    vision["world_rgb"] = camera.data.output["rgb"][0].cpu().numpy().copy()
+                if "distance_to_image_plane" in camera.data.output:
+                    vision["world_depth"] = camera.data.output["distance_to_image_plane"][0].cpu().numpy().copy()
 
             if "left_wrist_camera" in self.env.scene.keys():
                 camera = self.env.scene["left_wrist_camera"]
@@ -4997,6 +5076,7 @@ class SonicActionProvider(ActionProvider):
                 self._frame_count = 0
                 print("\n[SONIC] Real get_action path enabled")
             self._frame_count += 1
+            self._update_replay_reward_stats()
             self._latest_consumed_new_this_step = False
             self._command_edge_this_frame = "none"
             debug_log = self._sonic_debug and (

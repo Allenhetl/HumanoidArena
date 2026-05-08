@@ -13,6 +13,7 @@ from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 from isaaclab.utils import configclass
+from tasks.common_config import CameraBaseCfg
 
 project_root = os.environ.get("PROJECT_ROOT")
 
@@ -208,4 +209,12 @@ class TableFootballSceneCfgWH(InteractiveSceneCfg):
             color=(0.75, 0.75, 0.75),
             intensity=3000.0,
         ),
+    )
+
+    world_camera = CameraBaseCfg.get_world_camera_config(
+        pos_offset=(3.00604, -1.18692, 1.99495),
+        rot_offset=(0.70141, 0.51577, 0.29143, 0.39632),
+        focal_length=12,
+        horizontal_aperture=27,
+        convention="opengl"
     )

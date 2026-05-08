@@ -1,72 +1,26 @@
-import os
-
 import torch
 
 import isaaclab.envs.mdp as base_mdp
-import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg
-from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
-from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.sensors import ContactSensorCfg
-from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 from isaaclab.utils import configclass
 
 from tasks.g1_tasks.move_artvip_livingroom_nosofa_g1_29dof_dex3_wholebody import mdp
+from common_env_objects import apply_deterministic_object_resets
 from tasks.common_config import CameraPresets, G1RobotPresets
 from tasks.common_event.event_manager import SimpleEvent, SimpleEventManager
-from tasks.common_scene.base_scene_artvip_livingroom_cfg import ArtVIPLivingroomSceneCfg
+from tasks.common_scene.base_scene_livingroom_grapcup import LivingroomGrapCupSceneCfg
 
-project_root = os.environ.get("PROJECT_ROOT")
-
-ROBOT_INIT_POS = (7.1, 0.6, 0.8)
-ROBOT_INIT_ROT = (1.0, 0.0, 0.0, 0.0)
-SMALLLIVINGROOM8_USD_PATH = f"{project_root}/assets/smalllivingroom2/smalllivingroom.usd"
-DRINK016_USD_PATH = f"{project_root}/assets/smalllivingroom/drink016/model_drink016.usd"
-DRINK_INIT_POS = (7.45, 0.5, 0.865)
-DRINK_INIT_ROT = (0.78, 0.0, 0.0, -0.61)
+ROBOT_INIT_POS = (-1.6, 2.0, 0.8)
+ROBOT_INIT_ROT = (0.70711, 0.0, 0.0, -0.70711)
 
 
 @configclass
-class ArtVIPLivingroomNoSofaTerrainSceneCfg(ArtVIPLivingroomSceneCfg):
-    room_walls = AssetBaseCfg(
-        prim_path="/World/envs/env_.*/Room",
-        init_state=AssetBaseCfg.InitialStateCfg(
-            pos=[0.0, 0.0, 0.0],
-            rot=[1.0, 0.0, 0.0, 0.0],
-        ),
-        spawn=UsdFileCfg(
-            usd_path=SMALLLIVINGROOM8_USD_PATH,
-        ),
-    )
-
-    object = RigidObjectCfg(
-        prim_path="/World/envs/env_.*/Object",
-        init_state=RigidObjectCfg.InitialStateCfg(
-            pos=DRINK_INIT_POS,
-            rot=DRINK_INIT_ROT,
-        ),
-        spawn=UsdFileCfg(
-            usd_path=DRINK016_USD_PATH,
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                rigid_body_enabled=True,
-                kinematic_enabled=False,
-                disable_gravity=False,
-                retain_accelerations=False,
-            ),
-            mass_props=sim_utils.MassPropertiesCfg(mass=0.35),
-            collision_props=sim_utils.CollisionPropertiesCfg(
-                collision_enabled=True,
-                contact_offset=0.005,
-                rest_offset=0.0,
-            ),
-            activate_contact_sensors=False,
-        ),
-    )
-
+class LivingroomGrapCupTaskSceneCfg(LivingroomGrapCupSceneCfg):
     robot: ArticulationCfg = G1RobotPresets.g1_29dof_dex3_wholebody(
         init_pos=ROBOT_INIT_POS,
         init_rot=ROBOT_INIT_ROT,
@@ -80,7 +34,6 @@ class ArtVIPLivingroomNoSofaTerrainSceneCfg(ArtVIPLivingroomSceneCfg):
     )
 
     front_camera = CameraPresets.g1_front_camera()
-    world_camera = CameraPresets.g1_world_camera()
 
 
 @configclass
@@ -125,7 +78,7 @@ class EventCfg:
 
 @configclass
 class MoveArtVIPLivingroomNoSofaG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
-    scene: ArtVIPLivingroomNoSofaTerrainSceneCfg = ArtVIPLivingroomNoSofaTerrainSceneCfg(
+    scene: LivingroomGrapCupTaskSceneCfg = LivingroomGrapCupTaskSceneCfg(
         num_envs=1,
         env_spacing=2.5,
         replicate_physics=True,
@@ -143,6 +96,8 @@ class MoveArtVIPLivingroomNoSofaG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
         self.decimation = 4
         self.episode_length_s = 20.0
         self.object_reset_seed_source = "time"
+        self.deterministic_object_resets = []
+        self._replay_initial_env_state_active = False
 
         self.sim.dt = 0.005
         self.scene.contact_forces.update_period = self.sim.dt
@@ -172,17 +127,19 @@ class MoveArtVIPLivingroomNoSofaG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
             ),
         )
 
+    def initialize_task_scene(self, env, args_cli=None):
+        self._replay_initial_env_state_active = bool(getattr(args_cli, "replay_file", "")) if args_cli else False
+
     def _reset_object_self(self, env):
-        return base_mdp.reset_root_state_uniform(
-            env,
-            torch.arange(env.num_envs, device=env.device),
-            pose_range={"x": [-0.05, 0.05], "y": [-0.05, 0.05]},
-            velocity_range={},
-            asset_cfg=SceneEntityCfg("object"),
-        )
+        applied = apply_deterministic_object_resets(self, env)
+        if applied:
+            print("[object_reset] " + ", ".join(applied))
 
     def _reset_all_self(self, env):
         base_mdp.reset_scene_to_default(
             env,
             torch.arange(env.num_envs, device=env.device),
         )
+        applied = apply_deterministic_object_resets(self, env)
+        if applied:
+            print("[object_reset] " + ", ".join(applied))

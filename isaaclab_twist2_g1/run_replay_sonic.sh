@@ -10,40 +10,36 @@ cd "${SCRIPT_DIR}" || exit 1
 PYTHON_BIN="python"
 DEFAULT_ISAACLAB_PY="/home/dreams/miniconda3/envs/unitree_sim_env_isaaclab5_0/bin/python"
 # Double-desk HOI recording (edit REPLAY_FILE for other runs)
-REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_double_desk/sonic/tw/Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody_sonic_1776428555154908.npz"
-# REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/zk/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1776167367864058.npz"
+# REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/zk/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1776166109646066.npz"
+REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_navi/sonic/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776484843166394.npz"
+# REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/zk/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1776169668304822.npz"
+# REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/perspective-use/doubledesk/Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody_sonic_1776306473351243.npz"
+# REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_double_desk/sonic_v2/tw/Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody_sonic_1777526201640070.npz"
 
-  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775894660832965.npz
-  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775894789682027.npz
-  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775894841888126.npz
-  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775894979774767.npz
-  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775895024789299.npz
-  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775912992795677.npz
-  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775913318734262.npz
-  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775913369100656.npz
-  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775913586857113.npz
-  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775914283717499.npz
-  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775914526205379.npz
-  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775914801537965.npz
-  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/tw/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775914895501671.npz
-  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/zk/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775907447485753.npz
-  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/zk/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775908196051364.npz
-  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/zk/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775908368386789.npz
-  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/zk/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775908558332072.npz
-  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/zk/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775908638445975.npz
-  # - isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/zk/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1775909094537531.npz
+REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_boxing/sonic/zz/Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody_sonic_1777019812335356.npz"
+# REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_grapcup/sonic/zz/Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody_1776841155097978.npz"
+# REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_open_door/sonic/zz/Isaac-Move-Open-Door-G129-Dex3-Wholebody_sonic_1776664605284241.npz"
+# REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/zk/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1776167367864058.npz"
 # REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_open_door/sonic/zk/Isaac-Move-Open-Door-G129-Dex3-Wholebody_sonic_1775975894226796.npz"
 REPLAY_MODE="direct_replay"   # inference_replay | direct_replay
 REPLAY_LOOP=0                    # 1 | 0
 TASK_NAME="${TASK_NAME:-}"       # 留空则从 replay 文件读取
 # ENV_CONFIG_YAML="tasks/common_env_config/opendoor_sonic.yaml"
 # ENV_CONFIG_YAML="tasks/common_env_config/doubledesk_sonic.yaml"
-ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/doubledesk_sonic.yaml}"
+# ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/doubledesk_sonic.yaml}"
+ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/boxing_bag_sonic.yaml}"
+# ENV_CONFIG_YAML="tasks/common_env_config/opendoor_sonic.yaml"
+# ENV_CONFIG_YAML="tasks/common_env_config/livingroom_grapcup_sonic.yaml"
+# ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/doubledesk_sonic.yaml}"
+# ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/small_warehouse_vision_navigation_sonic.yaml}"
+# ENV_CONFIG_YAML="tasks/common_env_config/livingroom_sitsofa_sonic.yaml"
+# ENV_CONFIG_YAML="tasks/common_env_config/football_single_sonic.yaml"
+
 RUN_DEVICE="cpu"
 ROBOT_TYPE="g129"
 ROBOT_COLLIDER_MODE="box"        # box | fourpoints
 ENABLE_CAMERAS=1
-ENABLE_WRIST_CAMERAS=1
+ENABLE_WRIST_CAMERAS=0
 ENABLE_DEX3_DDS=1
 HEADLESS=0
 SONIC_ENCODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_encoder.onnx"

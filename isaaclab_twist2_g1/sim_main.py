@@ -212,12 +212,32 @@ parser.add_argument("--seed", type=int, default=None, help="random seed for repr
 
 # world camera parameters
 parser.add_argument("--enable_world_camera", action="store_true", default=False, help="enable world camera (third-person view)")
+parser.add_argument(
+    "--enable_perspective_camera",
+    action="store_true",
+    default=False,
+    help="alias for --enable_world_camera; enables /World/PerspectiveCamera",
+)
 parser.add_argument("--world_camera_port", type=int, default=5556, help="ZMQ port for world camera streaming")
 parser.add_argument(
     "--enable_wrist_cameras",
     action="store_true",
     default=False,
     help="enable left/right wrist camera sensors and streams",
+)
+parser.add_argument(
+    "--disable_front_camera",
+    "--disable-front-camera",
+    action="store_true",
+    default=False,
+    help="disable the front camera sensor and stream even when camera rendering is enabled",
+)
+parser.add_argument(
+    "--disable_wrist_cameras",
+    "--disable-wrist-cameras",
+    action="store_true",
+    default=False,
+    help="disable left/right wrist camera sensors and streams",
 )
 parser.add_argument("--left_wrist_camera_port", type=int, default=5557, help="ZMQ port for left wrist camera streaming")
 parser.add_argument("--right_wrist_camera_port", type=int, default=5558, help="ZMQ port for right wrist camera streaming")
@@ -226,6 +246,14 @@ parser.add_argument("--right_wrist_camera_port", type=int, default=5558, help="Z
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
+if getattr(args_cli, "enable_perspective_camera", False):
+    args_cli.enable_world_camera = True
+if getattr(args_cli, "disable_wrist_cameras", False) and getattr(args_cli, "enable_wrist_cameras", False):
+    print("[sim_main] disable_wrist_cameras requested; overriding enable_wrist_cameras")
+    args_cli.enable_wrist_cameras = False
+if getattr(args_cli, "enable_world_camera", False) and not getattr(args_cli, "enable_cameras", False):
+    print("[sim_main] enable_world_camera requested; forcing enable_cameras for sensor rendering")
+    args_cli.enable_cameras = True
 if getattr(args_cli, "enable_wrist_cameras", False) and not getattr(args_cli, "enable_cameras", False):
     print("[sim_main] enable_wrist_cameras requested; forcing enable_cameras for sensor rendering")
     args_cli.enable_cameras = True
@@ -271,7 +299,11 @@ from common_env_objects import (
     get_recordable_env_object_specs,
 )
 from tasks.common_env_config import apply_env_config_yaml
-from tasks.common_runtime import apply_optional_runtime_augments
+from tasks.common_runtime import (
+    apply_optional_runtime_augments,
+    apply_vision_light_randomization_from_cfg,
+    setup_vision_test_light_from_cfg,
+)
 from tools.get_stiffness import get_robot_stiffness_from_env
 from tools.get_reward import get_reward_debug_string
 # Use text-based tracker instead of GUI visualizer to avoid matplotlib issues
@@ -321,13 +353,17 @@ def _initialize_task_scene(env, env_cfg, args_cli):
         initialize_task_scene = getattr(env_cfg, "initialize_task_scene", None)
         if callable(initialize_task_scene):
             initialize_task_scene(env, args_cli)
-            return
-        apply_optional_runtime_augments(args_cli)
-        legacy_runtime_setup = getattr(env_cfg, "apply_runtime_setup", None)
-        if callable(legacy_runtime_setup):
-            legacy_runtime_setup(env, args_cli)
+        else:
+            apply_optional_runtime_augments(args_cli)
+            legacy_runtime_setup = getattr(env_cfg, "apply_runtime_setup", None)
+            if callable(legacy_runtime_setup):
+                legacy_runtime_setup(env, args_cli)
     except Exception as exc:
         print(f"[env_runtime] init setup failed: {exc}")
+    try:
+        setup_vision_test_light_from_cfg(env_cfg)
+    except Exception as exc:
+        print(f"[vision_randomization] init setup failed: {exc}")
 
 
 def _resolve_wrist_camera_pair(args_cli, env_cfg):
@@ -362,6 +398,42 @@ def _augment_env_cfg_with_wrist_cameras(env_cfg, args_cli):
     )
 
 
+def _disable_env_cfg_front_camera(env_cfg, args_cli):
+    if not getattr(args_cli, "disable_front_camera", False):
+        return
+
+    scene_cfg = getattr(env_cfg, "scene", None)
+    if scene_cfg is None:
+        raise ValueError("disable_front_camera requested but env_cfg has no scene config")
+    if getattr(scene_cfg, "front_camera", None) is None:
+        print("[sim_main] Front camera disabled; scene config has no front_camera")
+        return
+
+    scene_cfg.front_camera = None
+    print("[sim_main] Front camera disabled in scene config")
+
+
+def _augment_env_cfg_with_perspective_camera(env_cfg, args_cli):
+    if not getattr(args_cli, "enable_world_camera", False):
+        return
+
+    scene_cfg = getattr(env_cfg, "scene", None)
+    if scene_cfg is None:
+        raise ValueError("PerspectiveCamera requested but env_cfg has no scene config")
+    existing_camera = getattr(scene_cfg, "world_camera", None)
+    if existing_camera is not None:
+        print(
+            "[sim_main] PerspectiveCamera enabled using existing scene config "
+            f"(world_camera={existing_camera.prim_path})"
+        )
+        return
+
+    raise ValueError(
+        "PerspectiveCamera requested but scene.world_camera is not configured. "
+        "Add world_camera to the task's base scene in tasks/common_scene/."
+    )
+
+
 def _create_image_server(args_cli, *, port: int, camera_name: str, redis_suffix: str, dds_suffix: str, xrobot_port_offset: int):
     redis_channel = args_cli.image_redis_channel + redis_suffix if args_cli.image_redis_channel else ""
     return ImageServer(
@@ -387,10 +459,24 @@ def _create_image_server(args_cli, *, port: int, camera_name: str, redis_suffix:
 
 def _trigger_task_reset_event(env_cfg, event_name, env):
     event_manager = getattr(env_cfg, "event_manager", None)
-    if event_manager is None:
+    triggered = False
+    if event_manager is not None:
+        event_manager.trigger(event_name, env)
+        triggered = True
+    _apply_vision_light_randomization_for_reset(env_cfg)
+    return triggered
+
+
+def _apply_vision_light_randomization_for_reset(env_cfg, *, episode_seed=None, seed_source=None):
+    try:
+        return apply_vision_light_randomization_from_cfg(
+            env_cfg,
+            episode_seed=episode_seed,
+            seed_source=seed_source,
+        )
+    except Exception as exc:
+        print(f"[vision_randomization] reset hook failed: {exc}")
         return False
-    event_manager.trigger(event_name, env)
-    return True
 
 
 def _resolve_input_guard_backend(args_cli):
@@ -610,6 +696,13 @@ def _restore_replay_initial_env_state_if_needed(env, args_cli):
                 f"source={episode_seed_source or 'recorded'}"
             )
 
+    if episode_seed is not None:
+        _apply_vision_light_randomization_for_reset(
+            env.cfg,
+            episode_seed=episode_seed,
+            seed_source=episode_seed_source or "recorded",
+        )
+
     if not explicit_object_states:
         return bool(seed_applied_names or task_handled_names)
     return _apply_explicit_env_object_states(env, env.cfg, explicit_object_states)
@@ -765,12 +858,14 @@ def main():
     try:
         env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=1)
         env_cfg.env_name = args_cli.task
+        _augment_env_cfg_with_perspective_camera(env_cfg, args_cli)
         apply_env_config_yaml(
             env_cfg,
             args_cli.env_config_yaml,
             task_name=args_cli.task,
             route_name=args_cli.gmt_backend or args_cli.action_source,
         )
+        _disable_env_cfg_front_camera(env_cfg, args_cli)
         _augment_env_cfg_with_wrist_cameras(env_cfg, args_cli)
         # Set seed: command line argument takes priority, otherwise use default 42
         seed_value = args_cli.seed if args_cli.seed is not None else 42
@@ -784,6 +879,7 @@ def main():
     print("\ncreate environment...")
     try:
         env = gym.make(args_cli.task, cfg=env_cfg).unwrapped
+        env._enable_world_camera_stream = bool(getattr(args_cli, "enable_world_camera", False))
         env._request_main_loop_exit = False
         print(f"\ncreate environment success ...")
         print("robot cfg init pos:", env.cfg.scene.robot.init_state.pos)
@@ -986,21 +1082,23 @@ def main():
         print("========= create image server(s) =========")
         image_servers = []  # List to hold all image servers
 
-        # Create front camera image server (always enabled)
-        try:
-            front_server = _create_image_server(
-                args_cli,
-                port=args_cli.image_zmq_port,
-                camera_name="front_camera",
-                redis_suffix="",
-                dds_suffix="",
-                xrobot_port_offset=0,
-            )
-            image_servers.append(front_server)
-            print(f"[sim_main] Front camera ImageServer started on port {args_cli.image_zmq_port}")
-        except Exception as e:
-            print(f"Failed to create front camera image server: {e}")
-            return
+        if args_cli.disable_front_camera:
+            print("[sim_main] Front camera ImageServer disabled")
+        else:
+            try:
+                front_server = _create_image_server(
+                    args_cli,
+                    port=args_cli.image_zmq_port,
+                    camera_name="front_camera",
+                    redis_suffix="",
+                    dds_suffix="",
+                    xrobot_port_offset=0,
+                )
+                image_servers.append(front_server)
+                print(f"[sim_main] Front camera ImageServer started on port {args_cli.image_zmq_port}")
+            except Exception as e:
+                print(f"Failed to create front camera image server: {e}")
+                return
 
         # Create world camera image server (optional, based on --enable_world_camera)
         if args_cli.enable_world_camera:

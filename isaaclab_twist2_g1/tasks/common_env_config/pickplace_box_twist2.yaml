@@ -20,8 +20,8 @@ overrides:
     - record_name: shelf
       prim_paths: ["/World/envs/env_{env_idx}/Shelf"]
       pose_range:
-        x: [-1.2, 1.2]
-        y: [-2.2, -1.00]
+        x: [-0.2, -0.2]
+        y: [-3.3, -3.3]
         z: [0.0, 0.0]
-        yaw: [-0.261799, 0.261799]
+        yaw: [-0.0, 0.0]
       zero_velocity_on_reset: true

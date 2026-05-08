@@ -4,6 +4,7 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 from isaaclab.utils import configclass
 import os
+from tasks.common_config import CameraBaseCfg
 
 
 project_root = os.environ.get("PROJECT_ROOT")
@@ -93,6 +94,14 @@ class PickPlaceBoxSceneCfg(InteractiveSceneCfg):
             intensity=5000.0,
             angle=15.0,
         ),
+    )
+
+    world_camera = CameraBaseCfg.get_world_camera_config(
+        pos_offset=(0.08792, -4.59362, 2.05127),
+        rot_offset=(0.63441, 0.29145, 0.29887, 0.65058),
+        focal_length=12,
+        horizontal_aperture=27,
+        convention="opengl"
     )
 
 

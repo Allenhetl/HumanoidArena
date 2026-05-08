@@ -5,6 +5,7 @@ from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdF
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 import os
+from tasks.common_config import CameraBaseCfg
 project_root = os.environ.get("PROJECT_ROOT")
 PACKING_TABLE_L_POS = [-0.1, -3.2, -0.2]
 PACKING_TABLE_R_POS = [-4.0, -3.2, -0.2]
@@ -74,6 +75,14 @@ class PickPlaceSmallTrolleySceneCfg(InteractiveSceneCfg): # inherit from the int
           intensity=5000.0,
           angle=15.0,
       ),
+    )
+
+    world_camera = CameraBaseCfg.get_world_camera_config(
+        pos_offset=(-3.41952, 3.24861, 3.08657),
+        rot_offset=(-0.18435, -0.08619, 0.41467, 0.88692),
+        focal_length=12,
+        horizontal_aperture=27,
+        convention="opengl"
     )
 
 

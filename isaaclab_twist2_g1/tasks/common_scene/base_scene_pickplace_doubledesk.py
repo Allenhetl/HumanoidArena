@@ -4,6 +4,7 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 from isaaclab.utils import configclass
 import os
+from tasks.common_config import CameraBaseCfg
 project_root = os.environ.get("PROJECT_ROOT")
 PACKING_TABLE_L_POS = [-0.1, -3.2, -0.2]
 PACKING_TABLE_R_POS = [-4.0, -3.2, -0.2]
@@ -32,10 +33,7 @@ class DoubleTableSceneCfg(InteractiveSceneCfg): # inherit from the interactive s
             rot=[1.0, 0.0, 0.0, 0.0]
         ),
         spawn=UsdFileCfg(
-            usd_path=f"{project_root}/assets/objects/small_warehouse/small_doubledesk.usd",
-            # usd_path=f"{project_root}/assets/objects/small_warehouse/small_cart.usd",
-            # small_doubledesk.usd is authored 100x smaller than the warehouse scenes
-            # already used elsewhere in this repo (it lacks the top-level /Lab scale=100).
+            usd_path=f"{project_root}/assets/objects/small_warehouse/small_warehouse_doubledesk/small_doubledesk.usd",
             scale=ROOM_SCALE,
         ),
     )
@@ -47,7 +45,7 @@ class DoubleTableSceneCfg(InteractiveSceneCfg): # inherit from the interactive s
             rot=HAMMER_INIT_ROT,
         ),
         spawn=UsdFileCfg(
-            usd_path=f"{project_root}/assets/objects/small_warehouse/hammer/hammer.usd",
+            usd_path=f"{project_root}/assets/objects/small_warehouse/small_warehouse_doubledesk/interaction_obj/hammer/hammer.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 rigid_body_enabled=True,
                 kinematic_enabled=False,
@@ -95,4 +93,12 @@ class DoubleTableSceneCfg(InteractiveSceneCfg): # inherit from the interactive s
           intensity=5000.0,
           angle=15.0,
       ),
+    )
+
+    world_camera = CameraBaseCfg.get_world_camera_config(
+        pos_offset=(-0.55955, -2.63763, 2.16241),
+        rot_offset=(0.70287, 0.42371, 0.29498, 0.48932),
+        focal_length=12,
+        horizontal_aperture=27,
+        convention="opengl"
     )

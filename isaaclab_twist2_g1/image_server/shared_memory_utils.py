@@ -9,6 +9,7 @@ head + left + right without mislabeling them.
 """
 
 import ctypes
+import os
 import time
 import numpy as np
 import cv2
@@ -16,11 +17,30 @@ from multiprocessing import shared_memory
 from typing import Optional, Dict
 
 # shared memory configuration
-SHM_NAME = "isaac_multi_image_shm"
-# RGB: 640 * 480 * 3 * 4 cameras = 3,686,400 bytes
-# Depth: 640 * 480 * 4 (float32) * 4 cameras = 4,915,200 bytes
-# Total: ~8.6MB + 2KB header
-SHM_SIZE = 640 * 480 * 3 * 4 + 640 * 480 * 4 * 4 + 2048
+DEFAULT_SHM_NAME = "isaac_multi_image_shm"
+SHM_NAME_ENV_VAR = "ISAAC_IMAGE_SHM_NAME"
+SHM_NAME = DEFAULT_SHM_NAME
+MAX_CAMERA_WIDTH = 1280
+MAX_CAMERA_HEIGHT = 720
+MAX_CAMERA_SLOTS = 4
+SHM_HEADER_BYTES = 2048
+
+
+def compute_shm_size(
+    width: int = MAX_CAMERA_WIDTH,
+    height: int = MAX_CAMERA_HEIGHT,
+    camera_slots: int = MAX_CAMERA_SLOTS,
+) -> int:
+    """Compute the required shared-memory size for RGB + float32 depth slots."""
+    rgb_bytes = int(width) * int(height) * 3 * int(camera_slots)
+    depth_bytes = int(width) * int(height) * 4 * int(camera_slots)
+    return rgb_bytes + depth_bytes + SHM_HEADER_BYTES
+
+
+# RGB: 1280 * 720 * 3 * 4 cameras = 11,059,200 bytes
+# Depth: 1280 * 720 * 4 (float32) * 4 cameras = 14,745,600 bytes
+# Total: ~24.6MB + 2KB header
+SHM_SIZE = compute_shm_size()
 
 
 # define the enhanced header structure with depth support
@@ -43,32 +63,58 @@ class SimpleImageHeader(ctypes.Structure):
 IMAGE_ORDER = ['head', 'world', 'left', 'right']
 
 
+def resolve_shm_name(shm_name: Optional[str] = None) -> str:
+    """Resolve the shared-memory segment name for the current process."""
+    if shm_name:
+        return str(shm_name)
+    env_value = os.environ.get(SHM_NAME_ENV_VAR, "").strip()
+    if env_value:
+        return env_value
+    return DEFAULT_SHM_NAME
+
+
 class MultiImageWriter:
     """A simplified multi-image shared memory writer"""
 
-    def __init__(self, shm_name: str = SHM_NAME, shm_size: int = SHM_SIZE):
+    def __init__(self, shm_name: Optional[str] = None, shm_size: int = SHM_SIZE):
         """Initialize the multi-image shared memory writer
 
         Args:
             shm_name: the name of the shared memory
             shm_size: the size of the shared memory
         """
-        self.shm_name = shm_name
+        self.shm_name = resolve_shm_name(shm_name)
         self.shm_size = shm_size
         self._created = False  # Track if we created the shared memory
 
         try:
             # try to open the existing shared memory
-            self.shm = shared_memory.SharedMemory(name=shm_name)
+            self.shm = shared_memory.SharedMemory(name=self.shm_name)
             self._created = False
+            if getattr(self.shm, "size", shm_size) < shm_size:
+                old_size = getattr(self.shm, "size", 0)
+                print(
+                    f"[MultiImageWriter] Existing shared memory too small: "
+                    f"name={self.shm_name} size={old_size} required={shm_size}. Recreating..."
+                )
+                self.shm.close()
+                try:
+                    stale = shared_memory.SharedMemory(name=self.shm_name)
+                    stale.unlink()
+                    stale.close()
+                except FileNotFoundError:
+                    pass
+                self.shm = shared_memory.SharedMemory(create=True, size=shm_size, name=self.shm_name)
+                self._created = True
+                self.shm.buf[:] = bytes(shm_size)
         except FileNotFoundError:
             # if not exist, create a new shared memory
-            self.shm = shared_memory.SharedMemory(create=True, size=shm_size, name=shm_name)
+            self.shm = shared_memory.SharedMemory(create=True, size=shm_size, name=self.shm_name)
             self._created = True
             # Initialize with zeros to avoid reading garbage data
             self.shm.buf[:] = bytes(shm_size)
 
-        print(f"[MultiImageWriter] Shared memory initialized: {shm_name} (created={self._created})")
+        print(f"[MultiImageWriter] Shared memory initialized: {self.shm_name} (created={self._created})")
 
     def write_images(self, images: Dict[str, np.ndarray], depths: Optional[Dict[str, np.ndarray]] = None) -> bool:
         """Write multiple RGB images and optional depth maps to shared memory
@@ -149,8 +195,18 @@ class MultiImageWriter:
             header.has_depth = 1 if concatenated_depth is not None else 0
             header.slot_mask = slot_mask
 
-            # Write header
             header_size = ctypes.sizeof(SimpleImageHeader)
+            total_required = header_size + rgb_data_size + depth_data_size
+            if total_required > len(self.shm.buf):
+                print(
+                    f"[MultiImageWriter] Shared memory too small for current frames: "
+                    f"required={total_required}, available={len(self.shm.buf)}, "
+                    f"height={height}, width={total_width}, images={len(frames_to_concat)}, "
+                    f"has_depth={header.has_depth}"
+                )
+                return False
+
+            # Write header
             header_bytes = ctypes.string_at(ctypes.byref(header), header_size)
             self.shm.buf[:header_size] = header_bytes
 
@@ -208,22 +264,22 @@ class MultiImageWriter:
 class MultiImageReader:
     """A simplified multi-image shared memory reader"""
 
-    def __init__(self, shm_name: str = SHM_NAME):
+    def __init__(self, shm_name: Optional[str] = None):
         """Initialize the multi-image shared memory reader
 
         Args:
             shm_name: the name of the shared memory
         """
-        self.shm_name = shm_name
+        self.shm_name = resolve_shm_name(shm_name)
         self.last_timestamp = 0
         self.buffer = {}  # Always initialize as dict
 
         try:
             # open the shared memory
-            self.shm = shared_memory.SharedMemory(name=shm_name)
-            print(f"[MultiImageReader] Shared memory opened: {shm_name}")
+            self.shm = shared_memory.SharedMemory(name=self.shm_name)
+            print(f"[MultiImageReader] Shared memory opened: {self.shm_name}")
         except FileNotFoundError:
-            print(f"[MultiImageReader] Shared memory {shm_name} not found, will retry when reading")
+            print(f"[MultiImageReader] Shared memory {self.shm_name} not found, will retry when reading")
             self.shm = None
 
     def read_images(self) -> Dict[str, np.ndarray]:
@@ -410,7 +466,7 @@ class MultiImageReader:
 class SharedMemoryWriter:
     """Backward compatible single image writer"""
 
-    def __init__(self, shm_name: str = SHM_NAME, shm_size: int = SHM_SIZE):
+    def __init__(self, shm_name: Optional[str] = None, shm_size: int = SHM_SIZE):
         self.multi_writer = MultiImageWriter(shm_name, shm_size)
 
     def write_image(self, image: np.ndarray) -> bool:
@@ -424,7 +480,7 @@ class SharedMemoryWriter:
 class SharedMemoryReader:
     """Backward compatible single image reader"""
 
-    def __init__(self, shm_name: str = SHM_NAME):
+    def __init__(self, shm_name: Optional[str] = None):
         self.multi_reader = MultiImageReader(shm_name)
 
     def read_image(self) -> Optional[np.ndarray]:

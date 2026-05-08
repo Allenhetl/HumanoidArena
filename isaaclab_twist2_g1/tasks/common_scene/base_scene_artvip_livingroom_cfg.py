@@ -46,8 +46,7 @@ class ArtVIPLivingroomSceneCfg(InteractiveSceneCfg):
     )
 
     # Main world camera
-    world_camera = CameraBaseCfg.get_camera_config(
-        prim_path="/World/PerspectiveCamera",
+    world_camera = CameraBaseCfg.get_world_camera_config(
         pos_offset=(-0.1, 3.6, 1.6),
         rot_offset=(-0.00617, 0.00617, 0.70708, -0.70708),
         focal_length=16.5,

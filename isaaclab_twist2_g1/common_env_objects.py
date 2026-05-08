@@ -358,6 +358,11 @@ def _make_local_spawn_rng(episode_seed: int, record_name: str, env_index: int) -
     return np.random.default_rng(mixed_seed)
 
 
+def make_local_spawn_rng(episode_seed: int, record_name: str, env_index: int) -> np.random.Generator:
+    """Create a deterministic per-object, per-env RNG for custom reset logic."""
+    return _make_local_spawn_rng(episode_seed, record_name, env_index)
+
+
 def _sample_abs_position_with_pose_range(base_position: np.ndarray, pose_range: dict[str, Any], rng) -> np.ndarray:
     out = np.asarray(base_position, dtype=np.float32).copy()
     for axis_name, axis_idx in _POSE_RANGE_AXES.items():

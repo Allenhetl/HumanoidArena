@@ -5,6 +5,7 @@ from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 from isaaclab.utils import configclass
+from tasks.common_config import CameraBaseCfg
 
 
 project_root = os.environ.get("PROJECT_ROOT")
@@ -21,9 +22,17 @@ ROOM_USD_PATH = (
     f"{project_root}/assets/objects/small_warehouse/"
     "small_warehouse_vision_navigation/small_warehouse_digital_twin.usd"
 )
+# ROOM_USD_PATH = (
+#     f"{project_root}/assets/objects/small_warehouse/"
+#     "small_warehouse_vision_navigation/small_warehouse_digital_twin_validation.usd"
+# )
+# TARGET_USD_PATH = (
+#     f"{project_root}/assets/objects/small_warehouse/small_warehouse_vision_navigation/"
+#     "interaction_obj/wetfloorsign.usd"
+# )
 TARGET_USD_PATH = (
     f"{project_root}/assets/objects/small_warehouse/small_warehouse_vision_navigation/"
-    "interaction_obj/wetfloorsign.usd"
+    "interaction_obj/wetfloorsign_semantic.usd"
 )
 OBSTACLE_01_USD_PATH = (
     f"{project_root}/assets/objects/small_warehouse/small_warehouse_vision_navigation/"
@@ -164,4 +173,12 @@ class SmallWarehouseVisionNavigationSceneCfg(InteractiveSceneCfg):
             color=(0.75, 0.75, 0.75),
             intensity=3000.0,
         ),
+    )
+
+    world_camera = CameraBaseCfg.get_world_camera_config(
+        pos_offset=(0.45796, -1.01443, 2.42268),
+        rot_offset=(0.50211, 0.27898, 0.39756, 0.71555),
+        focal_length=12,
+        horizontal_aperture=27,
+        convention="opengl"
     )

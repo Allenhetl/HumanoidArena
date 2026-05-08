@@ -113,6 +113,8 @@ def get_reward_debug_string(env) -> str:
 
     try:
         dbg = getattr(env, "_ppdd_dbg", None)
+        if dbg is None:
+            dbg = getattr(env, "_ppbox_dbg", None)
         term_parts = []
         get_terms = getattr(env.reward_manager, "get_active_iterable_terms", None)
         if callable(get_terms):
@@ -140,6 +142,62 @@ def get_reward_debug_string(env) -> str:
             else f"[reward_debug] total={total_value:.4f}"
         )
         if isinstance(dbg, dict):
+            if dbg.get("task") == "pickplace_box":
+                com = dbg.get("com")
+                if isinstance(com, (list, tuple)) and len(com) >= 3:
+                    com_s = f"({com[0]:.3f},{com[1]:.3f},{com[2]:.3f})"
+                else:
+                    com_s = "n/a"
+                raw_support_z = dbg.get("support_top_z")
+                target_support_z = dbg.get("target_support_top_z")
+                base_support_z = dbg.get("base_support_top_z")
+                raw_support_z_s = float(raw_support_z) if isinstance(raw_support_z, (int, float)) else float("nan")
+                target_support_z_s = (
+                    float(target_support_z) if isinstance(target_support_z, (int, float)) else float("nan")
+                )
+                base_support_z_s = (
+                    float(base_support_z) if isinstance(base_support_z, (int, float)) else float("nan")
+                )
+                base = (
+                    f"[reward_debug] total={_extract_scalar(dbg.get('raw_total', total_value)):.4f}"
+                    f" | reward={_extract_scalar(dbg.get('goal_reward', total_value)):.4f}"
+                    f" placed={int(bool(dbg.get('placed')))}"
+                    f" source={dbg.get('surface_source', 'unknown')}"
+                    f" surfaces={int(dbg.get('surface_count', 0))}"
+                    f" surface_idx={int(dbg.get('surface_index', -1))}"
+                    f" inside_xy={int(bool(dbg.get('inside_xy')))}"
+                    f" aligned_z={int(bool(dbg.get('aligned_z')))}"
+                    f" dx_out={float(dbg.get('dx_outside', float('nan'))):.4f}"
+                    f" dy_out={float(dbg.get('dy_outside', float('nan'))):.4f}"
+                    f" z_gap={float(dbg.get('z_gap', float('nan'))):.4f}"
+                    f" bottom_z={float(dbg.get('box_bottom_z', float('nan'))):.4f}"
+                    f" raw_support_z={raw_support_z_s:.4f}"
+                    f" target_z={target_support_z_s:.4f}"
+                    f" base_z={base_support_z_s:.4f}"
+                    f" x=[{float(dbg.get('x_lo', float('nan'))):.3f},{float(dbg.get('x_hi', float('nan'))):.3f}]"
+                    f" y=[{float(dbg.get('y_lo', float('nan'))):.3f},{float(dbg.get('y_hi', float('nan'))):.3f}]"
+                    f" com={com_s}"
+                )
+                candidate_surfaces = dbg.get("candidate_surfaces")
+                if isinstance(candidate_surfaces, list) and candidate_surfaces:
+                    candidate_parts = []
+                    for entry in candidate_surfaces[:3]:
+                        if not isinstance(entry, dict):
+                            continue
+                        candidate_parts.append(
+                            "cand("
+                            f"idx={int(entry.get('surface_index', -1))},"
+                            f"in={int(bool(entry.get('inside_xy')))},"
+                            f"az={int(bool(entry.get('aligned_z')))},"
+                            f"zg={float(entry.get('z_gap', float('nan'))):.3f},"
+                            f"sz={float(entry.get('support_top_z', float('nan'))):.3f},"
+                            f"tz={float(entry.get('target_support_top_z', float('nan'))):.3f}"
+                            ")"
+                        )
+                    if candidate_parts:
+                        base += " | " + " ".join(candidate_parts)
+                return base
+
             com = dbg.get("com")
             if isinstance(com, (list, tuple)) and len(com) >= 3:
                 com_s = f"({com[0]:.3f},{com[1]:.3f},{com[2]:.3f})"

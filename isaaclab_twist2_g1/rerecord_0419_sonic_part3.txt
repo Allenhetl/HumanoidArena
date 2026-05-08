@@ -1,0 +1,68 @@
+python_bin=/home/dreams/miniconda3/envs/unitree_sim_env_isaaclab5_0/bin/python
+robot_usd_override=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2.usd
+jobs=17
+[1/17] rerecording /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776589124580717.npz
+  output_dir=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/yb
+  log=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/rerecord_logs/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776589124580717.log
+  success -> /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776589878686817.npz final_reward=0.0000
+[2/17] rerecording /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776589276232134.npz
+  output_dir=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/yb
+  log=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/rerecord_logs/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776589276232134.log
+  success -> /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776590016175325.npz final_reward=0.0200
+[3/17] rerecording /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776589306376964.npz
+  output_dir=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/yb
+  log=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/rerecord_logs/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776589306376964.log
+  success -> /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776590124945990.npz final_reward=0.0200
+[4/17] rerecording /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776589394013793.npz
+  output_dir=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/yb
+  log=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/rerecord_logs/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776589394013793.log
+  success -> /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776590200939361.npz final_reward=0.0000
+[5/17] rerecording /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776589422885696.npz
+  output_dir=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/yb
+  log=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/rerecord_logs/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776589422885696.log
+  success -> /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776590276267621.npz final_reward=0.0200
+[6/17] rerecording /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776589449644083.npz
+  output_dir=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/yb
+  log=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/rerecord_logs/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776589449644083.log
+  success -> /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776590353615557.npz final_reward=0.0200
+[7/17] rerecording /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776589477922582.npz
+  output_dir=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/yb
+  log=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/rerecord_logs/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776589477922582.log
+  success -> /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776590423149738.npz final_reward=0.0200
+[8/17] rerecording /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776589505772959.npz
+  output_dir=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/yb
+  log=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/rerecord_logs/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776589505772959.log
+  success -> /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776590488657530.npz final_reward=0.0200
+[9/17] rerecording /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776589539324401.npz
+  output_dir=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/yb
+  log=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/rerecord_logs/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776589539324401.log
+  success -> /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776590563174730.npz final_reward=0.0200
+[10/17] rerecording /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776589564009937.npz
+  output_dir=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/yb
+  log=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/rerecord_logs/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776589564009937.log
+  success -> /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776590632809277.npz final_reward=0.0200
+[11/17] rerecording /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776589619649469.npz
+  output_dir=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/yb
+  log=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/rerecord_logs/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776589619649469.log
+  success -> /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776590711157722.npz final_reward=0.0200
+[12/17] rerecording /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776589642733754.npz
+  output_dir=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/yb
+  log=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/rerecord_logs/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776589642733754.log
+  success -> /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776590779266988.npz final_reward=0.0200
+[13/17] rerecording /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776589667383365.npz
+  output_dir=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/yb
+  log=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/rerecord_logs/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776589667383365.log
+  success -> /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776590847339863.npz final_reward=0.0200
+[14/17] rerecording /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776589724527515.npz
+  output_dir=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/yb
+  log=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/sonic_multicam_rerecord/rerecord_logs/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776589724527515.log
+Traceback (most recent call last):
+  File "/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/tools/data_tools/rerecord_sonic_recordings_to_multicam.py", line 585, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/tools/data_tools/rerecord_sonic_recordings_to_multicam.py", line 525, in main
+    return_code, detected_output, timed_out = wait_for_rerecord_completion(
+                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/tools/data_tools/rerecord_sonic_recordings_to_multicam.py", line 442, in wait_for_rerecord_completion
+    time.sleep(1.0)
+KeyboardInterrupt

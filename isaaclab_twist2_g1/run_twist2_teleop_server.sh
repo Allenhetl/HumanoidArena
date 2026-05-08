@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 REDIS_IP="${REDIS_IP:-localhost}"
-ACTUAL_HUMAN_HEIGHT="${ACTUAL_HUMAN_HEIGHT:-1.70}"
+ACTUAL_HUMAN_HEIGHT="${ACTUAL_HUMAN_HEIGHT:-1.76}"
 GMR_ROOT="${GMR_ROOT:-${REPO_ROOT}/GMR}"
 
 if [[ -d "${GMR_ROOT}/general_motion_retargeting" ]]; then

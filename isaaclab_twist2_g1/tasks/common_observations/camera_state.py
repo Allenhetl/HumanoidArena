@@ -16,7 +16,6 @@ import atexit
 # add the project root directory to the path, so that the shared memory tool can be imported
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from image_server.shared_memory_utils import MultiImageWriter
-from tasks.common_observations.joint_projection import get_joint_keypoints_2d
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -202,62 +201,13 @@ def get_camera_image(
         else:
             print(f"[CAMERA_STATE] ⚠️ WARNING: 'distance_to_image_plane' NOT found in front camera output!")
 
-    # World camera (third-person view camera) - DISABLED
-    # if "world_camera" in env.scene.keys():
-    #     world_image = env.scene["world_camera"].data.output["rgb"][0]
-    #     images["world"] = world_image.cpu().numpy()
-    #     img_height, img_width = images["world"].shape[:2]
+    if getattr(env, "_enable_world_camera_stream", False) and "world_camera" in env.scene.keys():
+        world_image = env.scene["world_camera"].data.output["rgb"][0]
+        images["world"] = world_image.cpu().numpy()
 
-    #     # Get depth data if available
-    #     if "distance_to_image_plane" in env.scene["world_camera"].data.output:
-    #         world_depth = env.scene["world_camera"].data.output["distance_to_image_plane"][0]
-    #         depths["world"] = world_depth.cpu().numpy()
-    #         print(f"[CAMERA_STATE] ✅ Got world camera depth: {depths['world'].shape}, min={depths['world'].min():.3f}, max={depths['world'].max():.3f}")
-    #     else:
-    #         print(f"[CAMERA_STATE] ⚠️ WARNING: 'distance_to_image_plane' NOT found in world camera output!")
-
-    #     # Compute joint keypoints for world camera
-    #     try:
-    #         joint_data = get_joint_keypoints_2d(
-    #             env,
-    #             camera_name="world_camera",
-    #             img_width=img_width,
-    #             img_height=img_height,
-    #             debug=True  # Set to True to enable debug output
-    #         )
-    #         if joint_data is not None:
-    #             # IMPORTANT: The recording script resizes images to 360x640
-    #             # We need to scale the keypoint coordinates accordingly
-    #             target_width = 640
-    #             target_height = 360
-    #             scale_x = target_width / img_width
-    #             scale_y = target_height / img_height
-
-    #             print(f"[CAMERA_STATE] 📐 Scaling keypoints: scale_x={scale_x:.3f}, scale_y={scale_y:.3f}")
-
-    #             # Scale the keypoint coordinates
-    #             scaled_keypoints = []
-    #             for kp in joint_data["keypoints_2d_list"]:
-    #                 if kp is not None:
-    #                     scaled_u = kp[0] * scale_x
-    #                     scaled_v = kp[1] * scale_y
-    #                     scaled_keypoints.append([scaled_u, scaled_v])
-    #                 else:
-    #                     scaled_keypoints.append(None)
-
-    #             # Store scaled keypoints in Redis for recording script to access
-    #             import redis
-    #             import json
-    #             try:
-    #                 redis_client = redis.Redis(host="localhost", port=6379, db=0, socket_timeout=0.1)
-    #                 redis_client.set(
-    #                     "world_camera_joint_keypoints",
-    #                     json.dumps(scaled_keypoints)
-    #                 )
-    #             except Exception as e:
-    #                 print(f"[CAMERA_STATE] Warning: Failed to save keypoints to Redis: {e}")
-    #     except Exception as e:
-    #         print(f"[CAMERA_STATE] Warning: Failed to compute joint keypoints: {e}")
+        if "distance_to_image_plane" in env.scene["world_camera"].data.output:
+            world_depth = env.scene["world_camera"].data.output["distance_to_image_plane"][0]
+            depths["world"] = world_depth.cpu().numpy()
 
     # Left camera (left wrist camera)
     if "left_wrist_camera" in env.scene.keys():

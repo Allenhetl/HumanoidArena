@@ -1,0 +1,44 @@
+python_bin=/home/dreams/miniconda3/envs/unitree_sim_env_isaaclab5_0/bin/python
+input_root=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2
+output_root=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2_multicam_rerecord
+jobs=10
+[1/10] rerecording /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_1776592055752158.npz
+  output_dir=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2_multicam_rerecord/yb
+  log=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2_multicam_rerecord/rerecord_logs/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_1776592055752158.log
+  ok elapsed=79.7s final_reward=0.0200
+[2/10] rerecording /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_1776592090314745.npz
+  output_dir=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2_multicam_rerecord/yb
+  log=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2_multicam_rerecord/rerecord_logs/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_1776592090314745.log
+  ok elapsed=80.7s final_reward=0.0200
+[3/10] rerecording /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_1776592179480659.npz
+  output_dir=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2_multicam_rerecord/yb
+  log=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2_multicam_rerecord/rerecord_logs/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_1776592179480659.log
+  ok elapsed=90.7s final_reward=0.0200
+[4/10] rerecording /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_1776592225780839.npz
+  output_dir=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2_multicam_rerecord/yb
+  log=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2_multicam_rerecord/rerecord_logs/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_1776592225780839.log
+  ok elapsed=69.7s final_reward=0.0200
+[5/10] rerecording /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_1776592255873323.npz
+  output_dir=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2_multicam_rerecord/yb
+  log=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2_multicam_rerecord/rerecord_logs/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_1776592255873323.log
+  ok elapsed=69.7s final_reward=0.0200
+[6/10] rerecording /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_1776592343313439.npz
+  output_dir=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2_multicam_rerecord/yb
+  log=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2_multicam_rerecord/rerecord_logs/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_1776592343313439.log
+  ok elapsed=120.8s final_reward=0.0200
+[7/10] rerecording /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_1776592374959305.npz
+  output_dir=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2_multicam_rerecord/yb
+  log=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2_multicam_rerecord/rerecord_logs/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_1776592374959305.log
+  ok elapsed=74.7s final_reward=0.0200
+[8/10] rerecording /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_1776592453414306.npz
+  output_dir=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2_multicam_rerecord/yb
+  log=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2_multicam_rerecord/rerecord_logs/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_1776592453414306.log
+  ok elapsed=90.8s final_reward=0.0200
+[9/10] rerecording /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_1776592575695052.npz
+  output_dir=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2_multicam_rerecord/yb
+  log=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2_multicam_rerecord/rerecord_logs/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_1776592575695052.log
+  ok elapsed=110.8s final_reward=0.0200
+[10/10] rerecording /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_1776592788288142.npz
+  output_dir=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2_multicam_rerecord/yb
+  log=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_target/twist2_multicam_rerecord/rerecord_logs/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_1776592788288142.log
+  ok elapsed=74.7s final_reward=0.0000

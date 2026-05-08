@@ -1,10 +1,7 @@
-# Copyright (c) 2025, Unitree Robotics Co., Ltd. All Rights Reserved.
-# License: Apache License, Version 2.0
-
-"""MDP module for move boxing bag (G1 29DOF Dex3 wholebody) task."""
-
 from isaaclab.envs.mdp import *
 
-from .observations import *
-from .terminations import *
+from tasks.common_observations.camera_state import *
+from tasks.common_observations.dex3_state import *
+from tasks.common_observations.g1_29dof_state import *
+
 from .rewards import *

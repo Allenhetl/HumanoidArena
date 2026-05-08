@@ -31,7 +31,6 @@ class PickPlaceSmallTrolleyTaskSceneCfg(PickPlaceSmallTrolleySceneCfg):
     )
 
     front_camera = CameraPresets.g1_front_camera()
-    world_camera = CameraPresets.g1_world_camera()
 
 
 @configclass

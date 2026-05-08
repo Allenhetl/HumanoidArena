@@ -7,6 +7,7 @@ from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
+from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
 
@@ -150,7 +151,7 @@ class ObservationsCfg:
 
 @configclass
 class TerminationsCfg:
-    pass
+    success = DoneTerm(func=mdp.success_reached)
 
 
 @configclass

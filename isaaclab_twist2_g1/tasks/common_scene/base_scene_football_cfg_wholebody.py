@@ -12,6 +12,7 @@ from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 from isaaclab.utils import configclass
+from tasks.common_config import CameraBaseCfg
 
 project_root = os.environ.get("PROJECT_ROOT")
 
@@ -259,11 +260,18 @@ class TableFootballSceneCfgWH(InteractiveSceneCfg):
         ),
     )
 
-    # 燈光（world_camera 已移除，需時在子類用 world_camera = CameraPresets.g1_world_camera() 新增）
     light = AssetBaseCfg(
         prim_path="/World/light",
         spawn=sim_utils.DomeLightCfg(
             color=(0.75, 0.75, 0.75),
             intensity=3000.0,
         ),
+    )
+
+    world_camera = CameraBaseCfg.get_world_camera_config(
+        pos_offset=(-2.01826, 3.33365, 1.26749),
+        rot_offset=(0.85990, 0.24942, -0.43352, -0.10206),
+        focal_length=12,
+        horizontal_aperture=27,
+        convention="opengl",
     )

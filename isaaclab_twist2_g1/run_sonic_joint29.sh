@@ -5,32 +5,51 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}" || exit 1
 
 PYTHON_BIN="python"
+
+VISION_RANDOMIZATION="${VISION_RANDOMIZATION:-0}"
+if [ "${VISION_RANDOMIZATION}" = "1" ]; then
+  DEFAULT_ENV_CONFIG_YAML="tasks/common_test_config/vision/vision_navi_sonic_test.yaml"
+else
+  DEFAULT_ENV_CONFIG_YAML="tasks/common_env_config/small_warehouse_vision_navigation_sonic.yaml"
+fi
+ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-${DEFAULT_ENV_CONFIG_YAML}}"
 # ENV_CONFIG_YAML="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/tasks/common_env_config/opendoor_sonic.yaml"
 # ENV_CONFIG_YAML="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/tasks/common_env_config/doubledesk_sonic.yaml"
-ENV_CONFIG_YAML="tasks/common_env_config/small_warehouse_vision_navigation_sonic.yaml"
+# ENV_CONFIG_YAML="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/tasks/common_env_config/livingroom_sitsofa_sonic.yaml"
+# ENV_CONFIG_YAML="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/tasks/common_env_config/livingroom_grapcup_sonic.yaml"
+ENV_CONFIG_YAML="tasks/common_env_config/pickplace_box_sonic.yaml"
 # ENV_CONFIG_YAML="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/tasks/common_env_config/football_single_sonic.yaml"
+# ENV_CONFIG_YAML="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/tasks/common_env_config/boxing_bag_sonic.yaml"
+
 RUN_DEVICE="cpu"
 ROBOT_TYPE="g129"
 ROBOT_COLLIDER_MODE="box"
 SEED="42"
 ENABLE_CAMERAS=1
 ENABLE_DEX3_DDS=1
-HEADLESS=1
+HEADLESS=0
 SONIC_REDIS_HOST="localhost"
 SONIC_REDIS_PORT="6379"
 SONIC_ENCODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_encoder.onnx"
 SONIC_DECODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_decoder.onnx"
 IMAGE_TRANSPORT="xrobot"
-IMAGE_XROBOT_HOST="10.42.0.35"
+# IMAGE_XROBOT_HOST="10.42.0.35"
+IMAGE_XROBOT_HOST="192.168.100.87"
 IMAGE_XROBOT_PORT="12345"
 IMAGE_XROBOT_BITRATE="2097152"
 IMAGE_FPS="30"
 IMAGE_XROBOT_FFMPEG="/usr/bin/ffmpeg"
-# RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HOI_double_desk/sonic/yb"
+# RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HOI_double_desk/sonic_v2/tw"
 # RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HOI_football_v2/sonic_v3/zk"
-RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HSI_vision_target/sonic/yb"
+# RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HSI_vision_target/sonic/yb"
+# RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HSI_open_door/sonic/zk"
+# RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HSI_open_door/sonic/zz"
+# RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HSI_boxing/sonic/zz"
+# RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HSI_sitingsofa/sonic/yb"
+RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HOI_grapcup/sonic_v2/tw"
+# RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HSI_sitingsofa/sonic/zk"
+# RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HSI_pp_box/sonic/yb"
 # RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HOI_double_desk/sonic/tw"
-# RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HOI_open_door/sonic/zk"
 LOG_DIR="${SCRIPT_DIR}/logs"
 
 export PROJECT_ROOT="${SCRIPT_DIR}"
@@ -89,13 +108,13 @@ redis-cli DEL \
   t_action >/dev/null 2>&1 || true
 
 
+# export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2_thumd.usd"
 export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2.usd"
-
-
-echo "[robot_usd] mode=${ROBOT_COLLIDER_MODE}"
+# export ROBOT_USD_OVERRIDE="$echo "[robot_usd] mode=${ROBOT_COLLIDER_MODE}"
 echo "[robot_usd] path=${ROBOT_USD_OVERRIDE}"
 echo "[sonic_joint29] task=${TASK_NAME}"
 echo "[sonic_joint29] env_config=${ENV_CONFIG_YAML}"
+echo "[sonic_joint29] vision_randomization=${VISION_RANDOMIZATION}"
 echo "[sonic_joint29] seed=${SEED}"
 echo "[sonic_joint29] encoder=${SONIC_ENCODER_PATH}"
 echo "[sonic_joint29] decoder=${SONIC_DECODER_PATH}"

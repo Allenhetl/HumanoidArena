@@ -18,7 +18,7 @@ overrides:
   obstacle_02_a_layout_x_range: [-1.8, -0.7]
   obstacle_02_b_layout_x_range: [-5.2, -4.0]
   obstacle_02_c_layout_x_range: [-3.1, -2.0]
-  obstacle_layout_y_range: [-2.5, -1.2]
+  obstacle_layout_y_range: [-2.76, -1.7]
   obstacle_layout_yaw_range: [-0.785398, 0.785398]
   obstacle_01_a_layout_z: 0.16
   obstacle_01_b_layout_z: 0.56

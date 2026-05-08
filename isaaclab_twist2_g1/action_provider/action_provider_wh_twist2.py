@@ -130,6 +130,13 @@ def _reward_scalar(env) -> float:
         return 0.0
 
 
+def _reward_success_flag(reward: float, tol: float = 1e-6) -> bool:
+    try:
+        return float(reward) > float(tol)
+    except Exception:
+        return False
+
+
 def _build_replay_controller_data(controller_binary: dict[str, bool]) -> dict[str, dict[str, float | bool]]:
     left_close = bool(controller_binary.get("left_close_trigger_binary", False))
     right_close = bool(controller_binary.get("right_close_trigger_binary", False))
@@ -440,6 +447,12 @@ class RecordingManager:
         rerecord_final_reward = last_frame.get("rerecord_final_reward")
         if rerecord_final_reward is not None:
             organized["rerecord_final_reward"] = np.array(float(rerecord_final_reward), dtype=np.float32)
+        rerecord_max_reward = last_frame.get("rerecord_max_reward")
+        if rerecord_max_reward is not None:
+            organized["rerecord_max_reward"] = np.array(float(rerecord_max_reward), dtype=np.float32)
+        rerecord_any_success = last_frame.get("rerecord_any_success")
+        if rerecord_any_success is not None:
+            organized["rerecord_any_success"] = np.array(bool(rerecord_any_success), dtype=np.bool_)
 
         first_robot = first_frame.get('robot', {})
         first_torque = first_robot.get('applied_torque_before_decimation')
@@ -920,6 +933,8 @@ class TWIST2ActionProvider(ActionProvider):
         self._replay_object_err_sums = {}
         self._replay_object_err_counts = {}
         self._replay_completion_requested = False
+        self._replay_reward_max = None
+        self._replay_any_success = False
         self._episode_init_env_state = self._collect_env_state()
 
         if self._replay_enabled:
@@ -1847,10 +1862,17 @@ class TWIST2ActionProvider(ActionProvider):
         except Exception:
             pass
         if self._record_during_replay and self.recording_manager.is_recording:
+            self._update_replay_reward_stats()
             final_reward = _reward_scalar(self.env)
+            max_reward = final_reward if self._replay_reward_max is None else max(self._replay_reward_max, final_reward)
+            any_success = bool(self._replay_any_success or _reward_success_flag(max_reward))
             if self.recording_manager.recording_buffer:
-                self.recording_manager.recording_buffer[-1]["rerecord_final_reward"] = final_reward
+                last_frame = self.recording_manager.recording_buffer[-1]
+                last_frame["rerecord_final_reward"] = final_reward
+                last_frame["rerecord_max_reward"] = max_reward
+                last_frame["rerecord_any_success"] = any_success
             print(f"[{self.name}] Final rerecord reward={final_reward:.4f}")
+            print(f"[{self.name}] Max rerecord reward={max_reward:.4f} any_success={str(any_success).lower()}")
             print(f"[{self.name}] 💾 Finalizing replay rerecord before exit")
             self.recording_manager.save_recording()
         if self._exit_when_replay_complete:
@@ -2412,6 +2434,7 @@ class TWIST2ActionProvider(ActionProvider):
         render_time = 0.0
 
         try:
+            self._update_replay_reward_stats()
             full_action = self._full_action_buf
             full_action.zero_()
             replay_frame_idx = None
@@ -3283,6 +3306,8 @@ class TWIST2ActionProvider(ActionProvider):
             self._replay_object_err_sums = {}
             self._replay_object_err_counts = {}
             self._replay_completion_requested = False
+            self._replay_reward_max = None
+            self._replay_any_success = False
             if self._use_lerobot_vla:
                 self._lerobot_vla_runtime.reset()
                 if self._lerobot_http_client is not None:
@@ -3303,6 +3328,19 @@ class TWIST2ActionProvider(ActionProvider):
 
     def on_env_objects_reset(self):
         self._episode_init_env_state = self._collect_env_state()
+
+    def _update_replay_reward_stats(self) -> None:
+        if not (self._replay_enabled and self._record_during_replay):
+            return
+        if self._replay_cursor <= 0:
+            return
+        reward = _reward_scalar(self.env)
+        if self._replay_reward_max is None:
+            self._replay_reward_max = reward
+        else:
+            self._replay_reward_max = max(self._replay_reward_max, reward)
+        if _reward_success_flag(reward):
+            self._replay_any_success = True
 
     def _convert_to_joint_range(self, value):
         """Convert gripper control value to joint angle"""

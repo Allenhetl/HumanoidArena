@@ -179,8 +179,10 @@ class ThreeStepPlatformSceneCfg(InteractiveSceneCfg):
             intensity=3000.0,
         ),
     )
-    world_camera = CameraBaseCfg.get_camera_config(
-        prim_path="/World/PerspectiveCamera",
-        pos_offset=(-1.9, -5.0, 1.8),
-        rot_offset=(-0.40614, 0.78544, 0.4277, -0.16986),
+    world_camera = CameraBaseCfg.get_world_camera_config(
+        pos_offset=(-3.41952, 3.24861, 3.08657),
+        rot_offset=(-0.18435, -0.08619, 0.41467, 0.88692),
+        focal_length=12,
+        horizontal_aperture=27,
+        convention="opengl"
     )

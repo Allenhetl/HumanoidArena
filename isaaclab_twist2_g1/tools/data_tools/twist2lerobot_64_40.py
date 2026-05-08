@@ -24,11 +24,11 @@ from smpl_lerobot_common import (
 
 
 DEFAULT_INPUT_ROOT = Path(
-    "/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_double_desk/twist2"
+    "/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_grap_cup/twist2"
 )
-DEFAULT_OUTPUT_ROOT = Path("/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/HumanoidArena_datasets/HOI_double_desk/twist2_doubledesk_0418")
+DEFAULT_OUTPUT_ROOT = Path("/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/HumanoidArena_datasets/HOI_grap_cup/twist2_grapcup_0423")
 # DEFAULT_OUTPUT_ROOT = Path("/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/test_twist2")
-DEFAULT_REPO_ID = "local/twist2_doubledesk_0418"
+DEFAULT_REPO_ID = "local/twist2_grapcup_0423"
 
 
 def parse_args() -> argparse.Namespace:
