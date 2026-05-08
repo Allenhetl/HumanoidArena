@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -115,6 +116,10 @@ def _coerce_value_like(current_value: Any, new_value: Any) -> Any:
         return int(new_value)
     if isinstance(current_value, float):
         return float(new_value)
+    if isinstance(current_value, str) and isinstance(new_value, str) and "${PROJECT_ROOT}" in new_value:
+        proj = os.environ.get("PROJECT_ROOT", "")
+        if proj:
+            return new_value.replace("${PROJECT_ROOT}", proj)
     return new_value
 
 

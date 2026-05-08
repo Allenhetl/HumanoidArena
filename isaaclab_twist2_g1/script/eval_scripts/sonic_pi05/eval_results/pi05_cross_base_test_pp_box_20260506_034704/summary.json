@@ -1,0 +1,81 @@
+{
+  "total_episodes": 60,
+  "total_successes": 1,
+  "total_failures": 59,
+  "overall_success_rate": 0.016666666666666666,
+  "result_reason_counts": {
+    "success": 1,
+    "timeout": 59
+  },
+  "failure_reason_counts": {
+    "timeout": 59
+  },
+  "episode_seed_formula": "sha256(task_name|group_seed|repeat_idx)_positive_int32",
+  "per_model": {
+    "pi0.5_100000__100000": {
+      "model_path": "/ai/Yichi/taowen/ckpts/0424_new_100000/pi0.5_100000/Pi0.5_twist2_ppbox_0421_100000/100000/pretrained_model",
+      "episodes": 60,
+      "successes": 1,
+      "failures": 59,
+      "result_reason_counts": {
+        "success": 1,
+        "timeout": 59
+      },
+      "failure_reason_counts": {
+        "timeout": 59
+      },
+      "per_seed": {
+        "0": {
+          "episodes": 20,
+          "successes": 0,
+          "failures": 20,
+          "result_reason_counts": {
+            "timeout": 20
+          },
+          "failure_reason_counts": {
+            "timeout": 20
+          },
+          "success_rate": 0.0
+        },
+        "1": {
+          "episodes": 20,
+          "successes": 1,
+          "failures": 19,
+          "result_reason_counts": {
+            "success": 1,
+            "timeout": 19
+          },
+          "failure_reason_counts": {
+            "timeout": 19
+          },
+          "success_rate": 0.05
+        },
+        "2": {
+          "episodes": 20,
+          "successes": 0,
+          "failures": 20,
+          "result_reason_counts": {
+            "timeout": 20
+          },
+          "failure_reason_counts": {
+            "timeout": 20
+          },
+          "success_rate": 0.0
+        }
+      },
+      "success_rate": 0.016666666666666666,
+      "per_seed_success_rate": {
+        "0": 0.0,
+        "1": 0.05,
+        "2": 0.0
+      },
+      "repeats_per_seed": {
+        "0": 20,
+        "1": 20,
+        "2": 20
+      },
+      "seed_success_rate_mean": 0.016666666666666666,
+      "seed_success_rate_std": 0.023570226039551587
+    }
+  }
+}

@@ -32,7 +32,7 @@ class DoubleTableSceneCfg(InteractiveSceneCfg): # inherit from the interactive s
             rot=[1.0, 0.0, 0.0, 0.0]
         ),
         spawn=UsdFileCfg(
-            usd_path=f"{project_root}/assets/objects/small_warehouse/small_doubledesk.usd",
+            usd_path=f"{project_root}/assets/objects/small_warehouse/small_warehouse_doubledesk/small_doubledesk.usd",
             # usd_path=f"{project_root}/assets/objects/small_warehouse/small_cart.usd",
             # small_doubledesk.usd is authored 100x smaller than the warehouse scenes
             # already used elsewhere in this repo (it lacks the top-level /Lab scale=100).
@@ -47,7 +47,7 @@ class DoubleTableSceneCfg(InteractiveSceneCfg): # inherit from the interactive s
             rot=HAMMER_INIT_ROT,
         ),
         spawn=UsdFileCfg(
-            usd_path=f"{project_root}/assets/objects/small_warehouse/hammer/hammer.usd",
+            usd_path=f"{project_root}/assets/objects/small_warehouse/small_warehouse_doubledesk/interaction_obj/hammer/hammer.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 rigid_body_enabled=True,
                 kinematic_enabled=False,
@@ -72,6 +72,7 @@ class DoubleTableSceneCfg(InteractiveSceneCfg): # inherit from the interactive s
         ),
         spawn=UsdFileCfg(
             usd_path=f"{project_root}/assets/objects/small_warehouse/SM_Crate_A14_Gray_01/SM_Crate_A14_Gray_01_physics.usd",
+            scale=(0.01, 0.01, 0.01),
             activate_contact_sensors=False,
         ),
     )

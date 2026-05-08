@@ -271,6 +271,9 @@ class SimpleVideoRecorder:
         self.frames = []
         self.frame_count = 0
         self._frame_size = None
+        if self.writer is not None:
+            self.writer.release()
+            self.writer = None
 
     def close(self):
         if self.writer is not None:

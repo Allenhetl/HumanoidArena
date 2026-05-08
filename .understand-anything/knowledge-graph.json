@@ -1,0 +1,1625 @@
+{
+    "version": "1.0.0",
+    "project": {
+      "name": "HumanoidArena HOI Teleop VLA Stack",
+      "languages": [
+        "Python",
+        "Bash",
+        "Markdown"
+      ],
+      "frameworks": [
+        "Isaac Lab",
+        "LeRobot",
+        "MuJoCo",
+        "Redis",
+        "ONNX Runtime"
+      ],
+      "description": "Focused knowledge graph for the HOI closed-loop teleoperation pipeline: GMT/GMR retargeting and Pico input feed Isaac Lab action providers, recordings are normalized into canonical 64D state plus 40D action datasets, and LeRobot trains or serves VLA policies back into the simulator.",
+      "analyzedAt": "2026-04-14T13:40:08+08:00",
+      "gitCommitHash": "56eb3119adc70f1cc83d8e3733bfae97873a430b"
+    },
+    "nodes": [
+      {
+        "id": "file:README.md",
+        "type": "file",
+        "name": "README.md",
+        "filePath": "README.md",
+        "summary": "Repository-level operator guide that explains the two main live pipelines (TWIST2 plus Isaac Lab and SONIC plus Isaac Lab), the startup order, and replay entry scripts.",
+        "tags": [
+          "documentation",
+          "entry-point",
+          "workflow",
+          "teleoperation"
+        ],
+        "complexity": "moderate"
+      },
+      {
+        "id": "file:code_structure.md",
+        "type": "file",
+        "name": "code_structure.md",
+        "filePath": "code_structure.md",
+        "summary": "Architecture note focused on isaaclab_twist2_g1 that traces Pico and TWIST2 data into action providers, simulation stepping, image streaming, and recording fields.",
+        "tags": [
+          "documentation",
+          "architecture",
+          "data-flow",
+          "isaaclab"
+        ],
+        "complexity": "complex"
+      },
+      {
+        "id": "file:GMR/general_motion_retargeting/motion_retarget.py",
+        "type": "file",
+        "name": "motion_retarget.py",
+        "filePath": "GMR/general_motion_retargeting/motion_retarget.py",
+        "summary": "Implements GMR's core inverse-kinematics retargeter that scales human motion, maps tracked body frames onto robot tasks, and solves MuJoCo and Mink IK for G1 qpos targets.",
+        "tags": [
+          "retargeting",
+          "gmr",
+          "ik",
+          "teleoperation"
+        ],
+        "complexity": "complex"
+      },
+      {
+        "id": "file:TWIST2/deploy_real/xrobot_teleop_to_robot_w_hand.py",
+        "type": "file",
+        "name": "xrobot_teleop_to_robot_w_hand.py",
+        "filePath": "TWIST2/deploy_real/xrobot_teleop_to_robot_w_hand.py",
+        "summary": "Original TWIST2 teleop publisher that reads XRobot and Pico frames, retargets them with GMR, builds 35D mimic observations plus hand and neck commands, and publishes live control and recording signals through Redis.",
+        "tags": [
+          "teleoperation",
+          "redis",
+          "twist2",
+          "publisher"
+        ],
+        "complexity": "complex"
+      },
+      {
+        "id": "file:isaaclab_twist2_g1/run_twist2.sh",
+        "type": "file",
+        "name": "run_twist2.sh",
+        "filePath": "isaaclab_twist2_g1/run_twist2.sh",
+        "summary": "Main Isaac Lab live entry for TWIST2 HOI recording; clears Redis keys, selects env and task parameters, and launches sim_main.py in pico_twist2 mode.",
+        "tags": [
+          "entry-point",
+          "bash",
+          "isaaclab",
+          "twist2"
+        ],
+        "complexity": "moderate"
+      },
+      {
+        "id": "file:isaaclab_twist2_g1/run_sonic.sh",
+        "type": "file",
+        "name": "run_sonic.sh",
+        "filePath": "isaaclab_twist2_g1/run_sonic.sh",
+        "summary": "Main Isaac Lab live entry for SONIC whole-body control; wires Redis pose input, encoder and decoder checkpoints, camera streaming, and recording output into sim_main.py.",
+        "tags": [
+          "entry-point",
+          "bash",
+          "isaaclab",
+          "sonic"
+        ],
+        "complexity": "moderate"
+      },
+      {
+        "id": "file:isaaclab_twist2_g1/run_vla.sh",
+        "type": "file",
+        "name": "run_vla.sh",
+        "filePath": "isaaclab_twist2_g1/run_vla.sh",
+        "summary": "Launches Isaac Lab in VLA mode by routing sim_main.py through the TWIST2 backend while fetching high-level actions from a LeRobot HTTP server.",
+        "tags": [
+          "entry-point",
+          "bash",
+          "vla",
+          "lerobot"
+        ],
+        "complexity": "simple"
+      },
+      {
+        "id": "file:isaaclab_twist2_g1/sim_main.py",
+        "type": "file",
+        "name": "sim_main.py",
+        "filePath": "isaaclab_twist2_g1/sim_main.py",
+        "summary": "Top-level Isaac Lab runtime that normalizes control routing, launches the simulator, creates the selected action provider, and coordinates reset, replay, cameras, and environment-state synchronization.",
+        "tags": [
+          "entry-point",
+          "isaaclab",
+          "runtime",
+          "simulation"
+        ],
+        "complexity": "complex"
+      },
+      {
+        "id": "file:isaaclab_twist2_g1/action_provider/create_action_provider.py",
+        "type": "file",
+        "name": "create_action_provider.py",
+        "filePath": "isaaclab_twist2_g1/action_provider/create_action_provider.py",
+        "summary": "Small backend factory that selects TWIST2, SONIC, OpenPI, or replay providers from sim_main routing arguments.",
+        "tags": [
+          "factory",
+          "runtime",
+          "action-provider",
+          "routing"
+        ],
+        "complexity": "simple"
+      },
+      {
+        "id": "file:isaaclab_twist2_g1/action_provider/action_provider_wh_twist2.py",
+        "type": "file",
+        "name": "action_provider_wh_twist2.py",
+        "filePath": "isaaclab_twist2_g1/action_provider/action_provider_wh_twist2.py",
+        "summary": "TWIST2 backend for live teleop, replay, recording, and VLA-assisted control; reads Redis mimic actions, builds 1432D policy observations, drives the low-level policy, and records canonical 64 plus 40 supervision.",
+        "tags": [
+          "twist2",
+          "action-provider",
+          "recording",
+          "vla"
+        ],
+        "complexity": "complex"
+      },
+      {
+        "id": "file:isaaclab_twist2_g1/action_provider/action_provider_sonic.py",
+        "type": "file",
+        "name": "action_provider_sonic.py",
+        "filePath": "isaaclab_twist2_g1/action_provider/action_provider_sonic.py",
+        "summary": "SONIC backend that ingests pose streams from Redis or ZMQ, runs encoder and decoder inference, manages replay and reset barriers, and records both SONIC internals and canonical 64 plus 40 supervision.",
+        "tags": [
+          "sonic",
+          "action-provider",
+          "recording",
+          "vla"
+        ],
+        "complexity": "complex"
+      },
+      {
+        "id": "file:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py",
+        "type": "file",
+        "name": "vla_smpl_runtime.py",
+        "filePath": "isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py",
+        "summary": "Canonical motion schema runtime defining the 64D observation state and 40D action, joint-order conversions between TWIST2 and SONIC, and adapters that translate canonical outputs back into backend-specific live commands.",
+        "tags": [
+          "schema",
+          "vla",
+          "canonical",
+          "conversion"
+        ],
+        "complexity": "complex"
+      },
+      {
+        "id": "file:isaaclab_twist2_g1/action_provider/lerobot_vla_http_client.py",
+        "type": "file",
+        "name": "lerobot_vla_http_client.py",
+        "filePath": "isaaclab_twist2_g1/action_provider/lerobot_vla_http_client.py",
+        "summary": "Thin HTTP client used by Isaac Lab providers to send front-camera RGB and 64D state to a remote LeRobot server and receive canonical action predictions.",
+        "tags": [
+          "http",
+          "vla",
+          "client",
+          "inference"
+        ],
+        "complexity": "moderate"
+      },
+      {
+        "id": "file:isaaclab_twist2_g1/action_provider/recording_common.py",
+        "type": "file",
+        "name": "recording_common.py",
+        "filePath": "isaaclab_twist2_g1/action_provider/recording_common.py",
+        "summary": "Reusable async episode writer that buffers frames and saves compressed NPZ recordings in background worker threads; currently shared by the SONIC backend.",
+        "tags": [
+          "recording",
+          "async",
+          "npz",
+          "utility"
+        ],
+        "complexity": "moderate"
+      },
+      {
+        "id": "file:isaaclab_twist2_g1/image_server/image_server.py",
+        "type": "file",
+        "name": "image_server.py",
+        "filePath": "isaaclab_twist2_g1/image_server/image_server.py",
+        "summary": "Camera streaming service that reads rendered images and publishes them over ZMQ, Redis, DDS, or XRobot H264, enabling headset-side visual closed loop during teleoperation.",
+        "tags": [
+          "vision",
+          "streaming",
+          "closed-loop",
+          "xrobot"
+        ],
+        "complexity": "complex"
+      },
+      {
+        "id": "file:isaaclab_twist2_g1/pico_server/twist2_teleop_server.py",
+        "type": "file",
+        "name": "twist2_teleop_server.py",
+        "filePath": "isaaclab_twist2_g1/pico_server/twist2_teleop_server.py",
+        "summary": "Integrated teleop bridge inside isaaclab_twist2_g1 that mirrors TWIST2 live publishing, adds reset and input-ready coordination, and can emit SONIC-compatible joint29 references from the same Pico stream.",
+        "tags": [
+          "teleoperation",
+          "bridge",
+          "twist2",
+          "sonic"
+        ],
+        "complexity": "complex"
+      },
+      {
+        "id": "file:isaaclab_twist2_g1/pico_server/pico_server_pose_only.py",
+        "type": "file",
+        "name": "pico_server_pose_only.py",
+        "filePath": "isaaclab_twist2_g1/pico_server/pico_server_pose_only.py",
+        "summary": "SONIC-oriented Pico pose server that converts VR body tracking into SMPL-based pose batches, hand commands, and Redis or ZMQ payloads for whole-body control.",
+        "tags": [
+          "teleoperation",
+          "smpl",
+          "sonic",
+          "redis"
+        ],
+        "complexity": "complex"
+      },
+      {
+        "id": "file:isaaclab_twist2_g1/docs/TWIST2_DATA_FORMAT.md",
+        "type": "file",
+        "name": "TWIST2_DATA_FORMAT.md",
+        "filePath": "isaaclab_twist2_g1/docs/TWIST2_DATA_FORMAT.md",
+        "summary": "Reference for the TWIST2 recording NPZ schema, including robot_obs_buf semantics, replay-critical fields, and stored robot, human, and vision arrays.",
+        "tags": [
+          "documentation",
+          "schema",
+          "recording",
+          "twist2"
+        ],
+        "complexity": "moderate"
+      },
+      {
+        "id": "file:isaaclab_twist2_g1/docs/VLA_PROPRIOCEPTION_FINAL.md",
+        "type": "file",
+        "name": "VLA_PROPRIOCEPTION_FINAL.md",
+        "filePath": "isaaclab_twist2_g1/docs/VLA_PROPRIOCEPTION_FINAL.md",
+        "summary": "Final design note for the backend-agnostic 64D VLA observation state, fixing root rotation, canonical joint order, and extraction rules across SONIC and TWIST2.",
+        "tags": [
+          "documentation",
+          "schema",
+          "64d",
+          "vla"
+        ],
+        "complexity": "moderate"
+      },
+      {
+        "id": "file:isaaclab_twist2_g1/docs/CANONICAL_G1_ACTION.md",
+        "type": "file",
+        "name": "CANONICAL_G1_ACTION.md",
+        "filePath": "isaaclab_twist2_g1/docs/CANONICAL_G1_ACTION.md",
+        "summary": "Design document for the canonical 40D action that unifies SONIC and TWIST2 targets in robot space and explains why root delta, root rot6d, joint29, and hand binary were chosen.",
+        "tags": [
+          "documentation",
+          "schema",
+          "40d",
+          "canonical"
+        ],
+        "complexity": "complex"
+      },
+      {
+        "id": "file:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py",
+        "type": "file",
+        "name": "smpl_lerobot_common.py",
+        "filePath": "isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py",
+        "summary": "Shared conversion helpers that read recorded NPZ episodes, reconstruct or reuse canonical 64D state and 40D actions, handle heading alignment, and expose common feature definitions for LeRobot dataset writers.",
+        "tags": [
+          "dataset",
+          "converter",
+          "lerobot",
+          "canonical"
+        ],
+        "complexity": "complex"
+      },
+      {
+        "id": "file:isaaclab_twist2_g1/tools/data_tools/twist2lerobot_64_40.py",
+        "type": "file",
+        "name": "twist2lerobot_64_40.py",
+        "filePath": "isaaclab_twist2_g1/tools/data_tools/twist2lerobot_64_40.py",
+        "summary": "Current TWIST2 dataset exporter that converts Isaac Lab recordings into a LeRobot dataset using front RGB, canonical 64D observation.state, and 40D action labels.",
+        "tags": [
+          "dataset",
+          "converter",
+          "twist2",
+          "lerobot"
+        ],
+        "complexity": "moderate"
+      },
+      {
+        "id": "file:isaaclab_twist2_g1/tools/data_tools/sonic2lerobot_clean_64_40.py",
+        "type": "file",
+        "name": "sonic2lerobot_clean_64_40.py",
+        "filePath": "isaaclab_twist2_g1/tools/data_tools/sonic2lerobot_clean_64_40.py",
+        "summary": "Current SONIC dataset exporter that converts and cleans recorded episodes before writing 64 plus 40 LeRobot data, filtering dropped or repeated frames and held-action anomalies.",
+        "tags": [
+          "dataset",
+          "converter",
+          "sonic",
+          "cleaning"
+        ],
+        "complexity": "complex"
+      },
+      {
+        "id": "file:isaaclab_twist2_g1/tools/data_tools/verify_lerobot_smpl_vla.py",
+        "type": "file",
+        "name": "verify_lerobot_smpl_vla.py",
+        "filePath": "isaaclab_twist2_g1/tools/data_tools/verify_lerobot_smpl_vla.py",
+        "summary": "Verification script that cross-checks converted LeRobot datasets against source NPZ recordings and validates backend-specific postprocessing for canonical actions.",
+        "tags": [
+          "verification",
+          "dataset",
+          "vla",
+          "regression"
+        ],
+        "complexity": "complex"
+      },
+      {
+        "id": "file:isaaclab_twist2_g1/tools/data_tools/test_smpl_lerobot_common.py",
+        "type": "file",
+        "name": "test_smpl_lerobot_common.py",
+        "filePath": "isaaclab_twist2_g1/tools/data_tools/test_smpl_lerobot_common.py",
+        "summary": "Unit tests for canonical dataset extraction helpers, covering split-field fallback, hand-binary precedence, and both TWIST2 and SONIC action builders.",
+        "tags": [
+          "test",
+          "dataset",
+          "canonical",
+          "regression"
+        ],
+        "complexity": "moderate"
+      },
+      {
+        "id": "file:lerobot/train.sh",
+        "type": "file",
+        "name": "train.sh",
+        "filePath": "lerobot/train.sh",
+        "summary": "Main LeRobot training entry currently pointed at the cleaned SONIC 64 plus 40 football dataset and configured for ACT, with a commented diffusion variant.",
+        "tags": [
+          "training",
+          "lerobot",
+          "act",
+          "entry-point"
+        ],
+        "complexity": "simple"
+      },
+      {
+        "id": "file:lerobot/train_sonic.sh",
+        "type": "file",
+        "name": "train_sonic.sh",
+        "filePath": "lerobot/train_sonic.sh",
+        "summary": "Alternative LeRobot training entry that targets an older TWIST2-derived 64 plus 40 dataset and keeps ACT and diffusion commands side by side.",
+        "tags": [
+          "training",
+          "lerobot",
+          "twist2",
+          "alternative"
+        ],
+        "complexity": "simple"
+      },
+      {
+        "id": "file:lerobot/scripts/serve_lerobot_vla_http.py",
+        "type": "file",
+        "name": "serve_lerobot_vla_http.py",
+        "filePath": "lerobot/scripts/serve_lerobot_vla_http.py",
+        "summary": "Standalone HTTP(S) inference server that loads a pretrained LeRobot policy plus pre and post processors and exposes /infer and /reset for Isaac Lab VLA control.",
+        "tags": [
+          "server",
+          "http",
+          "lerobot",
+          "inference"
+        ],
+        "complexity": "moderate"
+      },
+      {
+        "id": "file:lerobot/src/lerobot/scripts/twist22lerobot.py",
+        "type": "file",
+        "name": "twist22lerobot.py",
+        "filePath": "lerobot/src/lerobot/scripts/twist22lerobot.py",
+        "summary": "Older in-tree TWIST2 converter inside LeRobot that builds datasets directly from robot_obs_buf slices and grip binaries; useful as historical context but not the canonical 64 plus 40 path.",
+        "tags": [
+          "legacy",
+          "dataset",
+          "converter",
+          "twist2"
+        ],
+        "complexity": "complex"
+      },
+      {
+        "id": "class:GMR/general_motion_retargeting/motion_retarget.py:GeneralMotionRetargeting",
+        "type": "class",
+        "name": "GeneralMotionRetargeting",
+        "filePath": "GMR/general_motion_retargeting/motion_retarget.py",
+        "lineRange": [
+          10,
+          313
+        ],
+        "summary": "Maintains IK task tables and repeatedly solves the retargeting problem from scaled human frames to robot qpos.",
+        "tags": [
+          "retargeting",
+          "ik",
+          "gmr",
+          "g1"
+        ],
+        "complexity": "complex"
+      },
+      {
+        "id": "func:TWIST2/deploy_real/xrobot_teleop_to_robot_w_hand.py:extract_mimic_obs_whole_body",
+        "type": "function",
+        "name": "extract_mimic_obs_whole_body",
+        "filePath": "TWIST2/deploy_real/xrobot_teleop_to_robot_w_hand.py",
+        "lineRange": [
+          105,
+          128
+        ],
+        "summary": "Converts retargeted robot qpos into the 35D TWIST2 mimic_obs format used by the live Redis teleop and control path.",
+        "tags": [
+          "twist2",
+          "mimic-obs",
+          "teleoperation",
+          "conversion"
+        ],
+        "complexity": "moderate"
+      },
+      {
+        "id": "class:TWIST2/deploy_real/xrobot_teleop_to_robot_w_hand.py:XRobotTeleopToRobot",
+        "type": "class",
+        "name": "XRobotTeleopToRobot",
+        "filePath": "TWIST2/deploy_real/xrobot_teleop_to_robot_w_hand.py",
+        "lineRange": [
+          473,
+          951
+        ],
+        "summary": "Owns the live teleop loop: streams XRobot frames, calls GMR, updates state and recording commands, and publishes body, hand, and neck outputs.",
+        "tags": [
+          "teleoperation",
+          "redis",
+          "loop",
+          "publisher"
+        ],
+        "complexity": "complex"
+      },
+      {
+        "id": "func:isaaclab_twist2_g1/sim_main.py:main",
+        "type": "function",
+        "name": "main",
+        "filePath": "isaaclab_twist2_g1/sim_main.py",
+        "lineRange": [
+          494,
+          1152
+        ],
+        "summary": "Bootstraps Isaac Lab, environment setup, action-provider execution, camera streaming, recording, and reset or replay orchestration.",
+        "tags": [
+          "entry-point",
+          "runtime",
+          "simulation",
+          "loop"
+        ],
+        "complexity": "complex"
+      },
+      {
+        "id": "func:isaaclab_twist2_g1/action_provider/create_action_provider.py:create_action_provider",
+        "type": "function",
+        "name": "create_action_provider",
+        "filePath": "isaaclab_twist2_g1/action_provider/create_action_provider.py",
+        "lineRange": [
+          1,
+          29
+        ],
+        "summary": "Routes normalized control arguments to the appropriate backend provider class.",
+        "tags": [
+          "factory",
+          "routing",
+          "runtime",
+          "backend"
+        ],
+        "complexity": "simple"
+      },
+      {
+        "id": "class:isaaclab_twist2_g1/action_provider/action_provider_wh_twist2.py:RecordingManager",
+        "type": "class",
+        "name": "RecordingManager",
+        "filePath": "isaaclab_twist2_g1/action_provider/action_provider_wh_twist2.py",
+        "lineRange": [
+          96,
+          572
+        ],
+        "summary": "TWIST2-specific recorder that buffers frames, serializes rich NPZ episodes, and writes RGB videos during background saves.",
+        "tags": [
+          "recording",
+          "npz",
+          "video",
+          "twist2"
+        ],
+        "complexity": "complex"
+      },
+      {
+        "id": "class:isaaclab_twist2_g1/action_provider/action_provider_wh_twist2.py:TWIST2ActionProvider",
+        "type": "class",
+        "name": "TWIST2ActionProvider",
+        "filePath": "isaaclab_twist2_g1/action_provider/action_provider_wh_twist2.py",
+        "lineRange": [
+          575,
+          3034
+        ],
+        "summary": "Primary TWIST2 runtime backend that handles Redis input, policy inference, replay, canonical recording, and optional LeRobot VLA execution.",
+        "tags": [
+          "twist2",
+          "action-provider",
+          "policy",
+          "vla"
+        ],
+        "complexity": "complex"
+      },
+      {
+        "id": "class:isaaclab_twist2_g1/action_provider/action_provider_sonic.py:SonicActionProvider",
+        "type": "class",
+        "name": "SonicActionProvider",
+        "filePath": "isaaclab_twist2_g1/action_provider/action_provider_sonic.py",
+        "lineRange": [
+          1230,
+          4777
+        ],
+        "summary": "Primary SONIC runtime backend that consumes pose streams, runs encoder and decoder inference, manages reset-safe recording, and exposes canonical actions for replay or VLA.",
+        "tags": [
+          "sonic",
+          "action-provider",
+          "policy",
+          "vla"
+        ],
+        "complexity": "complex"
+      },
+      {
+        "id": "func:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py:build_vla_observation_state",
+        "type": "function",
+        "name": "build_vla_observation_state",
+        "filePath": "isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py",
+        "lineRange": [
+          338,
+          354
+        ],
+        "summary": "Builds the canonical 64D observation state from root orientation, joint positions, and joint velocities in canonical order.",
+        "tags": [
+          "64d",
+          "canonical",
+          "state",
+          "schema"
+        ],
+        "complexity": "simple"
+      },
+      {
+        "id": "func:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py:build_vla_action",
+        "type": "function",
+        "name": "build_vla_action",
+        "filePath": "isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py",
+        "lineRange": [
+          357,
+          377
+        ],
+        "summary": "Builds the canonical 40D action from world-frame root delta, root height and orientation, joint29 targets, and binary hand commands.",
+        "tags": [
+          "40d",
+          "canonical",
+          "action",
+          "schema"
+        ],
+        "complexity": "simple"
+      },
+      {
+        "id": "class:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py:UnifiedSMPLActionRuntime",
+        "type": "class",
+        "name": "UnifiedSMPLActionRuntime",
+        "filePath": "isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py",
+        "lineRange": [
+          811,
+          912
+        ],
+        "summary": "Stateful runtime that integrates sequential 40D actions into world-frame body pose, preserves previous orientation and joints, and feeds backend-specific adapters.",
+        "tags": [
+          "runtime",
+          "canonical",
+          "smpl",
+          "conversion"
+        ],
+        "complexity": "moderate"
+      },
+      {
+        "id": "class:isaaclab_twist2_g1/action_provider/lerobot_vla_http_client.py:LeRobotVLAHttpClient",
+        "type": "class",
+        "name": "LeRobotVLAHttpClient",
+        "filePath": "isaaclab_twist2_g1/action_provider/lerobot_vla_http_client.py",
+        "lineRange": [
+          15,
+          108
+        ],
+        "summary": "Serializes RGB plus state observations into JSON requests, calls the remote inference server, and optionally appends trace logs.",
+        "tags": [
+          "client",
+          "http",
+          "lerobot",
+          "vla"
+        ],
+        "complexity": "moderate"
+      },
+      {
+        "id": "class:isaaclab_twist2_g1/image_server/image_server.py:ImageServer",
+        "type": "class",
+        "name": "ImageServer",
+        "filePath": "isaaclab_twist2_g1/image_server/image_server.py",
+        "lineRange": [
+          417,
+          719
+        ],
+        "summary": "High-level image publishing loop that selects a transport backend and forwards rendered frames at the configured FPS.",
+        "tags": [
+          "vision",
+          "streaming",
+          "server",
+          "closed-loop"
+        ],
+        "complexity": "complex"
+      },
+      {
+        "id": "func:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py:extract_canonical_state",
+        "type": "function",
+        "name": "extract_canonical_state",
+        "filePath": "isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py",
+        "lineRange": [
+          281,
+          316
+        ],
+        "summary": "Reads existing canonical state fields when available or reconstructs the 64D state from recorded root orientation and joint arrays.",
+        "tags": [
+          "64d",
+          "dataset",
+          "extraction",
+          "fallback"
+        ],
+        "complexity": "moderate"
+      },
+      {
+        "id": "func:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py:build_twist2_actions_from_recording",
+        "type": "function",
+        "name": "build_twist2_actions_from_recording",
+        "filePath": "isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py",
+        "lineRange": [
+          347,
+          410
+        ],
+        "summary": "Builds per-frame canonical 40D actions for TWIST2 recordings, preferring stored canonical fields and otherwise lifting mimic_obs35 into the unified action space.",
+        "tags": [
+          "twist2",
+          "40d",
+          "dataset",
+          "conversion"
+        ],
+        "complexity": "moderate"
+      },
+      {
+        "id": "func:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py:build_sonic_actions_from_recording",
+        "type": "function",
+        "name": "build_sonic_actions_from_recording",
+        "filePath": "isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py",
+        "lineRange": [
+          413,
+          500
+        ],
+        "summary": "Builds per-frame canonical 40D actions for SONIC recordings and can rotate targets into the heading-aligned frame used by cleaned datasets.",
+        "tags": [
+          "sonic",
+          "40d",
+          "dataset",
+          "conversion"
+        ],
+        "complexity": "moderate"
+      },
+      {
+        "id": "func:isaaclab_twist2_g1/tools/data_tools/twist2lerobot_64_40.py:main",
+        "type": "function",
+        "name": "main",
+        "filePath": "isaaclab_twist2_g1/tools/data_tools/twist2lerobot_64_40.py",
+        "lineRange": [
+          77,
+          203
+        ],
+        "summary": "Iterates over TWIST2 NPZ episodes, reconstructs canonical state and action arrays, and writes the final LeRobot dataset.",
+        "tags": [
+          "dataset",
+          "export",
+          "twist2",
+          "pipeline"
+        ],
+        "complexity": "moderate"
+      },
+      {
+        "id": "class:isaaclab_twist2_g1/tools/data_tools/sonic2lerobot_clean_64_40.py:EpisodeCleanStats",
+        "type": "class",
+        "name": "EpisodeCleanStats",
+        "filePath": "isaaclab_twist2_g1/tools/data_tools/sonic2lerobot_clean_64_40.py",
+        "lineRange": [
+          42,
+          57
+        ],
+        "summary": "Tracks how many SONIC frames are kept or dropped by each cleaning rule during dataset export.",
+        "tags": [
+          "cleaning",
+          "stats",
+          "dataset",
+          "sonic"
+        ],
+        "complexity": "simple"
+      },
+      {
+        "id": "func:isaaclab_twist2_g1/tools/data_tools/sonic2lerobot_clean_64_40.py:build_clean_keep_mask",
+        "type": "function",
+        "name": "build_clean_keep_mask",
+        "filePath": "isaaclab_twist2_g1/tools/data_tools/sonic2lerobot_clean_64_40.py",
+        "lineRange": [
+          213,
+          273
+        ],
+        "summary": "Computes per-frame validity masks for SONIC episodes by filtering time or index discontinuities and held-action motion mismatches before export.",
+        "tags": [
+          "cleaning",
+          "sonic",
+          "filtering",
+          "dataset"
+        ],
+        "complexity": "moderate"
+      },
+      {
+        "id": "func:isaaclab_twist2_g1/tools/data_tools/sonic2lerobot_clean_64_40.py:main",
+        "type": "function",
+        "name": "main",
+        "filePath": "isaaclab_twist2_g1/tools/data_tools/sonic2lerobot_clean_64_40.py",
+        "lineRange": [
+          330,
+          499
+        ],
+        "summary": "Runs the cleaned SONIC export pipeline and emits per-episode cleaning stats alongside the LeRobot dataset.",
+        "tags": [
+          "dataset",
+          "export",
+          "sonic",
+          "pipeline"
+        ],
+        "complexity": "complex"
+      },
+      {
+        "id": "func:isaaclab_twist2_g1/tools/data_tools/verify_lerobot_smpl_vla.py:verify_dataset_conversion",
+        "type": "function",
+        "name": "verify_dataset_conversion",
+        "filePath": "isaaclab_twist2_g1/tools/data_tools/verify_lerobot_smpl_vla.py",
+        "lineRange": [
+          190,
+          276
+        ],
+        "summary": "Compares saved LeRobot rows against canonical state and action arrays reconstructed from raw recordings to catch conversion drift.",
+        "tags": [
+          "verification",
+          "dataset",
+          "regression",
+          "vla"
+        ],
+        "complexity": "moderate"
+      },
+      {
+        "id": "class:lerobot/scripts/serve_lerobot_vla_http.py:LeRobotServerState",
+        "type": "class",
+        "name": "LeRobotServerState",
+        "filePath": "lerobot/scripts/serve_lerobot_vla_http.py",
+        "lineRange": [
+          64,
+          91
+        ],
+        "summary": "Holds the loaded LeRobot policy and processors and serializes thread-safe infer and reset access for the HTTP server.",
+        "tags": [
+          "server",
+          "state",
+          "lerobot",
+          "inference"
+        ],
+        "complexity": "moderate"
+      }
+    ],
+    "edges": [
+      {
+        "source": "file:GMR/general_motion_retargeting/motion_retarget.py",
+        "target": "class:GMR/general_motion_retargeting/motion_retarget.py:GeneralMotionRetargeting",
+        "type": "contains",
+        "direction": "forward",
+        "weight": 1.0
+      },
+      {
+        "source": "file:GMR/general_motion_retargeting/motion_retarget.py",
+        "target": "class:GMR/general_motion_retargeting/motion_retarget.py:GeneralMotionRetargeting",
+        "type": "exports",
+        "direction": "forward",
+        "weight": 0.8
+      },
+      {
+        "source": "file:TWIST2/deploy_real/xrobot_teleop_to_robot_w_hand.py",
+        "target": "func:TWIST2/deploy_real/xrobot_teleop_to_robot_w_hand.py:extract_mimic_obs_whole_body",
+        "type": "contains",
+        "direction": "forward",
+        "weight": 1.0
+      },
+      {
+        "source": "file:TWIST2/deploy_real/xrobot_teleop_to_robot_w_hand.py",
+        "target": "class:TWIST2/deploy_real/xrobot_teleop_to_robot_w_hand.py:XRobotTeleopToRobot",
+        "type": "contains",
+        "direction": "forward",
+        "weight": 1.0
+      },
+      {
+        "source": "file:TWIST2/deploy_real/xrobot_teleop_to_robot_w_hand.py",
+        "target": "file:GMR/general_motion_retargeting/motion_retarget.py",
+        "type": "depends_on",
+        "direction": "forward",
+        "weight": 0.6
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/sim_main.py",
+        "target": "func:isaaclab_twist2_g1/sim_main.py:main",
+        "type": "contains",
+        "direction": "forward",
+        "weight": 1.0
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/sim_main.py",
+        "target": "func:isaaclab_twist2_g1/action_provider/create_action_provider.py:create_action_provider",
+        "type": "imports",
+        "direction": "forward",
+        "weight": 0.7
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/sim_main.py",
+        "target": "file:isaaclab_twist2_g1/image_server/image_server.py",
+        "type": "imports",
+        "direction": "forward",
+        "weight": 0.7
+      },
+      {
+        "source": "func:isaaclab_twist2_g1/sim_main.py:main",
+        "target": "func:isaaclab_twist2_g1/action_provider/create_action_provider.py:create_action_provider",
+        "type": "calls",
+        "direction": "forward",
+        "weight": 0.8
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/action_provider/create_action_provider.py",
+        "target": "func:isaaclab_twist2_g1/action_provider/create_action_provider.py:create_action_provider",
+        "type": "contains",
+        "direction": "forward",
+        "weight": 1.0
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/action_provider/create_action_provider.py",
+        "target": "func:isaaclab_twist2_g1/action_provider/create_action_provider.py:create_action_provider",
+        "type": "exports",
+        "direction": "forward",
+        "weight": 0.8
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/action_provider/create_action_provider.py",
+        "target": "file:isaaclab_twist2_g1/action_provider/action_provider_wh_twist2.py",
+        "type": "imports",
+        "direction": "forward",
+        "weight": 0.7
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/action_provider/create_action_provider.py",
+        "target": "file:isaaclab_twist2_g1/action_provider/action_provider_sonic.py",
+        "type": "imports",
+        "direction": "forward",
+        "weight": 0.7
+      },
+      {
+        "source": "func:isaaclab_twist2_g1/action_provider/create_action_provider.py:create_action_provider",
+        "target": "class:isaaclab_twist2_g1/action_provider/action_provider_wh_twist2.py:TWIST2ActionProvider",
+        "type": "calls",
+        "direction": "forward",
+        "weight": 0.8
+      },
+      {
+        "source": "func:isaaclab_twist2_g1/action_provider/create_action_provider.py:create_action_provider",
+        "target": "class:isaaclab_twist2_g1/action_provider/action_provider_sonic.py:SonicActionProvider",
+        "type": "calls",
+        "direction": "forward",
+        "weight": 0.8
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/action_provider/action_provider_wh_twist2.py",
+        "target": "class:isaaclab_twist2_g1/action_provider/action_provider_wh_twist2.py:RecordingManager",
+        "type": "contains",
+        "direction": "forward",
+        "weight": 1.0
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/action_provider/action_provider_wh_twist2.py",
+        "target": "class:isaaclab_twist2_g1/action_provider/action_provider_wh_twist2.py:TWIST2ActionProvider",
+        "type": "contains",
+        "direction": "forward",
+        "weight": 1.0
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/action_provider/action_provider_wh_twist2.py",
+        "target": "class:isaaclab_twist2_g1/action_provider/action_provider_wh_twist2.py:TWIST2ActionProvider",
+        "type": "exports",
+        "direction": "forward",
+        "weight": 0.8
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/action_provider/action_provider_wh_twist2.py",
+        "target": "file:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py",
+        "type": "imports",
+        "direction": "forward",
+        "weight": 0.7
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/action_provider/action_provider_wh_twist2.py",
+        "target": "file:isaaclab_twist2_g1/action_provider/lerobot_vla_http_client.py",
+        "type": "imports",
+        "direction": "forward",
+        "weight": 0.7
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/action_provider/action_provider_wh_twist2.py",
+        "target": "file:TWIST2/deploy_real/xrobot_teleop_to_robot_w_hand.py",
+        "type": "depends_on",
+        "direction": "forward",
+        "weight": 0.6
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/action_provider/action_provider_wh_twist2.py",
+        "target": "file:isaaclab_twist2_g1/pico_server/twist2_teleop_server.py",
+        "type": "depends_on",
+        "direction": "forward",
+        "weight": 0.6
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/action_provider/action_provider_sonic.py",
+        "target": "class:isaaclab_twist2_g1/action_provider/action_provider_sonic.py:SonicActionProvider",
+        "type": "contains",
+        "direction": "forward",
+        "weight": 1.0
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/action_provider/action_provider_sonic.py",
+        "target": "class:isaaclab_twist2_g1/action_provider/action_provider_sonic.py:SonicActionProvider",
+        "type": "exports",
+        "direction": "forward",
+        "weight": 0.8
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/action_provider/action_provider_sonic.py",
+        "target": "file:isaaclab_twist2_g1/action_provider/recording_common.py",
+        "type": "imports",
+        "direction": "forward",
+        "weight": 0.7
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/action_provider/action_provider_sonic.py",
+        "target": "file:isaaclab_twist2_g1/action_provider/lerobot_vla_http_client.py",
+        "type": "imports",
+        "direction": "forward",
+        "weight": 0.7
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/action_provider/action_provider_sonic.py",
+        "target": "file:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py",
+        "type": "imports",
+        "direction": "forward",
+        "weight": 0.7
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/action_provider/action_provider_sonic.py",
+        "target": "file:isaaclab_twist2_g1/pico_server/pico_server_pose_only.py",
+        "type": "depends_on",
+        "direction": "forward",
+        "weight": 0.6
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/action_provider/action_provider_sonic.py",
+        "target": "file:isaaclab_twist2_g1/pico_server/twist2_teleop_server.py",
+        "type": "depends_on",
+        "direction": "forward",
+        "weight": 0.6
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py",
+        "target": "func:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py:build_vla_observation_state",
+        "type": "contains",
+        "direction": "forward",
+        "weight": 1.0
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py",
+        "target": "func:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py:build_vla_action",
+        "type": "contains",
+        "direction": "forward",
+        "weight": 1.0
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py",
+        "target": "class:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py:UnifiedSMPLActionRuntime",
+        "type": "contains",
+        "direction": "forward",
+        "weight": 1.0
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py",
+        "target": "func:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py:build_vla_observation_state",
+        "type": "exports",
+        "direction": "forward",
+        "weight": 0.8
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py",
+        "target": "func:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py:build_vla_action",
+        "type": "exports",
+        "direction": "forward",
+        "weight": 0.8
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py",
+        "target": "class:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py:UnifiedSMPLActionRuntime",
+        "type": "exports",
+        "direction": "forward",
+        "weight": 0.8
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/action_provider/lerobot_vla_http_client.py",
+        "target": "class:isaaclab_twist2_g1/action_provider/lerobot_vla_http_client.py:LeRobotVLAHttpClient",
+        "type": "contains",
+        "direction": "forward",
+        "weight": 1.0
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/action_provider/lerobot_vla_http_client.py",
+        "target": "class:isaaclab_twist2_g1/action_provider/lerobot_vla_http_client.py:LeRobotVLAHttpClient",
+        "type": "exports",
+        "direction": "forward",
+        "weight": 0.8
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/action_provider/lerobot_vla_http_client.py",
+        "target": "file:lerobot/scripts/serve_lerobot_vla_http.py",
+        "type": "depends_on",
+        "direction": "forward",
+        "weight": 0.6
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/image_server/image_server.py",
+        "target": "class:isaaclab_twist2_g1/image_server/image_server.py:ImageServer",
+        "type": "contains",
+        "direction": "forward",
+        "weight": 1.0
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/image_server/image_server.py",
+        "target": "class:isaaclab_twist2_g1/image_server/image_server.py:ImageServer",
+        "type": "exports",
+        "direction": "forward",
+        "weight": 0.8
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py",
+        "target": "func:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py:extract_canonical_state",
+        "type": "contains",
+        "direction": "forward",
+        "weight": 1.0
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py",
+        "target": "func:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py:build_twist2_actions_from_recording",
+        "type": "contains",
+        "direction": "forward",
+        "weight": 1.0
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py",
+        "target": "func:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py:build_sonic_actions_from_recording",
+        "type": "contains",
+        "direction": "forward",
+        "weight": 1.0
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py",
+        "target": "func:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py:extract_canonical_state",
+        "type": "exports",
+        "direction": "forward",
+        "weight": 0.8
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py",
+        "target": "func:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py:build_twist2_actions_from_recording",
+        "type": "exports",
+        "direction": "forward",
+        "weight": 0.8
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py",
+        "target": "func:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py:build_sonic_actions_from_recording",
+        "type": "exports",
+        "direction": "forward",
+        "weight": 0.8
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py",
+        "target": "file:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py",
+        "type": "imports",
+        "direction": "forward",
+        "weight": 0.7
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/tools/data_tools/twist2lerobot_64_40.py",
+        "target": "func:isaaclab_twist2_g1/tools/data_tools/twist2lerobot_64_40.py:main",
+        "type": "contains",
+        "direction": "forward",
+        "weight": 1.0
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/tools/data_tools/twist2lerobot_64_40.py",
+        "target": "file:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py",
+        "type": "imports",
+        "direction": "forward",
+        "weight": 0.7
+      },
+      {
+        "source": "func:isaaclab_twist2_g1/tools/data_tools/twist2lerobot_64_40.py:main",
+        "target": "func:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py:extract_canonical_state",
+        "type": "calls",
+        "direction": "forward",
+        "weight": 0.8
+      },
+      {
+        "source": "func:isaaclab_twist2_g1/tools/data_tools/twist2lerobot_64_40.py:main",
+        "target": "func:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py:build_twist2_actions_from_recording",
+        "type": "calls",
+        "direction": "forward",
+        "weight": 0.8
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/tools/data_tools/sonic2lerobot_clean_64_40.py",
+        "target": "class:isaaclab_twist2_g1/tools/data_tools/sonic2lerobot_clean_64_40.py:EpisodeCleanStats",
+        "type": "contains",
+        "direction": "forward",
+        "weight": 1.0
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/tools/data_tools/sonic2lerobot_clean_64_40.py",
+        "target": "func:isaaclab_twist2_g1/tools/data_tools/sonic2lerobot_clean_64_40.py:build_clean_keep_mask",
+        "type": "contains",
+        "direction": "forward",
+        "weight": 1.0
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/tools/data_tools/sonic2lerobot_clean_64_40.py",
+        "target": "func:isaaclab_twist2_g1/tools/data_tools/sonic2lerobot_clean_64_40.py:main",
+        "type": "contains",
+        "direction": "forward",
+        "weight": 1.0
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/tools/data_tools/sonic2lerobot_clean_64_40.py",
+        "target": "file:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py",
+        "type": "imports",
+        "direction": "forward",
+        "weight": 0.7
+      },
+      {
+        "source": "func:isaaclab_twist2_g1/tools/data_tools/sonic2lerobot_clean_64_40.py:main",
+        "target": "func:isaaclab_twist2_g1/tools/data_tools/sonic2lerobot_clean_64_40.py:build_clean_keep_mask",
+        "type": "calls",
+        "direction": "forward",
+        "weight": 0.8
+      },
+      {
+        "source": "func:isaaclab_twist2_g1/tools/data_tools/sonic2lerobot_clean_64_40.py:main",
+        "target": "func:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py:extract_canonical_state",
+        "type": "calls",
+        "direction": "forward",
+        "weight": 0.8
+      },
+      {
+        "source": "func:isaaclab_twist2_g1/tools/data_tools/sonic2lerobot_clean_64_40.py:main",
+        "target": "func:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py:build_sonic_actions_from_recording",
+        "type": "calls",
+        "direction": "forward",
+        "weight": 0.8
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/tools/data_tools/verify_lerobot_smpl_vla.py",
+        "target": "func:isaaclab_twist2_g1/tools/data_tools/verify_lerobot_smpl_vla.py:verify_dataset_conversion",
+        "type": "contains",
+        "direction": "forward",
+        "weight": 1.0
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/tools/data_tools/verify_lerobot_smpl_vla.py",
+        "target": "file:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py",
+        "type": "imports",
+        "direction": "forward",
+        "weight": 0.7
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/tools/data_tools/verify_lerobot_smpl_vla.py",
+        "target": "file:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py",
+        "type": "imports",
+        "direction": "forward",
+        "weight": 0.7
+      },
+      {
+        "source": "func:isaaclab_twist2_g1/tools/data_tools/verify_lerobot_smpl_vla.py:verify_dataset_conversion",
+        "target": "func:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py:extract_canonical_state",
+        "type": "calls",
+        "direction": "forward",
+        "weight": 0.8
+      },
+      {
+        "source": "func:isaaclab_twist2_g1/tools/data_tools/verify_lerobot_smpl_vla.py:verify_dataset_conversion",
+        "target": "func:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py:build_twist2_actions_from_recording",
+        "type": "calls",
+        "direction": "forward",
+        "weight": 0.8
+      },
+      {
+        "source": "func:isaaclab_twist2_g1/tools/data_tools/verify_lerobot_smpl_vla.py:verify_dataset_conversion",
+        "target": "func:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py:build_sonic_actions_from_recording",
+        "type": "calls",
+        "direction": "forward",
+        "weight": 0.8
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py",
+        "target": "file:isaaclab_twist2_g1/tools/data_tools/test_smpl_lerobot_common.py",
+        "type": "tested_by",
+        "direction": "forward",
+        "weight": 0.5
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/tools/data_tools/test_smpl_lerobot_common.py",
+        "target": "file:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py",
+        "type": "imports",
+        "direction": "forward",
+        "weight": 0.7
+      },
+      {
+        "source": "file:README.md",
+        "target": "file:code_structure.md",
+        "type": "depends_on",
+        "direction": "forward",
+        "weight": 0.6
+      },
+      {
+        "source": "file:README.md",
+        "target": "file:isaaclab_twist2_g1/run_twist2.sh",
+        "type": "depends_on",
+        "direction": "forward",
+        "weight": 0.6
+      },
+      {
+        "source": "file:README.md",
+        "target": "file:isaaclab_twist2_g1/run_sonic.sh",
+        "type": "depends_on",
+        "direction": "forward",
+        "weight": 0.6
+      },
+      {
+        "source": "file:README.md",
+        "target": "file:TWIST2/deploy_real/xrobot_teleop_to_robot_w_hand.py",
+        "type": "depends_on",
+        "direction": "forward",
+        "weight": 0.6
+      },
+      {
+        "source": "file:code_structure.md",
+        "target": "file:isaaclab_twist2_g1/sim_main.py",
+        "type": "depends_on",
+        "direction": "forward",
+        "weight": 0.6
+      },
+      {
+        "source": "file:code_structure.md",
+        "target": "file:isaaclab_twist2_g1/action_provider/action_provider_wh_twist2.py",
+        "type": "depends_on",
+        "direction": "forward",
+        "weight": 0.6
+      },
+      {
+        "source": "file:code_structure.md",
+        "target": "file:TWIST2/deploy_real/xrobot_teleop_to_robot_w_hand.py",
+        "type": "depends_on",
+        "direction": "forward",
+        "weight": 0.6
+      },
+      {
+        "source": "file:code_structure.md",
+        "target": "file:isaaclab_twist2_g1/image_server/image_server.py",
+        "type": "depends_on",
+        "direction": "forward",
+        "weight": 0.6
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/run_twist2.sh",
+        "target": "file:isaaclab_twist2_g1/sim_main.py",
+        "type": "depends_on",
+        "direction": "forward",
+        "weight": 0.6
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/run_sonic.sh",
+        "target": "file:isaaclab_twist2_g1/sim_main.py",
+        "type": "depends_on",
+        "direction": "forward",
+        "weight": 0.6
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/run_vla.sh",
+        "target": "file:isaaclab_twist2_g1/sim_main.py",
+        "type": "depends_on",
+        "direction": "forward",
+        "weight": 0.6
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/run_vla.sh",
+        "target": "file:lerobot/scripts/serve_lerobot_vla_http.py",
+        "type": "depends_on",
+        "direction": "forward",
+        "weight": 0.6
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/docs/TWIST2_DATA_FORMAT.md",
+        "target": "file:isaaclab_twist2_g1/action_provider/action_provider_wh_twist2.py",
+        "type": "depends_on",
+        "direction": "forward",
+        "weight": 0.6
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/docs/VLA_PROPRIOCEPTION_FINAL.md",
+        "target": "file:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py",
+        "type": "depends_on",
+        "direction": "forward",
+        "weight": 0.6
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/docs/VLA_PROPRIOCEPTION_FINAL.md",
+        "target": "file:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py",
+        "type": "depends_on",
+        "direction": "forward",
+        "weight": 0.6
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/docs/CANONICAL_G1_ACTION.md",
+        "target": "file:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py",
+        "type": "depends_on",
+        "direction": "forward",
+        "weight": 0.6
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/docs/CANONICAL_G1_ACTION.md",
+        "target": "file:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py",
+        "type": "depends_on",
+        "direction": "forward",
+        "weight": 0.6
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/docs/CANONICAL_G1_ACTION.md",
+        "target": "file:isaaclab_twist2_g1/action_provider/action_provider_wh_twist2.py",
+        "type": "depends_on",
+        "direction": "forward",
+        "weight": 0.6
+      },
+      {
+        "source": "file:isaaclab_twist2_g1/docs/CANONICAL_G1_ACTION.md",
+        "target": "file:isaaclab_twist2_g1/action_provider/action_provider_sonic.py",
+        "type": "depends_on",
+        "direction": "forward",
+        "weight": 0.6
+      },
+      {
+        "source": "file:lerobot/train.sh",
+        "target": "file:isaaclab_twist2_g1/tools/data_tools/sonic2lerobot_clean_64_40.py",
+        "type": "depends_on",
+        "direction": "forward",
+        "weight": 0.6
+      },
+      {
+        "source": "file:lerobot/train_sonic.sh",
+        "target": "file:isaaclab_twist2_g1/tools/data_tools/twist2lerobot_64_40.py",
+        "type": "depends_on",
+        "direction": "forward",
+        "weight": 0.6
+      },
+      {
+        "source": "file:lerobot/scripts/serve_lerobot_vla_http.py",
+        "target": "class:lerobot/scripts/serve_lerobot_vla_http.py:LeRobotServerState",
+        "type": "contains",
+        "direction": "forward",
+        "weight": 1.0
+      }
+    ],
+    "layers": [
+      {
+        "id": "layer:operator-docs",
+        "name": "Operator Docs",
+        "description": "Repository and schema documents that explain how to start the stack and how recorded or canonical data should be interpreted.",
+        "nodeIds": [
+          "file:README.md",
+          "file:code_structure.md",
+          "file:isaaclab_twist2_g1/docs/TWIST2_DATA_FORMAT.md",
+          "file:isaaclab_twist2_g1/docs/VLA_PROPRIOCEPTION_FINAL.md",
+          "file:isaaclab_twist2_g1/docs/CANONICAL_G1_ACTION.md"
+        ]
+      },
+      {
+        "id": "layer:human-input",
+        "name": "Human Input Layer",
+        "description": "Live teleoperation and retargeting components that turn Pico or XRobot body tracking into robot-space commands and Redis pose streams.",
+        "nodeIds": [
+          "file:GMR/general_motion_retargeting/motion_retarget.py",
+          "class:GMR/general_motion_retargeting/motion_retarget.py:GeneralMotionRetargeting",
+          "file:TWIST2/deploy_real/xrobot_teleop_to_robot_w_hand.py",
+          "func:TWIST2/deploy_real/xrobot_teleop_to_robot_w_hand.py:extract_mimic_obs_whole_body",
+          "class:TWIST2/deploy_real/xrobot_teleop_to_robot_w_hand.py:XRobotTeleopToRobot",
+          "file:isaaclab_twist2_g1/pico_server/twist2_teleop_server.py",
+          "file:isaaclab_twist2_g1/pico_server/pico_server_pose_only.py"
+        ]
+      },
+      {
+        "id": "layer:simulation-runtime",
+        "name": "Simulation Runtime",
+        "description": "Isaac Lab entry scripts and orchestration code that boot the simulator, route control inputs, and keep cameras and environment state in sync.",
+        "nodeIds": [
+          "file:isaaclab_twist2_g1/run_twist2.sh",
+          "file:isaaclab_twist2_g1/run_sonic.sh",
+          "file:isaaclab_twist2_g1/run_vla.sh",
+          "file:isaaclab_twist2_g1/sim_main.py",
+          "func:isaaclab_twist2_g1/sim_main.py:main",
+          "file:isaaclab_twist2_g1/action_provider/create_action_provider.py",
+          "func:isaaclab_twist2_g1/action_provider/create_action_provider.py:create_action_provider",
+          "file:isaaclab_twist2_g1/image_server/image_server.py",
+          "class:isaaclab_twist2_g1/image_server/image_server.py:ImageServer"
+        ]
+      },
+      {
+        "id": "layer:control-backends",
+        "name": "Control Backends",
+        "description": "Backend providers and shared canonical runtime pieces that execute TWIST2 or SONIC control, replay, recording, and VLA inference inside Isaac Lab.",
+        "nodeIds": [
+          "file:isaaclab_twist2_g1/action_provider/action_provider_wh_twist2.py",
+          "class:isaaclab_twist2_g1/action_provider/action_provider_wh_twist2.py:RecordingManager",
+          "class:isaaclab_twist2_g1/action_provider/action_provider_wh_twist2.py:TWIST2ActionProvider",
+          "file:isaaclab_twist2_g1/action_provider/action_provider_sonic.py",
+          "class:isaaclab_twist2_g1/action_provider/action_provider_sonic.py:SonicActionProvider",
+          "file:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py",
+          "func:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py:build_vla_observation_state",
+          "func:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py:build_vla_action",
+          "class:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py:UnifiedSMPLActionRuntime",
+          "file:isaaclab_twist2_g1/action_provider/lerobot_vla_http_client.py",
+          "class:isaaclab_twist2_g1/action_provider/lerobot_vla_http_client.py:LeRobotVLAHttpClient",
+          "file:isaaclab_twist2_g1/action_provider/recording_common.py"
+        ]
+      },
+      {
+        "id": "layer:dataset-tooling",
+        "name": "Dataset Tooling",
+        "description": "Conversion, cleaning, and verification utilities that turn raw recordings into canonical 64 plus 40 LeRobot datasets and keep the mapping stable over time.",
+        "nodeIds": [
+          "file:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py",
+          "func:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py:extract_canonical_state",
+          "func:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py:build_twist2_actions_from_recording",
+          "func:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py:build_sonic_actions_from_recording",
+          "file:isaaclab_twist2_g1/tools/data_tools/twist2lerobot_64_40.py",
+          "func:isaaclab_twist2_g1/tools/data_tools/twist2lerobot_64_40.py:main",
+          "file:isaaclab_twist2_g1/tools/data_tools/sonic2lerobot_clean_64_40.py",
+          "class:isaaclab_twist2_g1/tools/data_tools/sonic2lerobot_clean_64_40.py:EpisodeCleanStats",
+          "func:isaaclab_twist2_g1/tools/data_tools/sonic2lerobot_clean_64_40.py:build_clean_keep_mask",
+          "func:isaaclab_twist2_g1/tools/data_tools/sonic2lerobot_clean_64_40.py:main",
+          "file:isaaclab_twist2_g1/tools/data_tools/verify_lerobot_smpl_vla.py",
+          "func:isaaclab_twist2_g1/tools/data_tools/verify_lerobot_smpl_vla.py:verify_dataset_conversion",
+          "file:isaaclab_twist2_g1/tools/data_tools/test_smpl_lerobot_common.py",
+          "file:lerobot/src/lerobot/scripts/twist22lerobot.py"
+        ]
+      },
+      {
+        "id": "layer:training-serving",
+        "name": "Training And Serving",
+        "description": "LeRobot-side training scripts and inference serving pieces that consume canonical datasets and send predicted actions back into Isaac Lab.",
+        "nodeIds": [
+          "file:lerobot/train.sh",
+          "file:lerobot/train_sonic.sh",
+          "file:lerobot/scripts/serve_lerobot_vla_http.py",
+          "class:lerobot/scripts/serve_lerobot_vla_http.py:LeRobotServerState"
+        ]
+      }
+    ],
+    "tour": [
+      {
+        "order": 1,
+        "title": "Read The Workflow Docs",
+        "description": "Start with the repository guide and the isaaclab-focused architecture note to align on the runtime order, major directories, and replay versus live terminology.",
+        "nodeIds": [
+          "file:README.md",
+          "file:code_structure.md"
+        ]
+      },
+      {
+        "order": 2,
+        "title": "Trace Human Motion To Robot Targets",
+        "description": "Follow live body data from XRobot or Pico into GMR retargeting and the TWIST2 or SONIC teleop publishers that create robot-space commands.",
+        "nodeIds": [
+          "file:TWIST2/deploy_real/xrobot_teleop_to_robot_w_hand.py",
+          "class:TWIST2/deploy_real/xrobot_teleop_to_robot_w_hand.py:XRobotTeleopToRobot",
+          "file:GMR/general_motion_retargeting/motion_retarget.py",
+          "class:GMR/general_motion_retargeting/motion_retarget.py:GeneralMotionRetargeting",
+          "file:isaaclab_twist2_g1/pico_server/pico_server_pose_only.py"
+        ]
+      },
+      {
+        "order": 3,
+        "title": "Enter IsaacLab Runtime",
+        "description": "Open the run scripts, then inspect sim_main and the provider factory to see how user-facing startup parameters become a concrete runtime backend.",
+        "nodeIds": [
+          "file:isaaclab_twist2_g1/run_twist2.sh",
+          "file:isaaclab_twist2_g1/run_sonic.sh",
+          "file:isaaclab_twist2_g1/sim_main.py",
+          "func:isaaclab_twist2_g1/sim_main.py:main",
+          "file:isaaclab_twist2_g1/action_provider/create_action_provider.py",
+          "func:isaaclab_twist2_g1/action_provider/create_action_provider.py:create_action_provider"
+        ]
+      },
+      {
+        "order": 4,
+        "title": "Inspect Live Backends",
+        "description": "Compare the TWIST2 and SONIC providers to understand where simulation stepping, replay, recording, and image streaming are actually performed.",
+        "nodeIds": [
+          "file:isaaclab_twist2_g1/action_provider/action_provider_wh_twist2.py",
+          "class:isaaclab_twist2_g1/action_provider/action_provider_wh_twist2.py:TWIST2ActionProvider",
+          "file:isaaclab_twist2_g1/action_provider/action_provider_sonic.py",
+          "class:isaaclab_twist2_g1/action_provider/action_provider_sonic.py:SonicActionProvider",
+          "file:isaaclab_twist2_g1/image_server/image_server.py"
+        ]
+      },
+      {
+        "order": 5,
+        "title": "Understand The Canonical 64 Plus 40 Schema",
+        "description": "Read the design docs beside vla_smpl_runtime to see how backend-specific commands are normalized into the project-wide state and action representation.",
+        "nodeIds": [
+          "file:isaaclab_twist2_g1/docs/VLA_PROPRIOCEPTION_FINAL.md",
+          "file:isaaclab_twist2_g1/docs/CANONICAL_G1_ACTION.md",
+          "file:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py",
+          "func:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py:build_vla_observation_state",
+          "func:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py:build_vla_action",
+          "class:isaaclab_twist2_g1/action_provider/vla_smpl_runtime.py:UnifiedSMPLActionRuntime"
+        ]
+      },
+      {
+        "order": 6,
+        "title": "Convert Recordings Into Datasets",
+        "description": "Use the shared conversion helpers, current TWIST2 and SONIC exporters, and the verifier to understand how raw episodes become stable LeRobot training data.",
+        "nodeIds": [
+          "file:isaaclab_twist2_g1/tools/data_tools/smpl_lerobot_common.py",
+          "file:isaaclab_twist2_g1/tools/data_tools/twist2lerobot_64_40.py",
+          "file:isaaclab_twist2_g1/tools/data_tools/sonic2lerobot_clean_64_40.py",
+          "file:isaaclab_twist2_g1/tools/data_tools/verify_lerobot_smpl_vla.py",
+          "file:isaaclab_twist2_g1/tools/data_tools/test_smpl_lerobot_common.py"
+        ]
+      },
+      {
+        "order": 7,
+        "title": "Train Or Serve Policies",
+        "description": "Finish on the LeRobot side: training scripts consume canonical datasets, the HTTP server exposes policy inference, and run_vla connects that service back into Isaac Lab.",
+        "nodeIds": [
+          "file:lerobot/train.sh",
+          "file:lerobot/train_sonic.sh",
+          "file:lerobot/scripts/serve_lerobot_vla_http.py",
+          "class:lerobot/scripts/serve_lerobot_vla_http.py:LeRobotServerState",
+          "file:isaaclab_twist2_g1/run_vla.sh",
+          "file:isaaclab_twist2_g1/action_provider/lerobot_vla_http_client.py"
+        ]
+      }
+    ]
+  }
+  

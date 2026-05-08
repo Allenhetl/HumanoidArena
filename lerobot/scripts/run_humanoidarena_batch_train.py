@@ -22,6 +22,7 @@ SUMMARY_FILENAME = "summary.json"
 EVENTS_FILENAME = "scheduler_events.jsonl"
 ACTIVE_LOG_SUFFIX = "__active.log"
 LOCK_FILENAME = "scheduler_job.lock"
+SCHEDULER_METADATA_FILENAMES = {SPEC_FILENAME, LOCK_FILENAME}
 
 
 def load_json(path: Path) -> Any:
@@ -256,7 +257,12 @@ def determine_existing_state(
             existing_spec = load_json(spec_path)
         except Exception as exc:
             return "conflict", False, [f"existing_spec_unreadable:{exc}"]
+        has_only_scheduler_metadata = all(
+            path.name in SCHEDULER_METADATA_FILENAMES for path in output_dir.iterdir()
+        )
         if normalize_spec(existing_spec) != normalize_spec(job.spec()):
+            if has_only_scheduler_metadata:
+                return "pending", False, ["metadata_only_output_dir_with_stale_scheduler_spec"]
             return "conflict", False, ["existing_spec_mismatch"]
         if job.expected_checkpoint_dir.is_dir():
             return "skip", False, ["completed_with_matching_scheduler_spec"]
@@ -268,7 +274,7 @@ def determine_existing_state(
             resume_state = should_resume_incomplete(job, latest_train_cfg_path, resume_incomplete_jobs)
             if resume_state is not None:
                 return resume_state
-        has_non_spec_contents = any(path.name not in {SPEC_FILENAME, "wandb"} for path in output_dir.iterdir())
+        has_non_spec_contents = any(path.name not in {SPEC_FILENAME, "wandb", LOCK_FILENAME} for path in output_dir.iterdir())
         if not has_non_spec_contents:
             return "pending", False, ["scheduler_spec_without_checkpoint"]
         if resume_incomplete_jobs:
@@ -434,8 +440,22 @@ def job_active_log_path(job: Job, log_root: Path) -> Path:
     return log_root / f"{job.job_name}{ACTIVE_LOG_SUFFIX}"
 
 
+def cleanup_metadata_only_output_dir(output_dir: Path) -> None:
+    if not output_dir.is_dir():
+        return
+    entries = list(output_dir.iterdir())
+    if not entries or any(path.name not in SCHEDULER_METADATA_FILENAMES for path in entries):
+        return
+    for path in entries:
+        path.unlink()
+    try:
+        output_dir.rmdir()
+    except OSError:
+        pass
+
+
 def job_lock_path(job: Job) -> Path:
-    return job.output_dir / LOCK_FILENAME
+    return job.output_dir.parent / "scheduler_logs" / "locks" / f"{job.job_name}.lock"
 
 
 def _archive_existing_file(path: Path, suffix: str) -> None:
@@ -618,7 +638,8 @@ def launch_job(job: Job, scheduler_cfg: dict[str, Any], log_root: Path, lock_sta
     active_log_path = job_active_log_path(job, log_root)
     lock_path = job_lock_path(job)
 
-    job.output_dir.mkdir(parents=True, exist_ok=True)
+    cleanup_metadata_only_output_dir(job.output_dir)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
     if not _clear_stale_job_claim(job, log_root, lock_stale_seconds):
         raise FileExistsError(f"Job lock already exists for {job.job_name}: {lock_path}")
 
@@ -640,7 +661,7 @@ def launch_job(job: Job, scheduler_cfg: dict[str, Any], log_root: Path, lock_sta
         log_fp.write(f"# created_at={datetime.now().isoformat(timespec='seconds')}\n")
         log_fp.write(f"# hostname={socket.gethostname()}\n")
 
-        dump_json(job.output_dir / SPEC_FILENAME, job.spec())
+        dump_json(log_root / "specs" / f"{job.job_name}.json", job.spec())
 
         cmd, env = build_command(job, scheduler_cfg)
         process = subprocess.Popen(
@@ -730,8 +751,20 @@ def scan_jobs(scheduler_cfg: dict[str, Any], model_cfgs: dict[str, dict[str, Any
     return jobs
 
 
-def sort_jobs_for_queue(jobs: list[Job]) -> list[Job]:
-    return sorted(jobs, key=lambda j: (-j.priority, j.task_name, j.dataset_kind, j.dataset_dir_name, j.job_name))
+def sort_jobs_for_queue(
+    jobs: list[Job],
+    dataset_kind_order: list[str] | None = None,
+    model_order: list[str] | None = None,
+) -> list[Job]:
+    order = {str(kind): index for index, kind in enumerate(dataset_kind_order or [])}
+    model_rank = {str(alias): index for index, alias in enumerate(model_order or [])}
+
+    def sort_key(job: Job) -> tuple[str, int, str, int, str, int, str]:
+        kind_rank = order.get(job.dataset_kind, len(order))
+        alias_rank = model_rank.get(job.model_alias, len(model_rank))
+        return (job.task_name, kind_rank, job.dataset_kind, alias_rank, job.model_alias, -job.priority, job.job_name)
+
+    return sorted(jobs, key=sort_key)
 
 
 def print_plan(jobs: list[Job], scheduler_cfg: dict[str, Any]) -> None:
@@ -760,7 +793,9 @@ def print_plan(jobs: list[Job], scheduler_cfg: dict[str, Any]) -> None:
     print(f"single_gpu_capacity_by_gpu: {single_gpu_capacity_by_gpu}")
     print(f"wandb_project     : {scheduler_cfg.get('wandb_project', '')}")
     print("-" * 100)
-    for job in jobs:
+    dataset_kind_order = [str(kind) for kind in scheduler_cfg.get("dataset_kind_order", [])]
+    model_order = [str(alias) for alias in scheduler_cfg.get("model_order", [])]
+    for job in sort_jobs_for_queue(jobs, dataset_kind_order, model_order):
         note = f" notes={job.notes}" if job.notes else ""
         print(f"{job.status:>8} | {job.job_name:<40} | dataset={job.dataset_root}{note}")
     print("=" * 100)
@@ -823,8 +858,18 @@ def main() -> int:
         single_gpu_model_aliases_cfg = [alias for alias in scheduler_cfg.get("model_order", []) if alias not in pi05_model_aliases]
     single_gpu_model_aliases = set(str(alias) for alias in single_gpu_model_aliases_cfg)
 
-    pi_queue = sort_jobs_for_queue([job for job in jobs if job.model_alias in pi05_model_aliases and job.status in {"pending", "resume"}])
-    single_queue = sort_jobs_for_queue([job for job in jobs if job.model_alias in single_gpu_model_aliases and job.status in {"pending", "resume"}])
+    dataset_kind_order = [str(kind) for kind in scheduler_cfg.get("dataset_kind_order", [])]
+    model_order = [str(alias) for alias in scheduler_cfg.get("model_order", [])]
+    pi_queue = sort_jobs_for_queue(
+        [job for job in jobs if job.model_alias in pi05_model_aliases and job.status in {"pending", "resume"}],
+        dataset_kind_order,
+        model_order,
+    )
+    single_queue = sort_jobs_for_queue(
+        [job for job in jobs if job.model_alias in single_gpu_model_aliases and job.status in {"pending", "resume"}],
+        dataset_kind_order,
+        model_order,
+    )
 
     poll_seconds = int(scheduler_cfg.get("poll_interval_seconds", 15))
     raw_pi05_gpu_groups = scheduler_cfg.get("pi05_gpu_groups")
@@ -870,6 +915,8 @@ def main() -> int:
             _update_job_lock(job, training_pid=process.pid)
             return False
         finalize_job_log(job, process, log_root)
+        if job.output_dir.exists():
+            dump_json(job.output_dir / SPEC_FILENAME, job.spec())
         try:
             job_lock_path(job).unlink()
         except FileNotFoundError:

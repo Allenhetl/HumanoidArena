@@ -1,0 +1,34 @@
+{
+  "total_jobs": 60,
+  "completed_results": 60,
+  "pending_results": 0,
+  "total_successes": 9,
+  "total_failures": 51,
+  "workers_per_device": 2,
+  "total_worker_slots": 16,
+  "models_total": 1,
+  "models_completed": 1,
+  "server_devices": [
+    "cuda:0",
+    "cuda:1",
+    "cuda:2",
+    "cuda:3",
+    "cuda:4",
+    "cuda:5",
+    "cuda:6",
+    "cuda:7"
+  ],
+  "server_port_base": 15001,
+  "server_port_max": 20000,
+  "overall_success_rate": 0.15,
+  "result_reason_counts": {
+    "fall": 15,
+    "success": 9,
+    "timeout": 36
+  },
+  "failure_reason_counts": {
+    "fall": 15,
+    "timeout": 36
+  },
+  "persistent_sim": true
+}

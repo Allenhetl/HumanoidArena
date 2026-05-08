@@ -1,0 +1,31 @@
+task,model_label,arch,backend,seeds,repeats_per_seed,seed_0,seed_1,seed_2,mean,std,total_eps,total_successes
+test1w_HOI_football_twist2_mix_1300_60_20260429_182638,act_twist2_football_0416__100000,act,twist2,3,20,0.3500,0.3000,0.5500,0.4000,0.1323,60,24
+test1w_HOI_football_twist2_mix_1300_60_20260429_182638,diffusion_twist2_football_0416__100000,diffusion,twist2,3,20,0.6500,0.4500,0.4500,0.5167,0.1155,60,31
+test1w_HOI_football_twist2_mix_1300_60_20260429_182638,mtp_twist2_football_0416__100000,mtp,twist2,3,20,0.4500,0.6500,0.4500,0.5167,0.1155,60,31
+test1w_1test_HOI_double_desk_twist2_batch_2000_mix_20260429_203033,act_twist2_doubledesk_0418__100000,act,twist2,3,20,0.1000,0.2500,0.1000,0.1500,0.0866,60,9
+test1w_1test_HOI_double_desk_twist2_batch_2000_mix_20260429_203033,diffusion_twist2_doubledesk_0418__100000,diffusion,twist2,3,20,0.1000,0.1000,0.2000,0.1333,0.0577,60,8
+test1w_1test_HOI_double_desk_twist2_batch_2000_mix_20260429_203033,mtp_twist2_doubledesk_0418__100000,mtp,twist2,3,20,0.1000,0.1500,0.1000,0.1167,0.0289,60,7
+test1w_1test_HOI_pp_box_twist2_batch_2000_mix_20260429_233411,act_twist2_ppbox_0421__100000,act,twist2,3,20,0.3000,0.2500,0.2000,0.2500,0.0500,60,15
+test1w_1test_HOI_pp_box_twist2_batch_2000_mix_20260429_233411,diffusion_twist2_ppbox_0421__100000,diffusion,twist2,3,20,0.3000,0.4000,0.4500,0.3833,0.0764,60,23
+test1w_1test_HOI_pp_box_twist2_batch_2000_mix_20260429_233411,mtp_twist2_ppbox_0421__100000,mtp,twist2,3,20,0.3000,0.2500,0.4500,0.3333,0.1041,60,20
+test1w_1test_HSI_open_door_twist2_batch_2000_mix_20260430_112246,act_twist2_opendoor_0421__100000,act,twist2,3,20,0.3000,0.4500,0.3500,0.3667,0.0764,60,22
+test1w_1test_HSI_open_door_twist2_batch_2000_mix_20260430_112246,diffusion_twist2_opendoor_0421__100000,diffusion,twist2,3,20,0.3500,0.4000,0.3000,0.3500,0.0500,60,21
+test1w_1test_HSI_open_door_twist2_batch_2000_mix_20260430_112246,mtp_twist2_opendoor_0421__100000,mtp,twist2,3,20,0.6000,0.7500,0.6000,0.6500,0.0866,60,39
+test1w_1test_HSI_sit_sofa_twist2_batch_2000_mix_20260430_074149,act_twist2_sitsofa_0423__100000,act,twist2,3,20,0.6500,0.5000,0.5000,0.5500,0.0866,60,33
+test1w_1test_HSI_sit_sofa_twist2_batch_2000_mix_20260430_074149,diffusion_twist2_sitsofa_0423__100000,diffusion,twist2,3,20,0.5500,0.2500,0.5500,0.4500,0.1732,60,27
+test1w_1test_HSI_sit_sofa_twist2_batch_2000_mix_20260430_074149,mtp_twist2_sitsofa_0423__100000,mtp,twist2,3,20,0.6500,0.5500,0.7000,0.6333,0.0764,60,38
+test1w_1test_HSI_vision_navi_twist2_batch_2000_mix_20260430_090449,act_twist2_visionnavi_0419__100000,act,twist2,3,20,0.1500,0.5000,0.4500,0.3667,0.1893,60,22
+test1w_1test_HSI_vision_navi_twist2_batch_2000_mix_20260430_090449,diffusion_twist2_visionnavi_0419__100000,diffusion,twist2,3,20,0.4500,0.4000,0.6500,0.5000,0.1323,60,30
+test1w_1test_HSI_vision_navi_twist2_batch_2000_mix_20260430_090449,mtp_twist2_visionnavi_0419__100000,mtp,twist2,3,20,0.2000,0.5500,0.5000,0.4167,0.1893,60,25
+test1w_1test_HSI_boxing_twist2_batch_2000_mix_20260430_063416,act_twist2_boxing_0424__100000,act,twist2,3,20,0.7000,0.5500,0.7500,0.6667,0.1041,60,40
+test1w_1test_HSI_boxing_twist2_batch_2000_mix_20260430_063416,diffusion_twist2_boxing_0424__100000,diffusion,twist2,3,20,0.5500,0.5500,0.6500,0.5833,0.0577,60,35
+test1w_1test_HSI_boxing_twist2_batch_2000_mix_20260430_063416,mtp_twist2_boxing_0424__100000,mtp,twist2,3,20,0.7000,0.4500,0.7000,0.6167,0.1443,60,37
+
+SUMMARY (aggregate by arch + HOI/HSI group)
+arch,group,num_tasks,task_means,aggregate_mean,aggregate_std
+act,HOI,3,0.4000 | 0.1500 | 0.2500,0.2667,0.1258
+act,HSI,4,0.3667 | 0.5500 | 0.3667 | 0.6667,0.4875,0.1474
+diffusion,HOI,3,0.5167 | 0.1333 | 0.3833,0.3444,0.1946
+diffusion,HSI,4,0.3500 | 0.4500 | 0.5000 | 0.5833,0.4708,0.0975
+mtp,HOI,3,0.5167 | 0.1167 | 0.3333,0.3222,0.2002
+mtp,HSI,4,0.6500 | 0.6333 | 0.4167 | 0.6167,0.5792,0.1092

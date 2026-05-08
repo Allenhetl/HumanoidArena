@@ -19,7 +19,7 @@ OBSTACLE_01_ASSET_SCALE = (1.0,1.0,1.0)
 OBSTACLE_02_ASSET_SCALE = (1.0,1.0,1.0)
 ROOM_USD_PATH = (
     f"{project_root}/assets/objects/small_warehouse/"
-    "small_warehouse_vision_navigation/small_warehouse_digital_twin.usd"
+    "small_warehouse_vision_navigation/small_warehouse_digital_twin_validation.usd"
 )
 TARGET_USD_PATH = (
     f"{project_root}/assets/objects/small_warehouse/small_warehouse_vision_navigation/"

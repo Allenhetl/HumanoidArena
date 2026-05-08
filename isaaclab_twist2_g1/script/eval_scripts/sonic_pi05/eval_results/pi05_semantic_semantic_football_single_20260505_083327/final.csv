@@ -1,0 +1,2 @@
+model,success_rate,seed_success_rate_std,avg_success_steps,fall_in_failures
+pi0.5_100000__100000,3/60 (5.0%),4.1%,495.0,3/57 (5.3%)

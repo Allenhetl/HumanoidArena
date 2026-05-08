@@ -149,3 +149,70 @@ def apply_optional_runtime_augments(args_cli: Any) -> None:
             )
         except Exception as exc:
             print(f"[env_runtime] modify_camera failed: {exc}")
+"""Vision test hooks: replace DomeLight with DistantLight and randomize per episode."""
+
+
+def setup_vision_test_light(prim_path: str = "/World/light") -> None:
+    """
+    Called once after gym.make to replace the default light (typically DomeLight)
+    with a DistantLight that supports rotation-based randomization.
+
+    This enables vision-level testing where light direction is randomized
+    per episode to evaluate model robustness to lighting variations.
+    """
+    try:
+        from tools.augmentation_utils import replace_light_with_distant
+
+        replace_light_with_distant(
+            prim_path=prim_path,
+            color=(0.75, 0.75, 0.75),
+            intensity=5000.0,
+            angle=15.0,
+            position=(-4.0, -1.0, 18.0),
+            rotation=(0.0, 0.0, 0.0),
+        )
+        print(f"[vision_test] DistantLight setup complete: {prim_path}")
+    except Exception as exc:
+        print(f"[vision_test] setup_vision_test_light failed: {exc}")
+
+
+def apply_vision_light_randomization(
+    prim_path: str = "/World/light",
+    episode_seed: int = 0,
+    rotation_ranges: dict = None,
+    intensity_range: list = None,
+    color_range: dict = None,
+    position_range: dict = None,
+) -> None:
+    """
+    Called per episode to deterministically randomize the DistantLight parameters.
+
+    Uses episode_seed to derive reproducible random values within the given ranges.
+    Same episode_seed always produces the same lighting configuration.
+
+    Args:
+        prim_path: Light prim path to modify
+        episode_seed: Seed for deterministic randomization
+        rotation_ranges: {"yaw_deg": [min, max], "pitch_deg": [min, max], "roll_deg": [min, max]}
+        intensity_range: [min, max] or None
+        color_range: {"r": [min, max], "g": [min, max], "b": [min, max]} or None
+        position_range: {"x": [min, max], "y": [min, max], "z": [min, max]} or None
+    """
+    if not rotation_ranges:
+        return
+
+    try:
+        from tools.augmentation_utils import randomize_light_from_range
+
+        # Derive sub-seed for light randomization to avoid correlation with object seed
+        light_seed = int(episode_seed) ^ 0x1A2B3C4D
+        randomize_light_from_range(
+            prim_path=prim_path,
+            seed=light_seed,
+            rotation_ranges=rotation_ranges,
+            intensity_range=intensity_range,
+            color_range=color_range,
+            position_range=position_range,
+        )
+    except Exception as exc:
+        print(f"[vision_test] apply_vision_light_randomization failed: {exc}")

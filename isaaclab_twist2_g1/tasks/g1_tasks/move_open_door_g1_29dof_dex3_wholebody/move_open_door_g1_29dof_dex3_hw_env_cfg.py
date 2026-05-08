@@ -1,3 +1,8 @@
+import os
+
+import torch
+
+import isaaclab.envs.mdp as base_mdp
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
@@ -7,7 +12,9 @@ from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
 
 from . import mdp
+from common_env_objects import apply_deterministic_object_resets
 from tasks.common_config import CameraPresets, G1RobotPresets
+from tasks.common_event.event_manager import SimpleEvent, SimpleEventManager
 from tasks.common_scene.base_scene_open_door import OpenDoorSceneCfg
 
 ROBOT_INIT_POS = (-1.6, 0.2, 0.8)
@@ -99,6 +106,8 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
         self.episode_length_s = 20.0
         # Allow YAML override via tasks/common_env_config/*.yaml.
         self.object_reset_seed_source = "env_seed"
+        self.deterministic_object_resets = []
+        self._replay_initial_env_state_active = False
 
         self.sim.dt = 0.005
         self.scene.contact_forces.update_period = self.sim.dt
@@ -113,9 +122,42 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physics_material.friction_combine_mode = "max"
         self.sim.physics_material.restitution_combine_mode = "max"
 
+        self.event_manager = SimpleEventManager()
+        self.event_manager.register(
+            "reset_object_self",
+            SimpleEvent(func=lambda env: self._reset_object_self(env)),
+        )
+        self.event_manager.register(
+            "reset_all_self",
+            SimpleEvent(func=lambda env: self._reset_all_self(env)),
+        )
+
     def initialize_task_scene(self, env, args_cli=None):
+        self._replay_initial_env_state_active = bool(getattr(args_cli, "replay_file", "")) if args_cli else False
         self._disable_overlapping_room_gate_collisions()
         self._configure_door_joint_physics(env)
+
+    def _reset_object_self(self, env):
+        applied = apply_deterministic_object_resets(
+            self,
+            env,
+            selected_record_names={"door"},
+        )
+        if applied:
+            print("[object_reset] " + ", ".join(applied))
+
+    def _reset_all_self(self, env):
+        base_mdp.reset_scene_to_default(
+            env,
+            torch.arange(env.num_envs, device=env.device),
+        )
+        applied = apply_deterministic_object_resets(
+            self,
+            env,
+            selected_record_names={"door"},
+        )
+        if applied:
+            print("[object_reset] " + ", ".join(applied))
 
     def _disable_overlapping_room_gate_collisions(self):
         try:
@@ -165,6 +207,13 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
 
             stage = omni.usd.get_context().get_stage()
             door_asset = env.scene["door"]
+            if not hasattr(door_asset, "find_joints"):
+                print(
+                    "[open_door] scheme_a_assetbase active: door scene asset has no find_joints(); "
+                    "skip articulation joint runtime overrides"
+                )
+                return
+
             door_joint_ids, _ = door_asset.find_joints(["RevoluteJoint_door001"], preserve_order=True)
             handle_joint_ids, _ = door_asset.find_joints(["RevoluteJoint_handle001"], preserve_order=True)
             door_joint = stage.GetPrimAtPath(

@@ -1,0 +1,88 @@
+{
+  "total_episodes": 52,
+  "total_successes": 0,
+  "total_failures": 52,
+  "overall_success_rate": 0.0,
+  "result_reason_counts": {
+    "fall": 4,
+    "timeout": 48
+  },
+  "failure_reason_counts": {
+    "fall": 4,
+    "timeout": 48
+  },
+  "episode_seed_formula": "sha256(task_name|group_seed|repeat_idx)_positive_int32",
+  "per_model": {
+    "pi0.5_100000__100000": {
+      "model_path": "/ai/Yichi/taowen/ckpts/0424_new_100000/pi0.5_100000/Pi0.5_sonic_doubledesk_0418_100000/100000/pretrained_model",
+      "episodes": 52,
+      "successes": 0,
+      "failures": 52,
+      "result_reason_counts": {
+        "fall": 4,
+        "timeout": 48
+      },
+      "failure_reason_counts": {
+        "fall": 4,
+        "timeout": 48
+      },
+      "per_seed": {
+        "0": {
+          "episodes": 19,
+          "successes": 0,
+          "failures": 19,
+          "result_reason_counts": {
+            "fall": 1,
+            "timeout": 18
+          },
+          "failure_reason_counts": {
+            "fall": 1,
+            "timeout": 18
+          },
+          "success_rate": 0.0
+        },
+        "1": {
+          "episodes": 18,
+          "successes": 0,
+          "failures": 18,
+          "result_reason_counts": {
+            "fall": 2,
+            "timeout": 16
+          },
+          "failure_reason_counts": {
+            "fall": 2,
+            "timeout": 16
+          },
+          "success_rate": 0.0
+        },
+        "2": {
+          "episodes": 15,
+          "successes": 0,
+          "failures": 15,
+          "result_reason_counts": {
+            "fall": 1,
+            "timeout": 14
+          },
+          "failure_reason_counts": {
+            "fall": 1,
+            "timeout": 14
+          },
+          "success_rate": 0.0
+        }
+      },
+      "success_rate": 0.0,
+      "per_seed_success_rate": {
+        "0": 0.0,
+        "1": 0.0,
+        "2": 0.0
+      },
+      "repeats_per_seed": {
+        "0": 19,
+        "1": 18,
+        "2": 15
+      },
+      "seed_success_rate_mean": 0.0,
+      "seed_success_rate_std": 0.0
+    }
+  }
+}

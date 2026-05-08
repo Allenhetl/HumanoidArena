@@ -1,0 +1,88 @@
+{
+  "total_episodes": 60,
+  "total_successes": 2,
+  "total_failures": 58,
+  "overall_success_rate": 0.03333333333333333,
+  "result_reason_counts": {
+    "fall": 1,
+    "success": 2,
+    "timeout": 57
+  },
+  "failure_reason_counts": {
+    "fall": 1,
+    "timeout": 57
+  },
+  "episode_seed_formula": "sha256(task_name|group_seed|repeat_idx)_positive_int32",
+  "per_model": {
+    "pi0.5_100000__100000": {
+      "model_path": "/ai/Yichi/taowen/ckpts/0424_new_100000/pi0.5_100000/Pi0.5_sonic_football_0416_100000/100000/pretrained_model",
+      "episodes": 60,
+      "successes": 2,
+      "failures": 58,
+      "result_reason_counts": {
+        "fall": 1,
+        "success": 2,
+        "timeout": 57
+      },
+      "failure_reason_counts": {
+        "fall": 1,
+        "timeout": 57
+      },
+      "per_seed": {
+        "0": {
+          "episodes": 20,
+          "successes": 1,
+          "failures": 19,
+          "result_reason_counts": {
+            "success": 1,
+            "timeout": 19
+          },
+          "failure_reason_counts": {
+            "timeout": 19
+          },
+          "success_rate": 0.05
+        },
+        "1": {
+          "episodes": 20,
+          "successes": 0,
+          "failures": 20,
+          "result_reason_counts": {
+            "timeout": 20
+          },
+          "failure_reason_counts": {
+            "timeout": 20
+          },
+          "success_rate": 0.0
+        },
+        "2": {
+          "episodes": 20,
+          "successes": 1,
+          "failures": 19,
+          "result_reason_counts": {
+            "fall": 1,
+            "success": 1,
+            "timeout": 18
+          },
+          "failure_reason_counts": {
+            "fall": 1,
+            "timeout": 18
+          },
+          "success_rate": 0.05
+        }
+      },
+      "success_rate": 0.03333333333333333,
+      "per_seed_success_rate": {
+        "0": 0.05,
+        "1": 0.0,
+        "2": 0.05
+      },
+      "repeats_per_seed": {
+        "0": 20,
+        "1": 20,
+        "2": 20
+      },
+      "seed_success_rate_mean": 0.03333333333333333,
+      "seed_success_rate_std": 0.023570226039551587
+    }
+  }
+}

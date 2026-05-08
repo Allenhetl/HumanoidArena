@@ -6,7 +6,8 @@ fi
 readonly _VLA_MODEL_BATCH_UTILS_SH=1
 
 # DEFAULT_BATCH_MODEL_ROOT="/ai/Yichi/taowen/ckpts/mnt/workspace/users/xujunzhe/yunhengwang/lerobot/lerobot/results/train"
-DEFAULT_BATCH_MODEL_ROOT="/ai/Yichi/taowen/ckpts/0422"
+# DEFAULT_BATCH_MODEL_ROOT="/ai/Yichi/taowen/ckpts/0421"
+DEFAULT_BATCH_MODEL_ROOT="/ai/Yichi/taowen/ckpts/HumanoidArena_test/HOI_double_desk"
 readonly DEFAULT_BATCH_MODEL_ROOT
 
 trim_model_batch_value() {

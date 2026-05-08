@@ -208,3 +208,97 @@ def batch_augment_cameras_by_name(
 
 
 
+# ------------------------------
+# Vision Test: Replace existing light with DistantLight and enable randomization
+def replace_light_with_distant(
+    prim_path: str = "/World/light",
+    color=(0.75, 0.75, 0.75),
+    intensity=5000.0,
+    angle=15.0,
+    position=(-4.0, -1.0, 18.0),
+    rotation=(0.0, 0.0, 0.0),
+):
+    """
+    Delete existing light prim at prim_path and create a DistantLight in its place.
+    Used in vision tests to replace default DomeLight with a directional light
+    that supports rotation randomization for lighting robustness evaluation.
+    """
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
+        raise RuntimeError("[replace_light] USD Stage not initialized")
+
+    existing = stage.GetPrimAtPath(prim_path)
+    old_type = existing.GetTypeName() if existing.IsValid() else "None"
+    if existing.IsValid():
+        stage.RemovePrim(prim_path)
+        print(f"[replace_light] removed existing light: {prim_path} (type: {old_type})")
+
+    distlight = UsdLux.DistantLight.Define(stage, prim_path)
+    distlight.CreateColorAttr().Set(Gf.Vec3f(*color))
+    distlight.CreateIntensityAttr().Set(intensity)
+    distlight.CreateAngleAttr().Set(angle)
+
+    safe_set_attr(distlight.GetPrim(), "xformOp:translate", Gf.Vec3f(*position), Sdf.ValueTypeNames.Float3)
+    safe_set_attr(distlight.GetPrim(), "xformOp:rotateXYZ", Gf.Vec3f(*rotation), Sdf.ValueTypeNames.Float3)
+
+    print(f"[replace_light] DistantLight created: {prim_path} (old type: {old_type})")
+
+
+def randomize_light_from_range(
+    prim_path: str = "/World/light",
+    seed: int = 0,
+    rotation_ranges: dict = None,
+    intensity_range: list = None,
+    color_range: dict = None,
+    position_range: dict = None,
+):
+    """
+    Deterministically randomize DistantLight parameters within given ranges
+    based on seed. Same seed always produces same result for reproducibility.
+
+    Args:
+        prim_path: Light prim path
+        seed: Random seed for deterministic randomization
+        rotation_ranges: {"yaw_deg": [min, max], "pitch_deg": [min, max], "roll_deg": [min, max]}
+        intensity_range: [min, max]
+        color_range: {"r": [min, max], "g": [min, max], "b": [min, max]}
+        position_range: {"x": [min, max], "y": [min, max], "z": [min, max]}
+    """
+    import random as _random
+    rng = _random.Random(int(seed))
+
+    rotation = [0.0, 0.0, 0.0]
+    if rotation_ranges:
+        yaw = rng.uniform(*rotation_ranges.get("yaw_deg", [0.0, 0.0]))
+        pitch = rng.uniform(*rotation_ranges.get("pitch_deg", [0.0, 0.0]))
+        roll = rng.uniform(*rotation_ranges.get("roll_deg", [0.0, 0.0]))
+        rotation = [pitch, roll, yaw]
+        print(f"[randomize_light] seed={seed} rot=(pitch={pitch:.1f}, roll={roll:.1f}, yaw={yaw:.1f})")
+
+    intensity = None
+    if intensity_range and len(intensity_range) >= 2:
+        intensity = rng.uniform(intensity_range[0], intensity_range[1])
+        print(f"[randomize_light] seed={seed} intensity={intensity:.0f}")
+
+    color = None
+    if color_range:
+        r = rng.uniform(*color_range.get("r", [0.75, 0.75]))
+        g = rng.uniform(*color_range.get("g", [0.75, 0.75]))
+        b = rng.uniform(*color_range.get("b", [0.75, 0.75]))
+        color = (r, g, b)
+        print(f"[randomize_light] seed={seed} color=({r:.2f}, {g:.2f}, {b:.2f})")
+
+    position = None
+    if position_range:
+        x = rng.uniform(*position_range.get("x", [-4.0, -4.0]))
+        y = rng.uniform(*position_range.get("y", [-1.0, -1.0]))
+        z = rng.uniform(*position_range.get("z", [18.0, 18.0]))
+        position = (x, y, z)
+
+    update_light(
+        prim_path=prim_path,
+        rotation=rotation,
+        intensity=intensity if intensity is not None else 5000.0,
+        color=color if color is not None else (0.75, 0.75, 0.75),
+        position=position,
+    )

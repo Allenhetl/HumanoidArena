@@ -330,6 +330,7 @@ def _initialize_task_scene(env, env_cfg, args_cli):
         print(f"[env_runtime] init setup failed: {exc}")
 
 
+
 def _resolve_wrist_camera_pair(args_cli, env_cfg):
     from tasks.common_config import CameraPresets
 
@@ -1300,6 +1301,7 @@ def main():
                         print(f"[sim_main] {exc}")
                         controller.stop()
                         break
+
 
                     if _should_exit_after_replay_complete(action_provider, args_cli):
                         print("[sim_main] Replay reached EOF and requested exit; stopping controller")
