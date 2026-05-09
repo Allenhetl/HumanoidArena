@@ -19,8 +19,8 @@ overrides:
     - record_name: box
       scene_keys: [box, Box]
       pose_range:
-        x: [-0.58, -0.58]
-        y: [-5.63, -5.63]
+        x: [-0.58, -0.40]
+        y: [-5.63, -3.92]
         z: [0.75, 0.75]
         yaw: [-0.785398, 0.785398]
       zero_velocity_on_reset: true

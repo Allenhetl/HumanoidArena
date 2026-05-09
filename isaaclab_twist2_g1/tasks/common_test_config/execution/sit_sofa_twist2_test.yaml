@@ -19,16 +19,16 @@ overrides:
     - record_name: carton_obstacle_01
       scene_keys: [carton_obstacle_01, CartonObstacle01]
       pose_range:
-        x: [-2.1, -1.7]
-        y: [0.6, 0.8]
+        x: [-2.6, -1.7]
+        y: [0.75, 0.95]
         z: [0.1, 0.1]
         yaw: [0, 0]
       zero_velocity_on_reset: true
     - record_name: carton_obstacle_02
       scene_keys: [carton_obstacle_02, CartonObstacle02]
       pose_range:
-        x: [-1.7, -2.3]
-        y: [-0.1, 0.4]
+        x: [-2.4, -1.7]
+        y: [-0.4, 0.2]
         z: [0.1, 0.1]
         yaw: [0, 0]
       zero_velocity_on_reset: true
