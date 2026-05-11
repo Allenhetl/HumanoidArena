@@ -27,10 +27,10 @@ from smpl_lerobot_v2_common import (
 
 
 DEFAULT_INPUT_ROOT = Path(
-    "/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_grapcup/sonic_v2"
+    "/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_grap_cup/sonic"
 )
 DEFAULT_OUTPUT_ROOT = Path(
-    "/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/HumanoidArena_datasets/HOI_grap_cup/sonic_localdelta_v2"
+    "/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/HumanoidArena_datasets_v2/HOI_grap_cup/sonic_localdelta_v2"
 )
 DEFAULT_REPO_ID = "local/sonic_localdelta_v2"
 
