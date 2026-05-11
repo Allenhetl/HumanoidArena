@@ -288,6 +288,7 @@ def render_frames(
     max_frames: int,
     stride: int,
     mujoco_gl: str | None,
+    frames_dir: bool,
 ) -> None:
     import imageio.v2 as imageio
 
@@ -343,15 +344,32 @@ def render_frames(
         front_source.close()
         renderer.close()
 
-    output_path = output_path.expanduser().resolve()
+    if not frames:
+        raise ValueError("No frames were selected for rendering.")
+
+    output_path = resolve_render_output_path(output_path, frames_dir=frames_dir)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    if output_path.suffix.lower() == ".mp4":
+    if not frames_dir:
         imageio.mimsave(output_path, frames, fps=max(int(fps / max(int(stride), 1)), 1))
         return
 
     output_path.mkdir(parents=True, exist_ok=True)
     for idx, frame in enumerate(frames):
         imageio.imwrite(output_path / f"frame_{idx:06d}.png", frame)
+
+
+def resolve_render_output_path(output_path: Path, *, frames_dir: bool) -> Path:
+    path = output_path.expanduser().resolve()
+    if frames_dir:
+        return path
+    if path.suffix.lower() == ".mp4":
+        return path
+    if path.suffix == "":
+        return path.with_suffix(".mp4")
+    raise ValueError(
+        f"Output must be an .mp4 file or a path without suffix, got: {path}. "
+        "Use --frames-dir if you intentionally want a PNG frame directory."
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -369,6 +387,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-frames", type=int, default=300)
     parser.add_argument("--stride", type=int, default=1)
     parser.add_argument(
+        "--frames-dir",
+        action="store_true",
+        help="Write individual PNG frames to --output instead of an mp4 video.",
+    )
+    parser.add_argument(
         "--mujoco-gl",
         type=str,
         default=None,
@@ -385,6 +408,7 @@ def main() -> None:
     episode_df = load_episode_table(dataset_root, args.episode)
     fps = args.fps or load_lerobot_fps(dataset_root) or 50
     xml_path = resolve_xml(args.xml)
+    output_path = resolve_render_output_path(args.output, frames_dir=args.frames_dir)
     actions = np.stack(episode_df["action"].to_numpy()).astype(np.float32)
     front_source = FrontFrameSource(
         dataset_root=dataset_root,
@@ -398,7 +422,7 @@ def main() -> None:
         args.episode,
         min(args.max_frames, actions.shape[0]),
         xml_path,
-        args.output,
+        output_path,
     )
     render_frames(
         actions=actions,
@@ -410,8 +434,9 @@ def main() -> None:
         max_frames=args.max_frames,
         stride=args.stride,
         mujoco_gl=args.mujoco_gl,
+        frames_dir=args.frames_dir,
     )
-    logging.info("Wrote MuJoCo visualization to %s", args.output)
+    logging.info("Wrote MuJoCo visualization to %s", output_path)
 
 
 if __name__ == "__main__":
