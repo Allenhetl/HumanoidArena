@@ -251,13 +251,11 @@ def build_command(
     env['PYTHONUNBUFFERED'] = '1'
 
     args = dict(model_cfg['args'])
-    args['steps'] = int(row['target_steps'])
     args['dataset.repo_id'] = build_repo_id(Path(row['dataset_root']))
     args['dataset.root'] = row['dataset_root']
     args['output_dir'] = row['output_dir']
     args['job_name'] = row['job_name']
     args['wandb.project'] = runtime_cfg.get('wandb_project', 'HumanoidArena')
-    args["wandb.disable_artifact"] = True
     args['wandb.notes'] = (
         f"task={row['task_name']},dataset_kind={row['dataset_kind']},"
         f"dataset={row['dataset_dir_name']},model={row['model_alias']}"
@@ -346,7 +344,7 @@ def main() -> int:
 
     def try_launch_pending_jobs() -> bool:
         launched = False
-        # Allow multiple jobs to share the same GPU id; gpu_ids only controls CUDA_VISIBLE_DEVICES.
+        busy = used_gpu_ids()
         for row in rows:
             if allowed_aliases is not None and row['model_alias'] not in allowed_aliases:
                 continue
@@ -360,6 +358,8 @@ def main() -> int:
             gpu_ids = parse_gpu_ids(row.get('gpu_ids', ''))
             if not gpu_ids:
                 row['runtime_status'] = 'waiting_gpu_ids'
+                continue
+            if any(gpu in busy for gpu in gpu_ids):
                 continue
             if not gpus_under_utilization_limit(gpu_ids, args.max_gpu_utilization_percent):
                 row['runtime_status'] = 'waiting_gpu_utilization'
@@ -396,6 +396,7 @@ def main() -> int:
                 'process': process,
                 'log_fp': log_fp,
             })
+            busy.update(gpu_ids)
             row['runtime_status'] = 'running'
             row['log_path'] = str(log_path)
             row['last_error'] = ''

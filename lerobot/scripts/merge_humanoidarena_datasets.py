@@ -25,10 +25,10 @@ from lerobot.datasets.io_utils import load_info, load_stats, write_info, write_s
 
 
 DEFAULT_DATASETS_ROOT = Path(
-    "/ai/Yichi/taowen/HumanoidArena/dataset_v2/HumanoidArena_datasets_v2"
+    "/ai/Yichi/taowen/dataset_v2/HumanoidArena_datasets_v2"
 )
 DEFAULT_OUTPUT_BASE = Path(
-    "/ai/Yichi/taowen/HumanoidArena/dataset_v2/HumanoidArena_merged_datasets_v2"
+    "/ai/Yichi/taowen/dataset_v2/HumanoidArena_merged_datasets_v2"
 )
 DEFAULT_REPO_PREFIX = "local"
 

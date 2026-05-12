@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import torch
 import argparse
 import gc
 import json

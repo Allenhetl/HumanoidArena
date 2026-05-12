@@ -17,7 +17,7 @@
     "wandb.mode": "online",
     "seed": 42,
     "batch_size": 64,
-    "steps": 50000,
+    "steps": 100000,
     "dataset.image_transforms.max_num_transforms": 2,
     "dataset.image_transforms.random_order": false,
     "dataset.image_transforms.tfs": {
