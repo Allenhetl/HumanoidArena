@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import torch
+
 try:
     from tasks.common_scene.base_scene_open_door import DOOR_POS
 except Exception:

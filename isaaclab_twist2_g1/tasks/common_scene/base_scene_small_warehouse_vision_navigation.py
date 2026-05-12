@@ -175,10 +175,10 @@ class SmallWarehouseVisionNavigationSceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    world_camera = CameraBaseCfg.get_world_camera_config(
-        pos_offset=(0.45796, -1.01443, 2.42268),
-        rot_offset=(0.50211, 0.27898, 0.39756, 0.71555),
-        focal_length=12,
-        horizontal_aperture=27,
-        convention="opengl"
-    )
+    # world_camera = CameraBaseCfg.get_world_camera_config(
+    #     pos_offset=(0.45796, -1.01443, 2.42268),
+    #     rot_offset=(0.50211, 0.27898, 0.39756, 0.71555),
+    #     focal_length=12,
+    #     horizontal_aperture=27,
+    #     convention="opengl"
+    # )

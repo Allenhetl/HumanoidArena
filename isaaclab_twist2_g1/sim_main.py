@@ -124,7 +124,7 @@ parser.add_argument("--enable_smpl_vis", action="store_true", default=True,
                     help="Enable SMPL visualization for VLA/OpenPI video recording")
 
 
-parser.add_argument("--robot_type", type=str, default="g129", help="robot type")
+parser.add_argument("--robot_type", type=str, default="unitree_g1_localdelta_v2", help="robot type")
 parser.add_argument("--enable_dex1_dds", action="store_true", help="enable gripper DDS")
 parser.add_argument("--enable_dex3_dds", action="store_true", help="enable dexterous hand DDS")
 parser.add_argument("--enable_inspire_dds", action="store_true", help="enable inspire hand DDS")
@@ -845,7 +845,7 @@ def main():
             raise ValueError("--lerobot_server_url or --lerobot_policy_path is required when using input_source=vla")
         if float(args_cli.human_height) <= 0.0:
             raise ValueError("--human_height must be positive when using input_source=vla")
-        print("VLA runtime schema: observation.state=64D, action=40D canonical robot output")
+        print("VLA runtime schema: local_delta_isaac_time_v2, observation.state=64D, action=40D root-local delta output")
     if args_cli.action_source == "openpi":
         if not args_cli.openpi_checkpoint:
             raise ValueError("--openpi_checkpoint is required when using action_source=openpi")

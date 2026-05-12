@@ -67,11 +67,11 @@ class OpenDoorSceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    world_camera = CameraBaseCfg.get_world_camera_config(
-        pos_offset=(0.26556, 1.33827, 3.77471),
-        rot_offset=(0.6811, 0.21343, 0.20944, 0.66834),
-        focal_length=12,
-        horizontal_aperture=27,
-        convention="opengl"
-    )
+    # world_camera = CameraBaseCfg.get_world_camera_config(
+    #     pos_offset=(0.26556, 1.33827, 3.77471),
+    #     rot_offset=(0.6811, 0.21343, 0.20944, 0.66834),
+    #     focal_length=12,
+    #     horizontal_aperture=27,
+    #     convention="opengl"
+    # )
 

@@ -98,10 +98,10 @@ class SmallLivingroomSitingSofaSceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    world_camera = CameraBaseCfg.get_world_camera_config(
-        pos_offset=(-5.00612, 1.22158, 2.27319),
-        rot_offset=(-0.43051, -0.25339, 0.43941, 0.74657),
-        focal_length=12,
-        horizontal_aperture=27,
-        convention="opengl"
-    )
+    # world_camera = CameraBaseCfg.get_world_camera_config(
+    #     pos_offset=(-5.00612, 1.22158, 2.27319),
+    #     rot_offset=(-0.43051, -0.25339, 0.43941, 0.74657),
+    #     focal_length=12,
+    #     horizontal_aperture=27,
+    #     convention="opengl"
+    # )

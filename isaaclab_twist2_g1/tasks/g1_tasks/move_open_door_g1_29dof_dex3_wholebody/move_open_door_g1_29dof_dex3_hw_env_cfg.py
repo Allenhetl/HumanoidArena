@@ -11,6 +11,7 @@ from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
+import numpy as np
 
 from . import mdp
 from common_env_objects import apply_deterministic_object_resets

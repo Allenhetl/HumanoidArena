@@ -80,14 +80,14 @@ class SimpleImageHeader(ctypes.Structure):
 IMAGE_ORDER = ['head', 'world', 'left', 'right']
 
 
-def resolve_shm_name(shm_name: Optional[str] = None) -> str:
-    """Resolve the shared-memory segment name for the current process."""
-    if shm_name:
-        return str(shm_name)
-    env_value = os.environ.get(SHM_NAME_ENV_VAR, "").strip()
-    if env_value:
-        return env_value
-    return DEFAULT_SHM_NAME
+# def resolve_shm_name(shm_name: Optional[str] = None) -> str:
+#     """Resolve the shared-memory segment name for the current process."""
+#     if shm_name:
+#         return str(shm_name)
+#     env_value = os.environ.get(SHM_NAME_ENV_VAR, "").strip()
+#     if env_value:
+#         return env_value
+#     return DEFAULT_SHM_NAME
 
 
 class MultiImageWriter:
