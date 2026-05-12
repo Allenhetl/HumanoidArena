@@ -61,12 +61,14 @@ from action_provider.reset_control import (
     get_input_ready_key,
     publish_reset_command,
 )
+from action_provider.vla_local_delta_runtime_v2 import (
+    VLA_LOCAL_DELTA_V2_ACTION_DIM,
+    VLA_LOCAL_DELTA_V2_STATE_DIM,
+    UnifiedLocalDeltaActionRuntimeV2,
+    build_sonic_joint29_payload_v2,
+)
 from action_provider.vla_smpl_runtime import (
-    VLA_SMPL_ACTION_DIM,
-    VLA_SMPL_STATE_DIM,
     CanonicalPoseActionRecorder,
-    UnifiedSMPLActionRuntime,
-    build_sonic_joint29_payload,
     build_vla_observation_state,
     rot6d_to_quat_wxyz_with_layout,
 )
@@ -112,8 +114,8 @@ except ImportError:
 _HEADER_SIZE = 1280
 project_root = os.environ.get("PROJECT_ROOT")
 
-SONIC_VLA_ACTION_DIM = VLA_SMPL_ACTION_DIM
-SONIC_VLA_STATE_DIM = VLA_SMPL_STATE_DIM
+SONIC_VLA_ACTION_DIM = VLA_LOCAL_DELTA_V2_ACTION_DIM
+SONIC_VLA_STATE_DIM = VLA_LOCAL_DELTA_V2_STATE_DIM
 SONIC_HAND_POSE_ROBOT_NAME = "unitree_g1_with_hands"
 
 
@@ -1543,7 +1545,7 @@ class SonicActionProvider(ActionProvider):
             self._vla_root_max_delta_deg = 26.0
         if not np.isfinite(self._vla_root_max_delta_deg) or self._vla_root_max_delta_deg <= 0.0:
             self._vla_root_max_delta_deg = None
-        self._lerobot_vla_runtime = UnifiedSMPLActionRuntime(
+        self._lerobot_vla_runtime = UnifiedLocalDeltaActionRuntimeV2(
             root_rot6d_layout=self._vla_root_rot6d_layout,
             max_root_delta_deg=self._vla_root_max_delta_deg,
         )
@@ -1934,7 +1936,7 @@ class SonicActionProvider(ActionProvider):
             )
             if self._replay_body_targets is None and "vla_action" in replay_data:
                 vla_action = np.asarray(replay_data["vla_action"], dtype=np.float32)
-                if vla_action.ndim == 2 and vla_action.shape[-1] == VLA_SMPL_ACTION_DIM:
+                if vla_action.ndim == 2 and vla_action.shape[-1] == SONIC_VLA_ACTION_DIM:
                     self._replay_body_targets = vla_action[:, 9:38].astype(np.float32)
             if self._replay_mode == "direct_replay" and self._replay_body_targets is None:
                 raise KeyError(
@@ -1955,7 +1957,7 @@ class SonicActionProvider(ActionProvider):
                 hand_binary = _load_array(replay_data, "vla_action_hand_binary_2", "vla_action_hand_binary")
                 if hand_binary is None and "vla_action" in replay_data:
                     vla_action = np.asarray(replay_data["vla_action"], dtype=np.float32)
-                    if vla_action.ndim == 2 and vla_action.shape[-1] == VLA_SMPL_ACTION_DIM:
+                    if vla_action.ndim == 2 and vla_action.shape[-1] == SONIC_VLA_ACTION_DIM:
                         hand_binary = vla_action[:, 38:40]
                 if hand_binary is not None and hand_binary.ndim == 2 and hand_binary.shape[-1] == 2:
                     left_open = np.asarray(DEFAULT_HAND_POSE[SONIC_HAND_POSE_ROBOT_NAME]["left"]["open"], dtype=np.float32)
@@ -2393,7 +2395,8 @@ class SonicActionProvider(ActionProvider):
             print(
                 "[SONIC][VLA_ROOT_DEBUG] "
                 f"frame={self._frame_count + 1} "
-                f"xy=({runtime_frame.root_xy_delta_world[0]:+0.4f},{runtime_frame.root_xy_delta_world[1]:+0.4f}) "
+                f"local_xy=({runtime_frame.root_local_xy_delta[0]:+0.4f},{runtime_frame.root_local_xy_delta[1]:+0.4f}) "
+                f"world_xy=({runtime_frame.root_xy_delta_world[0]:+0.4f},{runtime_frame.root_xy_delta_world[1]:+0.4f}) "
                 f"z={runtime_frame.root_z:+0.4f} "
                 f"rot6d={np.array2string(root_rot6d_action, precision=4, separator=',')} "
                 f"jump_l2={jump_l2:0.6f} "
@@ -2425,7 +2428,7 @@ class SonicActionProvider(ActionProvider):
             if self._frame_count <= 3 or self._frame_count % self._sonic_log_every == 0:
                 print(f"[SONIC][VLA_ROT6D] auto-selected layout={selected_layout}")
         control_dt = float(self.env.physics_dt * self._decimation)
-        payload = build_sonic_joint29_payload(
+        payload = build_sonic_joint29_payload_v2(
             runtime_frame=runtime_frame,
             control_dt=control_dt,
         )

@@ -4,7 +4,7 @@ set -euo pipefail
 BATCH_START_TS="$(date +%s)"
 BATCH_START_HUMAN="$(date '+%F %T %Z')"
 
-TEST_MODE="${TEST_MODE:-base}"
+TEST_MODE="${TEST_MODE:-base_test}"
 CONFIG_STEM="doubledesk"
 TEST_CONFIG_DIR="tasks/common_test_config/$TEST_MODE"
 SONIC_CONFIG="$TEST_CONFIG_DIR/$CONFIG_STEM""_sonic_test.yaml"

@@ -22,12 +22,14 @@ import numpy as np
 from pathlib import Path
 from action_provider.lerobot_vla_http_client import LeRobotVLAHttpClient
 from action_provider.vision_video import write_rgb_video_mp4
+from action_provider.vla_local_delta_runtime_v2 import (
+    VLA_LOCAL_DELTA_V2_ACTION_DIM,
+    VLA_LOCAL_DELTA_V2_STATE_DIM,
+    UnifiedLocalDeltaActionRuntimeV2,
+    build_twist2_mimic_obs_v2,
+)
 from action_provider.vla_smpl_runtime import (
-    VLA_SMPL_ACTION_DIM,
-    VLA_SMPL_STATE_DIM,
     Twist2ActionMimicRecorder,
-    UnifiedSMPLActionRuntime,
-    build_twist2_mimic_obs,
     build_vla_observation_state,
     reorder_canonical_to_twist2_29,
     reorder_twist2_to_canonical_29,
@@ -419,11 +421,11 @@ class RecordingManager:
             'robot_twist2_inference_qpos': np.zeros((num_frames, 29), dtype=np.float32),
             'robot_action_mimic': np.zeros((num_frames, 35), dtype=np.float32),
             'robot_obs_buf': np.zeros((num_frames, 1432), dtype=np.float32),  # 127*11+35 = 1432
-            'vla_state': np.zeros((num_frames, VLA_SMPL_STATE_DIM), dtype=np.float32),
+            'vla_state': np.zeros((num_frames, VLA_LOCAL_DELTA_V2_STATE_DIM), dtype=np.float32),
             'vla_state_root_rot6d': np.zeros((num_frames, 6), dtype=np.float32),
             'vla_state_dof_pos_29': np.zeros((num_frames, 29), dtype=np.float32),
             'vla_state_dof_vel_29': np.zeros((num_frames, 29), dtype=np.float32),
-            'vla_action': np.zeros((num_frames, VLA_SMPL_ACTION_DIM), dtype=np.float32),
+            'vla_action': np.zeros((num_frames, VLA_LOCAL_DELTA_V2_ACTION_DIM), dtype=np.float32),
             'vla_action_root_xy_delta': np.zeros((num_frames, 2), dtype=np.float32),
             'vla_action_root_z': np.zeros((num_frames, 1), dtype=np.float32),
             'vla_action_root_rot6d': np.zeros((num_frames, 6), dtype=np.float32),
@@ -796,7 +798,7 @@ class TWIST2ActionProvider(ActionProvider):
         self._lerobot_predict_action = None
         self._lerobot_device = None
         self._lerobot_http_client = None
-        self._lerobot_vla_runtime = UnifiedSMPLActionRuntime()
+        self._lerobot_vla_runtime = UnifiedLocalDeltaActionRuntimeV2()
         self._lerobot_gripper_threshold = float(getattr(args_cli, "lerobot_gripper_threshold", 0.5))
         self._latest_vla_action = None
         self._lerobot_action_chunk_queue = deque()
@@ -1536,8 +1538,8 @@ class TWIST2ActionProvider(ActionProvider):
             joint_pos_canonical_29=joint_pos_canonical,
             joint_vel_canonical_29=joint_vel_canonical,
         )
-        if state.shape != (VLA_SMPL_STATE_DIM,):
-            raise RuntimeError(f"[{self.name}] Expected canonical VLA state shape {(VLA_SMPL_STATE_DIM,)}, got {state.shape}")
+        if state.shape != (VLA_LOCAL_DELTA_V2_STATE_DIM,):
+            raise RuntimeError(f"[{self.name}] Expected canonical VLA state shape {(VLA_LOCAL_DELTA_V2_STATE_DIM,)}, got {state.shape}")
         return state
 
     def _fetch_lerobot_action_chunk(self) -> np.ndarray:
@@ -1577,9 +1579,9 @@ class TWIST2ActionProvider(ActionProvider):
         action_chunk = np.asarray(action_chunk, dtype=np.float32)
         if action_chunk.ndim == 1:
             action_chunk = action_chunk.reshape(1, -1)
-        if action_chunk.ndim != 2 or action_chunk.shape[1] != VLA_SMPL_ACTION_DIM:
+        if action_chunk.ndim != 2 or action_chunk.shape[1] != VLA_LOCAL_DELTA_V2_ACTION_DIM:
             raise ValueError(
-                f"[{self.name}] Expected canonical VLA action chunk shape [N, {VLA_SMPL_ACTION_DIM}], got {action_chunk.shape}"
+                f"[{self.name}] Expected canonical VLA action chunk shape [N, {VLA_LOCAL_DELTA_V2_ACTION_DIM}], got {action_chunk.shape}"
             )
         return action_chunk
 
@@ -1588,9 +1590,9 @@ class TWIST2ActionProvider(ActionProvider):
             for action in self._fetch_lerobot_action_chunk():
                 self._lerobot_action_chunk_queue.append(np.asarray(action, dtype=np.float32).copy())
         action_np = np.asarray(self._lerobot_action_chunk_queue.popleft(), dtype=np.float32).reshape(-1)
-        if action_np.shape != (VLA_SMPL_ACTION_DIM,):
+        if action_np.shape != (VLA_LOCAL_DELTA_V2_ACTION_DIM,):
             raise ValueError(
-                f"[{self.name}] Expected canonical VLA action dim {VLA_SMPL_ACTION_DIM}, got {action_np.shape}"
+                f"[{self.name}] Expected canonical VLA action dim {VLA_LOCAL_DELTA_V2_ACTION_DIM}, got {action_np.shape}"
             )
         return action_np
 
@@ -1607,7 +1609,7 @@ class TWIST2ActionProvider(ActionProvider):
             ).unsqueeze(0)
         )
         control_dt = float(self._twist2_decimation * self.env.physics_dt)
-        mimic_obs = build_twist2_mimic_obs(
+        mimic_obs = build_twist2_mimic_obs_v2(
             runtime_frame=runtime_frame,
             control_dt=control_dt,
         )
@@ -1670,7 +1672,7 @@ class TWIST2ActionProvider(ActionProvider):
                 )
             elif "vla_action" in replay_data:
                 vla_action = np.asarray(replay_data["vla_action"], dtype=np.float32)
-                if vla_action.ndim == 2 and vla_action.shape[-1] == VLA_SMPL_ACTION_DIM:
+                if vla_action.ndim == 2 and vla_action.shape[-1] == VLA_LOCAL_DELTA_V2_ACTION_DIM:
                     self._replay_data_qpos = reorder_canonical_to_twist2_29(vla_action[:, 9:38])
             if self._replay_data_qpos is None:
                 raise KeyError(
@@ -1702,7 +1704,7 @@ class TWIST2ActionProvider(ActionProvider):
                     hand_binary = np.asarray(replay_data["vla_action_hand_binary_2"], dtype=np.float32)
                 elif "vla_action" in replay_data:
                     vla_action = np.asarray(replay_data["vla_action"], dtype=np.float32)
-                    if vla_action.ndim == 2 and vla_action.shape[-1] == VLA_SMPL_ACTION_DIM:
+                    if vla_action.ndim == 2 and vla_action.shape[-1] == VLA_LOCAL_DELTA_V2_ACTION_DIM:
                         hand_binary = vla_action[:, 38:40]
                 elif "vla_action_hand_binary" in replay_data:
                     hand_binary = np.asarray(replay_data["vla_action_hand_binary"], dtype=np.float32)

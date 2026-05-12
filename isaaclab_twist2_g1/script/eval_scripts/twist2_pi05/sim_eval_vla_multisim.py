@@ -50,7 +50,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lerobot_server_timeout", type=float, default=5.0)
     parser.add_argument("--lerobot_server_verify_ssl", action="store_true", default=False)
     parser.add_argument("--lerobot_gripper_threshold", type=float, default=0.5)
-    parser.add_argument("--robot_type", type=str, default="g129")
+    parser.add_argument("--robot_type", type=str, default="unitree_g1_localdelta_v2")
     parser.add_argument("--video_fps", type=int, default=30)
     parser.add_argument("--post_termination_record_steps", type=int, default=0)
     parser.add_argument("--recording_save_dir", type=str, default="")
@@ -246,11 +246,13 @@ class MultiEnvVLATwist2Runtime:
         import onnxruntime as ort
         import torch
         from action_provider.lerobot_vla_http_client import LeRobotVLAHttpClient
+        from action_provider.vla_local_delta_runtime_v2 import (
+            VLA_LOCAL_DELTA_V2_ACTION_DIM,
+            UnifiedLocalDeltaActionRuntimeV2,
+            build_twist2_mimic_obs_v2,
+        )
         from action_provider.vla_smpl_runtime import (
             TWIST2_G1_JOINT_NAMES_29,
-            UnifiedSMPLActionRuntime,
-            VLA_SMPL_ACTION_DIM,
-            build_twist2_mimic_obs,
             build_vla_observation_state,
             reorder_twist2_to_canonical_29,
         )
@@ -264,8 +266,8 @@ class MultiEnvVLATwist2Runtime:
         self.num_envs = int(args_cli.num_envs)
         self.device = env.device
         self.server_urls = list(server_urls)
-        self.VLA_SMPL_ACTION_DIM = VLA_SMPL_ACTION_DIM
-        self.build_twist2_mimic_obs = build_twist2_mimic_obs
+        self.vla_action_dim = VLA_LOCAL_DELTA_V2_ACTION_DIM
+        self.build_twist2_mimic_obs_v2 = build_twist2_mimic_obs_v2
         self.build_vla_observation_state = build_vla_observation_state
         self.reorder_twist2_to_canonical_29 = reorder_twist2_to_canonical_29
         self.DEFAULT_HAND_POSE = DEFAULT_HAND_POSE
@@ -289,7 +291,7 @@ class MultiEnvVLATwist2Runtime:
         )
         self._vla_gripper_binary = torch.zeros(self.num_envs, 2, device=self.device, dtype=torch.float32)
         self._chunk_queues = [deque() for _ in range(self.num_envs)]
-        self._runtimes = [UnifiedSMPLActionRuntime() for _ in range(self.num_envs)]
+        self._runtimes = [UnifiedLocalDeltaActionRuntimeV2() for _ in range(self.num_envs)]
         self._clients = [
             LeRobotVLAHttpClient(
                 base_url=url,
@@ -444,9 +446,9 @@ class MultiEnvVLATwist2Runtime:
                 chunk = self.np.asarray(action_chunk, dtype=self.np.float32)
                 if chunk.ndim == 1:
                     chunk = chunk.reshape(1, -1)
-                if chunk.ndim != 2 or chunk.shape[1] != self.VLA_SMPL_ACTION_DIM:
+                if chunk.ndim != 2 or chunk.shape[1] != self.vla_action_dim:
                     raise ValueError(
-                        f"Expected canonical VLA action chunk shape [N, {self.VLA_SMPL_ACTION_DIM}], got {chunk.shape}"
+                        f"Expected local-delta v2 VLA action chunk shape [N, {self.vla_action_dim}], got {chunk.shape}"
                     )
                 for action in chunk:
                     self._chunk_queues[env_id].append(self.np.asarray(action, dtype=self.np.float32).copy())
@@ -464,7 +466,7 @@ class MultiEnvVLATwist2Runtime:
                     self.device, dtype=self.torch.float32
                 )
             )
-            mimic_obs = self.build_twist2_mimic_obs(runtime_frame=runtime_frame, control_dt=self.control_dt)
+            mimic_obs = self.build_twist2_mimic_obs_v2(runtime_frame=runtime_frame, control_dt=self.control_dt)
             action_mimic[env_id] = self.torch.from_numpy(mimic_obs).to(self.device, dtype=self.torch.float32)
         return action_mimic
 
