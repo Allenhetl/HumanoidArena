@@ -301,8 +301,6 @@ from common_env_objects import (
 from tasks.common_env_config import apply_env_config_yaml
 from tasks.common_runtime import (
     apply_optional_runtime_augments,
-    apply_vision_light_randomization_from_cfg,
-    setup_vision_test_light_from_cfg,
 )
 from tools.get_stiffness import get_robot_stiffness_from_env
 from tools.get_reward import get_reward_debug_string
