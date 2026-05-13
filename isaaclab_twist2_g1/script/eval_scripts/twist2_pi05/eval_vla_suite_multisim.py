@@ -334,7 +334,7 @@ def main() -> int:
     parser.add_argument("--max_steps", type=int, default=300)
     parser.add_argument("--video_fps", type=int, default=30)
     parser.add_argument("--post_termination_record_steps", type=int, default=0)
-    parser.add_argument("--robot_type", type=str, default="unitree_g1_localdelta_v2")
+    parser.add_argument("--robot_type", type=str, default="unitree_g1_rotlocal_v3")
     parser.add_argument("--twist2_model_path", type=str, required=True)
     parser.add_argument("--results_dir", type=str, required=True)
     parser.add_argument("--headless", action="store_true", default=False)

@@ -50,7 +50,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lerobot_server_timeout", type=float, default=5.0)
     parser.add_argument("--lerobot_server_verify_ssl", action="store_true", default=False)
     parser.add_argument("--lerobot_gripper_threshold", type=float, default=0.5)
-    parser.add_argument("--robot_type", type=str, default="unitree_g1_localdelta_v2")
+    parser.add_argument("--robot_type", type=str, default="unitree_g1_rotlocal_v3")
     parser.add_argument("--video_fps", type=int, default=30)
     parser.add_argument("--post_termination_record_steps", type=int, default=0)
     parser.add_argument("--recording_save_dir", type=str, default="")
@@ -246,14 +246,14 @@ class MultiEnvVLATwist2Runtime:
         import onnxruntime as ort
         import torch
         from action_provider.lerobot_vla_http_client import LeRobotVLAHttpClient
-        from action_provider.vla_local_delta_runtime_v2 import (
-            VLA_LOCAL_DELTA_V2_ACTION_DIM,
-            UnifiedLocalDeltaActionRuntimeV2,
-            build_twist2_mimic_obs_v2,
+        from action_provider.vla_robot_current_local_runtime_v3 import (
+            VLA_ROBOT_CURRENT_LOCAL_V3_ACTION_DIM,
+            UnifiedRobotCurrentLocalActionRuntimeV3,
+            build_twist2_mimic_obs_v3,
+            build_vla_rotlocal_v3_observation_state,
         )
         from action_provider.vla_smpl_runtime import (
             TWIST2_G1_JOINT_NAMES_29,
-            build_vla_observation_state,
             reorder_twist2_to_canonical_29,
         )
         from pico_server.data_utils.params import DEFAULT_HAND_POSE
@@ -266,9 +266,9 @@ class MultiEnvVLATwist2Runtime:
         self.num_envs = int(args_cli.num_envs)
         self.device = env.device
         self.server_urls = list(server_urls)
-        self.vla_action_dim = VLA_LOCAL_DELTA_V2_ACTION_DIM
-        self.build_twist2_mimic_obs_v2 = build_twist2_mimic_obs_v2
-        self.build_vla_observation_state = build_vla_observation_state
+        self.vla_action_dim = VLA_ROBOT_CURRENT_LOCAL_V3_ACTION_DIM
+        self.build_twist2_mimic_obs_v3 = build_twist2_mimic_obs_v3
+        self.build_vla_rotlocal_v3_observation_state = build_vla_rotlocal_v3_observation_state
         self.reorder_twist2_to_canonical_29 = reorder_twist2_to_canonical_29
         self.DEFAULT_HAND_POSE = DEFAULT_HAND_POSE
         self.control_dt = float(env.physics_dt) * int(getattr(env.cfg, "decimation", 1))
@@ -276,6 +276,11 @@ class MultiEnvVLATwist2Runtime:
         self.obs_single_dim = 127
         self.gripper_threshold = float(getattr(args_cli, "lerobot_gripper_threshold", 0.5))
         self.enable_robot = args_cli.robot_type
+        if self.enable_robot != "unitree_g1_rotlocal_v3":
+            raise ValueError(
+                "Multi-env VLA v3 runtime requires robot_type=unitree_g1_rotlocal_v3; "
+                f"got {self.enable_robot!r}"
+            )
 
         all_joint_names = env.scene["robot"].data.joint_names
         self.joint_to_index = {name: i for i, name in enumerate(all_joint_names)}
@@ -291,7 +296,8 @@ class MultiEnvVLATwist2Runtime:
         )
         self._vla_gripper_binary = torch.zeros(self.num_envs, 2, device=self.device, dtype=torch.float32)
         self._chunk_queues = [deque() for _ in range(self.num_envs)]
-        self._runtimes = [UnifiedLocalDeltaActionRuntimeV2() for _ in range(self.num_envs)]
+        self._runtimes = [UnifiedRobotCurrentLocalActionRuntimeV3() for _ in range(self.num_envs)]
+        self._vla_initial_robot_quat_wxyz = [None for _ in range(self.num_envs)]
         self._clients = [
             LeRobotVLAHttpClient(
                 base_url=url,
@@ -389,7 +395,12 @@ class MultiEnvVLATwist2Runtime:
 
     def reset_env_slot(self, env_id: int, episode_seed: int) -> None:
         self._chunk_queues[env_id].clear()
-        self._runtimes[env_id].reset()
+        root_quat_wxyz, root_xy_world = self._get_current_robot_root_pose(env_id)
+        self._vla_initial_robot_quat_wxyz[env_id] = root_quat_wxyz.copy()
+        self._runtimes[env_id].reset(
+            body_xy_world=root_xy_world,
+            target_root_quat_wxyz=root_quat_wxyz,
+        )
         self._twist2_last_action[env_id].zero_()
         self._twist2_history[env_id].zero_()
         self._vla_gripper_binary[env_id].zero_()
@@ -413,6 +424,11 @@ class MultiEnvVLATwist2Runtime:
             rgb = self.np.clip(rgb, 0, 255).astype("uint8")
         return rgb
 
+    def _get_current_robot_root_pose(self, env_id: int):
+        robot = self.env.scene["robot"].data
+        root_state = robot.root_state_w[env_id].detach().cpu().numpy().astype(self.np.float32)
+        return root_state[3:7].copy(), root_state[0:2].copy()
+
     def _build_vla_state(self, env_id: int):
         robot = self.env.scene["robot"].data
         joint_pos_twist2 = (
@@ -423,8 +439,11 @@ class MultiEnvVLATwist2Runtime:
         )
         joint_pos_canonical = self.reorder_twist2_to_canonical_29(joint_pos_twist2)
         joint_vel_canonical = self.reorder_twist2_to_canonical_29(joint_vel_twist2)
-        base_quat_wxyz = robot.root_state_w[env_id, 3:7].detach().cpu().numpy().astype(self.np.float32)
-        return self.build_vla_observation_state(
+        base_quat_wxyz, _ = self._get_current_robot_root_pose(env_id)
+        if self._vla_initial_robot_quat_wxyz[env_id] is None:
+            self._vla_initial_robot_quat_wxyz[env_id] = base_quat_wxyz.copy()
+        return self.build_vla_rotlocal_v3_observation_state(
+            initial_robot_orientation_wxyz=self._vla_initial_robot_quat_wxyz[env_id],
             root_orientation_wxyz=base_quat_wxyz,
             joint_pos_canonical_29=joint_pos_canonical,
             joint_vel_canonical_29=joint_vel_canonical,
@@ -448,7 +467,7 @@ class MultiEnvVLATwist2Runtime:
                     chunk = chunk.reshape(1, -1)
                 if chunk.ndim != 2 or chunk.shape[1] != self.vla_action_dim:
                     raise ValueError(
-                        f"Expected local-delta v2 VLA action chunk shape [N, {self.vla_action_dim}], got {chunk.shape}"
+                        f"Expected rotlocal v3 VLA action chunk shape [N, {self.vla_action_dim}], got {chunk.shape}"
                     )
                 for action in chunk:
                     self._chunk_queues[env_id].append(self.np.asarray(action, dtype=self.np.float32).copy())
@@ -460,13 +479,18 @@ class MultiEnvVLATwist2Runtime:
         action_mimic = self.torch.zeros(self.num_envs, 35, device=self.device, dtype=self.torch.float32)
         for env_id in active_env_ids:
             action_np = self.np.asarray(self._chunk_queues[env_id].popleft(), dtype=self.np.float32).reshape(-1)
-            runtime_frame = self._runtimes[env_id].step(action_np)
+            current_robot_quat_wxyz, current_robot_xy_world = self._get_current_robot_root_pose(env_id)
+            runtime_frame = self._runtimes[env_id].step(
+                action_np,
+                current_robot_quat_wxyz=current_robot_quat_wxyz,
+                current_robot_xy_world=current_robot_xy_world,
+            )
             self._vla_gripper_binary[env_id].copy_(
                 self.torch.from_numpy(self.np.clip(runtime_frame.hand_binary, 0.0, 1.0)).to(
                     self.device, dtype=self.torch.float32
                 )
             )
-            mimic_obs = self.build_twist2_mimic_obs_v2(runtime_frame=runtime_frame, control_dt=self.control_dt)
+            mimic_obs = self.build_twist2_mimic_obs_v3(runtime_frame=runtime_frame, control_dt=self.control_dt)
             action_mimic[env_id] = self.torch.from_numpy(mimic_obs).to(self.device, dtype=self.torch.float32)
         return action_mimic
 

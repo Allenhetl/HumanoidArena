@@ -61,11 +61,12 @@ from action_provider.reset_control import (
     get_input_ready_key,
     publish_reset_command,
 )
-from action_provider.vla_local_delta_runtime_v2 import (
-    VLA_LOCAL_DELTA_V2_ACTION_DIM,
-    VLA_LOCAL_DELTA_V2_STATE_DIM,
-    UnifiedLocalDeltaActionRuntimeV2,
-    build_sonic_joint29_payload_v2,
+from action_provider.vla_robot_current_local_runtime_v3 import (
+    VLA_ROBOT_CURRENT_LOCAL_V3_ACTION_DIM,
+    VLA_ROBOT_CURRENT_LOCAL_V3_STATE_DIM,
+    UnifiedRobotCurrentLocalActionRuntimeV3,
+    build_sonic_joint29_payload_v3,
+    build_vla_rotlocal_v3_observation_state,
 )
 from action_provider.vla_smpl_runtime import (
     CanonicalPoseActionRecorder,
@@ -114,8 +115,8 @@ except ImportError:
 _HEADER_SIZE = 1280
 project_root = os.environ.get("PROJECT_ROOT")
 
-SONIC_VLA_ACTION_DIM = VLA_LOCAL_DELTA_V2_ACTION_DIM
-SONIC_VLA_STATE_DIM = VLA_LOCAL_DELTA_V2_STATE_DIM
+SONIC_VLA_ACTION_DIM = VLA_ROBOT_CURRENT_LOCAL_V3_ACTION_DIM
+SONIC_VLA_STATE_DIM = VLA_ROBOT_CURRENT_LOCAL_V3_STATE_DIM
 SONIC_HAND_POSE_ROBOT_NAME = "unitree_g1_with_hands"
 
 
@@ -1545,10 +1546,11 @@ class SonicActionProvider(ActionProvider):
             self._vla_root_max_delta_deg = 26.0
         if not np.isfinite(self._vla_root_max_delta_deg) or self._vla_root_max_delta_deg <= 0.0:
             self._vla_root_max_delta_deg = None
-        self._lerobot_vla_runtime = UnifiedLocalDeltaActionRuntimeV2(
+        self._lerobot_vla_runtime = UnifiedRobotCurrentLocalActionRuntimeV3(
             root_rot6d_layout=self._vla_root_rot6d_layout,
             max_root_delta_deg=self._vla_root_max_delta_deg,
         )
+        self._vla_initial_robot_quat_wxyz: np.ndarray | None = None
         self._lerobot_hand_binary_threshold = float(getattr(args_cli, "lerobot_gripper_threshold", 0.5))
         self._lerobot_action_chunk_queue = deque()
         self._vla_root_debug = bool(
@@ -2179,6 +2181,11 @@ class SonicActionProvider(ActionProvider):
         print('Successful load sonic model')
 
     def _setup_lerobot_vla(self, args_cli) -> None:
+        if self.enable_robot != "unitree_g1_rotlocal_v3":
+            raise ValueError(
+                "[SonicActionProvider] VLA v3 runtime requires robot_type=unitree_g1_rotlocal_v3; "
+                f"got {self.enable_robot!r}"
+            )
         if self._lerobot_server_url:
             self._lerobot_http_client = LeRobotVLAHttpClient(
                 base_url=self._lerobot_server_url,
@@ -2220,6 +2227,20 @@ class SonicActionProvider(ActionProvider):
         device_name = getattr(args_cli, "lerobot_policy_device", "") or getattr(args_cli, "device", "cuda:0")
         config = PreTrainedConfig.from_pretrained(lerobot_policy_path)
         config.device = device_name
+        state_feature = (config.input_features or {}).get("observation.state")
+        action_feature = (config.output_features or {}).get("action")
+        state_shape = tuple(getattr(state_feature, "shape", ()) or ())
+        action_shape = tuple(getattr(action_feature, "shape", ()) or ())
+        if state_shape and state_shape != (SONIC_VLA_STATE_DIM,):
+            raise ValueError(
+                f"[SonicActionProvider] VLA v3 policy must use observation.state shape {(SONIC_VLA_STATE_DIM,)}, "
+                f"got {state_shape}"
+            )
+        if action_shape and action_shape != (SONIC_VLA_ACTION_DIM,):
+            raise ValueError(
+                f"[SonicActionProvider] VLA v3 policy must use action shape {(SONIC_VLA_ACTION_DIM,)}, "
+                f"got {action_shape}"
+            )
         policy_cls = get_policy_class(config.type)
 
         self._lerobot_policy = policy_cls.from_pretrained(lerobot_policy_path, config=config)
@@ -2274,12 +2295,22 @@ class SonicActionProvider(ActionProvider):
         self._left_hand_target[:] = self._get_hand_pose_from_binary("left", left_closed)
         self._right_hand_target[:] = self._get_hand_pose_from_binary("right", right_closed)
 
+    def _get_current_robot_root_pose_for_vla(self) -> tuple[np.ndarray, np.ndarray]:
+        robot = self.env.scene["robot"].data
+        root_state = robot.root_state_w[0].detach().cpu().numpy().astype(np.float32)
+        root_xy_world = root_state[0:2].astype(np.float32, copy=True)
+        root_quat_wxyz = root_state[3:7].astype(np.float32, copy=True)
+        return root_quat_wxyz, root_xy_world
+
     def _build_lerobot_vla_observation_state(self) -> np.ndarray:
         robot = self.env.scene["robot"].data
         joint_pos = robot.joint_pos[0, self._sonic_idx].cpu().numpy().astype(np.float32)
         joint_vel = robot.joint_vel[0, self._sonic_idx].cpu().numpy().astype(np.float32)
-        base_quat_wxyz = robot.root_state_w[0, 3:7].cpu().numpy().astype(np.float32)
-        state = build_vla_observation_state(
+        base_quat_wxyz, _ = self._get_current_robot_root_pose_for_vla()
+        if self._vla_initial_robot_quat_wxyz is None:
+            self._vla_initial_robot_quat_wxyz = base_quat_wxyz.copy()
+        state = build_vla_rotlocal_v3_observation_state(
+            initial_robot_orientation_wxyz=self._vla_initial_robot_quat_wxyz,
             root_orientation_wxyz=base_quat_wxyz,
             joint_pos_canonical_29=joint_pos,
             joint_vel_canonical_29=joint_vel,
@@ -2350,6 +2381,7 @@ class SonicActionProvider(ActionProvider):
     def _apply_lerobot_semantic_action(self, action: np.ndarray) -> None:
         action = np.asarray(action, dtype=np.float32).reshape(-1)
         self._latest_vla_action = action.copy()
+        current_robot_quat_wxyz, current_robot_xy_world = self._get_current_robot_root_pose_for_vla()
         root_rot6d_action = action[3:9].astype(np.float32, copy=True)
         prev_root_rot6d_action = (
             None
@@ -2365,12 +2397,8 @@ class SonicActionProvider(ActionProvider):
             self._vla_root_rot6d_layout == "auto"
             and getattr(self._lerobot_vla_runtime, "_prev_root_quat_wxyz", None) is None
         ):
-            try:
-                base_quat_wxyz = self.env.scene["robot"].data.root_state_w[0, 3:7].cpu().numpy().astype(np.float32)
-                self._lerobot_vla_runtime.prime_root_quat(base_quat_wxyz)
-            except Exception:
-                pass
-        prev_runtime_root_quat = getattr(self._lerobot_vla_runtime, "_prev_root_quat_wxyz", None)
+            self._lerobot_vla_runtime.prime_root_quat(current_robot_quat_wxyz)
+        prev_runtime_root_quat = getattr(self._lerobot_vla_runtime, "_prev_action_rel_quat_wxyz", None)
         row_delta_deg = 0.0
         col_delta_deg = 0.0
         if prev_runtime_root_quat is not None:
@@ -2382,7 +2410,11 @@ class SonicActionProvider(ActionProvider):
             except Exception:
                 row_delta_deg = 0.0
                 col_delta_deg = 0.0
-        runtime_frame = self._lerobot_vla_runtime.step(action)
+        runtime_frame = self._lerobot_vla_runtime.step(
+            action,
+            current_robot_quat_wxyz=current_robot_quat_wxyz,
+            current_robot_xy_world=current_robot_xy_world,
+        )
         root_delta_deg = 0.0
         if runtime_frame.prev_root_quat_wxyz is not None:
             root_delta_deg = quat_delta_deg_wxyz(
@@ -2428,7 +2460,7 @@ class SonicActionProvider(ActionProvider):
             if self._frame_count <= 3 or self._frame_count % self._sonic_log_every == 0:
                 print(f"[SONIC][VLA_ROT6D] auto-selected layout={selected_layout}")
         control_dt = float(self.env.physics_dt * self._decimation)
-        payload = build_sonic_joint29_payload_v2(
+        payload = build_sonic_joint29_payload_v3(
             runtime_frame=runtime_frame,
             control_dt=control_dt,
         )
@@ -2449,7 +2481,7 @@ class SonicActionProvider(ActionProvider):
             "body_pos": payload["body_pos"].copy(),
             "body_quat_w": payload["body_quat_w"].copy(),
         }
-        self._apply_pose_data(data, "lerobot_vla_joint29")
+        self._apply_pose_data(data, "lerobot_vla_joint29_v3")
 
         left_closed = bool(runtime_frame.hand_binary[0] >= self._lerobot_hand_binary_threshold)
         right_closed = bool(runtime_frame.hand_binary[1] >= self._lerobot_hand_binary_threshold)
@@ -3115,7 +3147,16 @@ class SonicActionProvider(ActionProvider):
         self._canonical_pose_recorder.reset()
         if self._use_lerobot_vla:
             self._lerobot_action_chunk_queue.clear()
-            self._lerobot_vla_runtime.reset()
+            try:
+                root_quat_wxyz, root_xy_world = self._get_current_robot_root_pose_for_vla()
+                self._vla_initial_robot_quat_wxyz = root_quat_wxyz.copy()
+                self._lerobot_vla_runtime.reset(
+                    body_xy_world=root_xy_world,
+                    target_root_quat_wxyz=root_quat_wxyz,
+                )
+            except Exception:
+                self._vla_initial_robot_quat_wxyz = None
+                self._lerobot_vla_runtime.reset()
             self._apply_hand_binary_targets(left_closed=False, right_closed=False)
             if self._lerobot_http_client is not None:
                 self._lerobot_http_client.reset()
@@ -4144,7 +4185,8 @@ class SonicActionProvider(ActionProvider):
         debug_log = self._sonic_debug and (
             self._frame_count <= 3 or self._frame_count % self._sonic_log_every == 0
         )
-        is_vla_joint29_source = source == "lerobot_vla_joint29"
+        is_vla_joint29_v3_source = source == "lerobot_vla_joint29_v3"
+        is_vla_joint29_source = source in {"lerobot_vla_joint29", "lerobot_vla_joint29_v3"}
         self._latest_consumed_new_this_step = False
         consume_pose_frame = True
         current_frame_index = None
@@ -4275,8 +4317,8 @@ class SonicActionProvider(ActionProvider):
             if consume_pose_frame and (not self._anchor_heading_initialized):
                 self._anchor_init_base_quat_wxyz[:] = quat_normalize_wxyz(base_quat_wxyz)
                 self._anchor_init_ref_quat_wxyz[:] = ref_quat_wxyz
-                if is_vla_joint29_source and (not self._vla_use_heading_align):
-                    # Optional: disable heading align for VLA path to compare behavior.
+                if is_vla_joint29_v3_source or (is_vla_joint29_source and (not self._vla_use_heading_align)):
+                    # V3 VLA payloads are already reconstructed in Isaac world and must not be heading-aligned again.
                     self._anchor_heading_align_quat_wxyz[:] = np.array(
                         [1.0, 0.0, 0.0, 0.0], dtype=np.float32
                     )

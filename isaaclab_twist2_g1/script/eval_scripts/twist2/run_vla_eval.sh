@@ -11,7 +11,7 @@ HEADLESS=1
 MAX_STEPS=1000
 VIDEO_FPS=30
 POST_TERMINATION_RECORD_STEPS=50
-ROBOT_TYPE="unitree_g1_localdelta_v2"
+ROBOT_TYPE="unitree_g1_rotlocal_v3"
 
 TWIST2_MODEL_PATH="${ISAACLAB_ROOT}/../TWIST2/assets/ckpts/twist2_1017_20k.onnx"
 

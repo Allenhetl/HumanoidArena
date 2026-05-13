@@ -124,7 +124,7 @@ parser.add_argument("--enable_smpl_vis", action="store_true", default=True,
                     help="Enable SMPL visualization for VLA/OpenPI video recording")
 
 
-parser.add_argument("--robot_type", type=str, default="unitree_g1_localdelta_v2", help="robot type")
+parser.add_argument("--robot_type", type=str, default="unitree_g1_rotlocal_v3", help="robot type")
 parser.add_argument("--enable_dex1_dds", action="store_true", help="enable gripper DDS")
 parser.add_argument("--enable_dex3_dds", action="store_true", help="enable dexterous hand DDS")
 parser.add_argument("--enable_inspire_dds", action="store_true", help="enable inspire hand DDS")
