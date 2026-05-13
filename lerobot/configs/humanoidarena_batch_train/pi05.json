@@ -23,6 +23,6 @@
     "wandb.mode": "online",
     "seed": 42,
     "batch_size": 8,
-    "steps": 50000
+    "steps": 100000
   }
 }

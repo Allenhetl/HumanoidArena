@@ -55,10 +55,10 @@ class BoxingBagSceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    world_camera = CameraBaseCfg.get_world_camera_config(
-        pos_offset=(-4.39689, -2.7965, 2.15956),
-        rot_offset=(0.62349, 0.41055, -0.34404, -0.56951),
-        focal_length=12,
-        horizontal_aperture=27,
-        convention="opengl"
-    )
+    # world_camera = CameraBaseCfg.get_world_camera_config(
+    #     pos_offset=(-4.39689, -2.7965, 2.15956),
+    #     rot_offset=(0.62349, 0.41055, -0.34404, -0.56951),
+    #     focal_length=12,
+    #     horizontal_aperture=27,
+    #     convention="opengl"
+    # )

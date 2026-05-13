@@ -257,7 +257,6 @@ def build_command(
     args['output_dir'] = row['output_dir']
     args['job_name'] = row['job_name']
     args['wandb.project'] = runtime_cfg.get('wandb_project', 'HumanoidArena')
-    args["wandb.disable_artifact"] = True
     args['wandb.notes'] = (
         f"task={row['task_name']},dataset_kind={row['dataset_kind']},"
         f"dataset={row['dataset_dir_name']},model={row['model_alias']}"

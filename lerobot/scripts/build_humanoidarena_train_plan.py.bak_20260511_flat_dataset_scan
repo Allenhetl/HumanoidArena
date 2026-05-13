@@ -97,30 +97,12 @@ def classify_dataset_kind(name: str) -> str:
     return head or lowered
 
 
-def is_lerobot_dataset_dir(path: Path) -> bool:
-    return (
-        path.is_dir()
-        and (path / 'meta' / 'info.json').is_file()
-        and (path / 'meta' / 'tasks.parquet').is_file()
-        and (path / 'data').is_dir()
-    )
-
-
 def iter_dataset_dirs(dataset_root: Path):
-    if is_lerobot_dataset_dir(dataset_root):
-        yield dataset_root.parent, dataset_root
-        return
-
     for task_dir in sorted(dataset_root.iterdir()):
         if not task_dir.is_dir() or task_dir.name == '.cache':
             continue
-
-        if is_lerobot_dataset_dir(task_dir):
-            yield dataset_root, task_dir
-            continue
-
         for dataset_dir in sorted(task_dir.iterdir()):
-            if is_lerobot_dataset_dir(dataset_dir):
+            if dataset_dir.is_dir():
                 yield task_dir, dataset_dir
 
 
