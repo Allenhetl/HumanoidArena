@@ -19,6 +19,19 @@ def _env_reward_dt(env) -> float:
     return 0.02
 
 
+def sync_task_events_after_physics_step(env) -> None:
+    """Run task-local post-physics hooks when control code advances sim without ``env.step()``."""
+    env_cfg = getattr(env, "cfg", None)
+    if env_cfg is None:
+        return
+    apply_open_door_latch = getattr(env_cfg, "apply_open_door_latch_interval", None)
+    if callable(apply_open_door_latch):
+        try:
+            apply_open_door_latch(env, reason="manual_post_physics")
+        except Exception as exc:
+            print(f"[task_events] open door latch sync failed: {exc}")
+
+
 def sync_reward_after_physics_step(env) -> None:
     """Run once per control step after physics when ``env.step()`` is skipped (replay / wholebody).
 
@@ -26,6 +39,7 @@ def sync_reward_after_physics_step(env) -> None:
     never runs, so sparse pick-place rewards never latch. Must use the same ``dt`` as
     ``ManagerBasedRLEnv.step()`` (``step_dt`` / ``physics_dt * decimation``).
     """
+    sync_task_events_after_physics_step(env)
     rm = getattr(env, "reward_manager", None)
     if rm is None:
         return

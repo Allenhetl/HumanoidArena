@@ -13,9 +13,9 @@ else
   DEFAULT_ENV_CONFIG_YAML="tasks/common_env_config/small_warehouse_vision_navigation_sonic.yaml"
 fi
 ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-${DEFAULT_ENV_CONFIG_YAML}}"
-# ENV_CONFIG_YAML="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/tasks/common_env_config/opendoor_sonic.yaml"
+ENV_CONFIG_YAML="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/tasks/common_env_config/opendoor_sonic.yaml"
 # ENV_CONFIG_YAML="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/tasks/common_env_config/doubledesk_sonic.yaml"
-ENV_CONFIG_YAML="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/tasks/common_env_config/livingroom_sitsofa_sonic.yaml"
+# ENV_CONFIG_YAML="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/tasks/common_env_config/livingroom_sitsofa_sonic.yaml"
 # ENV_CONFIG_YAML="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/tasks/common_env_config/livingroom_grapcup_sonic.yaml"
 # ENV_CONFIG_YAML="tasks/common_env_config/pickplace_box_sonic.yaml"
 # ENV_CONFIG_YAML="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/tasks/common_env_config/football_single_sonic.yaml"

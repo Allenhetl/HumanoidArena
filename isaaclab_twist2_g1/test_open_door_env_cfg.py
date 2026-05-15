@@ -90,6 +90,10 @@ def _load_open_door_env_cfg_module(monkeypatch):
     class RewardTermCfg(_CfgBase):
         pass
 
+    class EventTermCfg(_CfgBase):
+        pass
+
+    managers.EventTermCfg = EventTermCfg
     managers.ObservationGroupCfg = ObservationGroupCfg
     managers.ObservationTermCfg = ObservationTermCfg
     managers.RewardTermCfg = RewardTermCfg
@@ -225,6 +229,71 @@ def _load_open_door_env_cfg_module(monkeypatch):
     monkeypatch.setitem(sys.modules, TARGET_MODULE_NAME, module)
     spec.loader.exec_module(module)
     return module
+
+
+def test_open_door_event_cfg_is_empty_by_default(monkeypatch) -> None:
+    monkeypatch.delenv("OPEN_DOOR_EVENT_SMOKE", raising=False)
+    monkeypatch.delenv("OPEN_DOOR_LATCH_ENABLE", raising=False)
+    monkeypatch.delenv("OPEN_DOOR_LATCH_DISABLE", raising=False)
+    module = _load_open_door_env_cfg_module(monkeypatch)
+
+    assert "open_door_event_smoke_startup" not in module.EventCfg.__dict__
+    assert "open_door_event_smoke_reset" not in module.EventCfg.__dict__
+    assert "open_door_event_smoke_interval" not in module.EventCfg.__dict__
+    assert "open_door_latch_startup" not in module.EventCfg.__dict__
+    assert "open_door_latch_reset" not in module.EventCfg.__dict__
+    assert "open_door_latch_poll" not in module.EventCfg.__dict__
+
+
+def test_open_door_event_smoke_registers_startup_only(monkeypatch) -> None:
+    monkeypatch.setenv("OPEN_DOOR_EVENT_SMOKE", "1")
+    monkeypatch.setenv("OPEN_DOOR_EVENT_SMOKE_MODE", "startup")
+    module = _load_open_door_env_cfg_module(monkeypatch)
+
+    assert module.EventCfg.open_door_event_smoke_startup.mode == "startup"
+    assert module.EventCfg.open_door_event_smoke_startup.func is module._open_door_event_smoke
+    assert "open_door_event_smoke_reset" not in module.EventCfg.__dict__
+    assert "open_door_event_smoke_interval" not in module.EventCfg.__dict__
+
+
+def test_open_door_latch_event_cfg_registers_startup_reset_and_interval(monkeypatch) -> None:
+    monkeypatch.delenv("OPEN_DOOR_EVENT_SMOKE", raising=False)
+    monkeypatch.setenv("OPEN_DOOR_LATCH_ENABLE", "1")
+    module = _load_open_door_env_cfg_module(monkeypatch)
+
+    assert module.EventCfg.open_door_latch_startup.mode == "startup"
+    assert module.EventCfg.open_door_latch_reset.mode == "reset"
+    assert module.EventCfg.open_door_latch_poll.mode == "interval"
+    assert module.EventCfg.open_door_latch_poll.interval_range_s == (0.02, 0.02)
+
+
+def test_open_door_latch_threshold_uses_signed_direction(monkeypatch) -> None:
+    module = _load_open_door_env_cfg_module(monkeypatch)
+    cfg = module.MoveOpenDoorG129Dex3WholebodyEnvCfg()
+    cfg.__post_init__()
+
+    cfg._open_door_handle_unlock_angle_deg = -20.0
+    assert cfg._open_door_latch_unlock_threshold_met(-21.0)
+    assert not cfg._open_door_latch_unlock_threshold_met(-19.0)
+
+    cfg._open_door_handle_unlock_angle_deg = 20.0
+    assert cfg._open_door_latch_unlock_threshold_met(21.0)
+    assert not cfg._open_door_latch_unlock_threshold_met(19.0)
+
+
+def test_sync_reward_after_physics_step_runs_open_door_post_physics_hook() -> None:
+    from tools.get_reward import sync_reward_after_physics_step
+
+    calls = []
+    env = SimpleNamespace(
+        cfg=SimpleNamespace(
+            apply_open_door_latch_interval=lambda env_arg, reason: calls.append((env_arg, reason)),
+        ),
+    )
+
+    sync_reward_after_physics_step(env)
+
+    assert calls == [(env, "manual_post_physics")]
 
 
 def test_open_door_initialize_task_scene_sets_replay_flag(monkeypatch) -> None:
