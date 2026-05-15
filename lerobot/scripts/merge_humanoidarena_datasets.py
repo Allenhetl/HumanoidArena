@@ -25,10 +25,10 @@ from lerobot.datasets.io_utils import load_info, load_stats, write_info, write_s
 
 
 DEFAULT_DATASETS_ROOT = Path(
-    "/ai/Yichi/taowen/dataset_v2/HumanoidArena_datasets_v2"
+    "/ai/Yichi/taowen/dataset_v3/HumanoidArena_datasets_v3"
 )
 DEFAULT_OUTPUT_BASE = Path(
-    "/ai/Yichi/taowen/dataset_v2/HumanoidArena_merged_datasets_v2"
+    "/ai/Yichi/taowen/dataset_v3/HumanoidArena_merged_datasets_v3"
 )
 DEFAULT_REPO_PREFIX = "local"
 
@@ -96,13 +96,13 @@ def default_output_root(args: argparse.Namespace) -> Path:
     if args.output_root is not None:
         return args.output_root
     names = {
-        "all": "all_16_localdelta_v2",
-        "sonic": "sonic_8_localdelta_v2",
-        "twist2": "twist2_8_localdelta_v2",
+        "all": "all_16_rotlocal_v3",
+        "sonic": "sonic_8_rotlocal_v3",
+        "twist2": "twist2_8_rotlocal_v3",
     }
     if args.mode == "csv":
         stem = args.csv.stem if args.csv is not None else "csv"
-        return DEFAULT_OUTPUT_BASE / f"{stem}_merged_localdelta_v2"
+        return DEFAULT_OUTPUT_BASE / f"{stem}_merged_rotlocal_v3"
     return DEFAULT_OUTPUT_BASE / names[args.mode]
 
 
@@ -160,7 +160,7 @@ def discover_datasets(args: argparse.Namespace) -> list[Path]:
                 continue
             name = dataset_dir.name.lower()
             if args.mode == "all":
-                if name in {"sonic_localdelta_v2", "twist2_localdelta_v2"}:
+                if name in {"sonic_rotlocal_v3", "twist2_rotlocal_v3"}:
                     paths.append(dataset_dir)
             elif args.mode == "sonic":
                 if "sonic" in name:

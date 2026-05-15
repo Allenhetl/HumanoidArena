@@ -33,7 +33,7 @@ class OpenDoorSceneCfg(InteractiveSceneCfg):
             rot=DOOR_ROT,
         ),
         spawn=UsdFileCfg(
-            usd_path=f"{project_root}/assets/objects/small_warehouse/small_warehouse_opendoor/interaction_obj/door001/model_door001_vali.usd",
+            usd_path=f"{project_root}/assets/objects/small_warehouse/small_warehouse_opendoor/interaction_obj/door001/model_door001_vali_gate_welded.usd",
             activate_contact_sensors=True,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=True,

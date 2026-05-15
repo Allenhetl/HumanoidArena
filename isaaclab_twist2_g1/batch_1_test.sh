@@ -6,7 +6,7 @@ SELECTED_EVAL_BACKEND="${EVAL_BACKEND:-${BATCH_TEST_BACKEND:-all}}"
 export NUM_WORKERS="${NUM_WORKERS:-2}"
 TEST_MODE="${TEST_MODE:-base_test}"
 export TEST_MODE
-export RESULTS_TAG_PREFIX="${RESULTS_TAG_PREFIX:-${BATCH_RESULTS_PREFIX:-${1:-localdelta_v2}}}"
+export RESULTS_TAG_PREFIX="${RESULTS_TAG_PREFIX:-${BATCH_RESULTS_PREFIX:-${1:-}}}"
 if [[ -n "${RESULTS_TAG_PREFIX}" ]]; then
   export RESULTS_TAG_PREFIX
   echo "[batch_1_test] RESULTS_TAG_PREFIX=${RESULTS_TAG_PREFIX}"
@@ -57,11 +57,11 @@ run_batch() {
 # run_batch "/ai/Yichi/taowen/ckpts/0424_new_100000/small_100000/HSI_sit_sofa" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_sit_sofa.sh
 # run_batch "/ai/Yichi/taowen/ckpts/0424_new_100000/small_100000/HSI_vision_navi" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_vision_navi.sh
 
-run_batch "/ai/Yichi/taowen/ckpts/0511_humanoidArenaV2_mergeall_finished" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_open_door.sh
-run_batch "/ai/Yichi/taowen/ckpts/0511_humanoidArenaV2_mergeall_finished" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_pp_box.sh
-run_batch "/ai/Yichi/taowen/ckpts/0511_humanoidArenaV2_mergeall_finished" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_boxing.sh
-run_batch "/ai/Yichi/taowen/ckpts/0511_humanoidArenaV2_mergeall_finished" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_football.sh
-run_batch "/ai/Yichi/taowen/ckpts/0511_humanoidArenaV2_mergeall_finished" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_doubledesk.sh
-run_batch "/ai/Yichi/taowen/ckpts/0511_humanoidArenaV2_mergeall_finished" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_sit_sofa.sh
-run_batch "/ai/Yichi/taowen/ckpts/0511_humanoidArenaV2_mergeall_finished" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_vision_navi.sh
+run_batch "/ai/Yichi/taowen/ckpts/0513_humanoidArenaV3_mergeall_finished" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_open_door.sh
+# run_batch "/ai/Yichi/taowen/ckpts/0513_humanoidArenaV3_mergeall_finished" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_pp_box.sh
+# run_batch "/ai/Yichi/taowen/ckpts/0513_humanoidArenaV3_mergeall_finished" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_boxing.sh
+# run_batch "/ai/Yichi/taowen/ckpts/0513_humanoidArenaV3_mergeall_finished" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_football.sh
+# run_batch "/ai/Yichi/taowen/ckpts/0513_humanoidArenaV3_mergeall_finished" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_doubledesk.sh
+# run_batch "/ai/Yichi/taowen/ckpts/0513_humanoidArenaV3_mergeall_finished" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_sit_sofa.sh
+# run_batch "/ai/Yichi/taowen/ckpts/0513_humanoidArenaV3_mergeall_finished" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_vision_navi.sh
 
