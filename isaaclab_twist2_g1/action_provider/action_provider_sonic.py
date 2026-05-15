@@ -2595,6 +2595,42 @@ class SonicActionProvider(ActionProvider):
         if self._use_lerobot_vla:
             self._apply_hand_binary_targets(left_closed=False, right_closed=False)
 
+    def _prime_default_reference_heading_align(self) -> None:
+        """Heading-align the built-in joint29 default reference until a live frame arrives."""
+        if not self._sonic_joint29_mode or self._anchor_heading_initialized:
+            return
+        try:
+            robot = self.env.scene["robot"].data
+            base_quat_wxyz = robot.root_state_w[0, 3:7].cpu().numpy().astype(np.float32)
+        except Exception:
+            return
+
+        ref_quat_wxyz = np.asarray(self._ref_body_quat_window[-1], dtype=np.float32).reshape(4)
+        if float(np.linalg.norm(ref_quat_wxyz)) < 1e-6:
+            ref_quat_wxyz = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+
+        base_quat_wxyz = quat_normalize_wxyz(base_quat_wxyz)
+        ref_quat_wxyz = quat_normalize_wxyz(ref_quat_wxyz)
+        heading_align = quat_mul_wxyz(
+            quat_heading_wxyz(base_quat_wxyz),
+            quat_conjugate_wxyz(quat_heading_wxyz(ref_quat_wxyz)),
+        )
+        self._anchor_init_base_quat_wxyz[:] = base_quat_wxyz
+        self._anchor_init_ref_quat_wxyz[:] = ref_quat_wxyz
+        self._anchor_heading_align_quat_wxyz[:] = heading_align
+        self._anchor_use_heading_align = True
+
+        anchor_rot6d = compute_anchor_rot6d_wxyz(
+            base_quat_wxyz,
+            ref_quat_wxyz,
+            self._anchor_heading_align_quat_wxyz,
+            True,
+        )
+        self._latest_aligned_body_quat_wxyz[:] = quat_mul_wxyz(heading_align, ref_quat_wxyz)
+        self._latest_consumed_anchor_rot6d[:] = anchor_rot6d
+        self._body_rot6d_buf[:] = anchor_rot6d
+        self._motion_anchor_rot6d_hist[:] = anchor_rot6d
+
     def _recording_enabled_for_current_mode(self) -> bool:
         if getattr(self, "_disable_eval_recording", False):
             return False
@@ -4802,6 +4838,12 @@ class SonicActionProvider(ActionProvider):
                 "[SonicActionProvider] Encoder/Decoder missing during runtime; "
                 "refusing to fall back to default pose"
             )
+        if (
+            self._sonic_joint29_mode
+            and not self._latest_consumed_new_this_step
+            and not self._anchor_heading_initialized
+        ):
+            self._prime_default_reference_heading_align()
 
         reference_hist_sum = (
             np.abs(self._motion_joint_pos_hist).sum()

@@ -10,24 +10,24 @@ cd "${SCRIPT_DIR}" || exit 1
 PYTHON_BIN="python"
 DEFAULT_ISAACLAB_PY="/home/dreams/miniconda3/envs/unitree_sim_env_isaaclab5_0/bin/python"
 # Double-desk HOI recording (edit REPLAY_FILE for other runs)
-# REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/zk/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1776166109646066.npz"
-REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_navi/sonic/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776484843166394.npz"
-# REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/zk/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1776169668304822.npz"
+# REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/zk/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1776167292368374.npz"
+# REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_navi/sonic/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776484843166394.npz"
+# REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/zk/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1776167997659335.npz"
 # REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/perspective-use/doubledesk/Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody_sonic_1776306473351243.npz"
 # REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_double_desk/sonic_v2/tw/Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody_sonic_1777526201640070.npz"
 
-REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_boxing/sonic/zz/Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody_sonic_1777019812335356.npz"
+# REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_boxing/sonic/zz/Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody_sonic_1777019812335356.npz"
 # REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_grapcup/sonic/zz/Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody_1776841155097978.npz"
 # REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_open_door/sonic/zz/Isaac-Move-Open-Door-G129-Dex3-Wholebody_sonic_1776664605284241.npz"
 # REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/zk/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1776167367864058.npz"
-# REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_open_door/sonic/zk/Isaac-Move-Open-Door-G129-Dex3-Wholebody_sonic_1775975894226796.npz"
+REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_open_door/sonic/zz/Isaac-Move-Open-Door-G129-Dex3-Wholebody_sonic_1776666239555801.npz"
 REPLAY_MODE="direct_replay"   # inference_replay | direct_replay
 REPLAY_LOOP=0                    # 1 | 0
 TASK_NAME="${TASK_NAME:-}"       # 留空则从 replay 文件读取
-# ENV_CONFIG_YAML="tasks/common_env_config/opendoor_sonic.yaml"
+ENV_CONFIG_YAML="tasks/common_env_config/opendoor_sonic.yaml"
 # ENV_CONFIG_YAML="tasks/common_env_config/doubledesk_sonic.yaml"
 # ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/doubledesk_sonic.yaml}"
-ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/boxing_bag_sonic.yaml}"
+# ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/boxing_bag_sonic.yaml}"
 # ENV_CONFIG_YAML="tasks/common_env_config/opendoor_sonic.yaml"
 # ENV_CONFIG_YAML="tasks/common_env_config/livingroom_grapcup_sonic.yaml"
 # ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/doubledesk_sonic.yaml}"

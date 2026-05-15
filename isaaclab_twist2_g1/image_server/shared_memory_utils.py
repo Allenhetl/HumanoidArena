@@ -18,9 +18,9 @@ from typing import Optional, Dict
 
 # shared memory configuration
 DEFAULT_SHM_NAME = "isaac_multi_image_shm"
+SHM_NAME_ENV_VAR = "ISAAC_IMAGE_SHM_NAME"
+MULTI_IMAGE_SHM_NAME_ENV_VAR = "ISAAC_MULTI_IMAGE_SHM_NAME"
 
-# SHM_NAME_ENV_VAR = "ISAAC_IMAGE_SHM_NAME"
-# SHM_NAME = DEFAULT_SHM_NAME
 # MAX_CAMERA_WIDTH = 1280
 # MAX_CAMERA_HEIGHT = 720
 # MAX_CAMERA_SLOTS = 4
@@ -45,11 +45,17 @@ DEFAULT_SHM_NAME = "isaac_multi_image_shm"
 
 
 
-def resolve_shm_name(default_name: str = DEFAULT_SHM_NAME) -> str:
-    override = os.environ.get("ISAAC_MULTI_IMAGE_SHM_NAME", "").strip()
-    if override:
-        return override.lstrip("/")
-    return default_name
+def resolve_shm_name(shm_name: Optional[str] = None) -> str:
+    """Resolve the shared-memory segment name for the current process."""
+    if shm_name:
+        return str(shm_name).lstrip("/")
+
+    for env_var in (MULTI_IMAGE_SHM_NAME_ENV_VAR, SHM_NAME_ENV_VAR):
+        override = os.environ.get(env_var, "").strip()
+        if override:
+            return override.lstrip("/")
+
+    return DEFAULT_SHM_NAME
 
 
 SHM_NAME = resolve_shm_name()
@@ -78,16 +84,6 @@ class SimpleImageHeader(ctypes.Structure):
 
 
 IMAGE_ORDER = ['head', 'world', 'left', 'right']
-
-
-# def resolve_shm_name(shm_name: Optional[str] = None) -> str:
-#     """Resolve the shared-memory segment name for the current process."""
-#     if shm_name:
-#         return str(shm_name)
-#     env_value = os.environ.get(SHM_NAME_ENV_VAR, "").strip()
-#     if env_value:
-#         return env_value
-#     return DEFAULT_SHM_NAME
 
 
 class MultiImageWriter:

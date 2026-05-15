@@ -49,7 +49,7 @@ def test_apply_env_config_yaml_loads_open_door_deterministic_reset_config() -> N
         route_name="sonic",
     )
 
-    assert env_cfg.object_reset_seed_source == "env_seed"
+    assert env_cfg.object_reset_seed_source == "time"
     assert env_cfg.decimation == 4
     assert env_cfg.sim.dt == 0.005
     assert env_cfg.scene.contact_forces.update_period == 0.005
@@ -59,9 +59,9 @@ def test_apply_env_config_yaml_loads_open_door_deterministic_reset_config() -> N
             "prim_paths": ["/World/envs/env_{env_idx}/Door"],
             "prim_pose_write_mode": "local_matrix",
             "pose_range": {
-                "x": [-1.644, -1.584],
-                "y": [2.284, 2.344],
-                "z": [0.002, 0.002],
+                "x": [-0.754, 0.55],
+                "y": [-0.8, 0.1],
+                "z": [0, 0],
             },
             "zero_velocity_on_reset": True,
         }

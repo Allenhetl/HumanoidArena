@@ -58,10 +58,10 @@ run_batch() {
 # run_batch "/ai/Yichi/taowen/ckpts/0424_new_100000/small_100000/HSI_vision_navi" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_vision_navi.sh
 
 run_batch "/ai/Yichi/taowen/ckpts/0513_humanoidArenaV3_mergeall_finished" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_open_door.sh
-# run_batch "/ai/Yichi/taowen/ckpts/0513_humanoidArenaV3_mergeall_finished" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_pp_box.sh
-# run_batch "/ai/Yichi/taowen/ckpts/0513_humanoidArenaV3_mergeall_finished" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_boxing.sh
-# run_batch "/ai/Yichi/taowen/ckpts/0513_humanoidArenaV3_mergeall_finished" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_football.sh
-# run_batch "/ai/Yichi/taowen/ckpts/0513_humanoidArenaV3_mergeall_finished" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_doubledesk.sh
-# run_batch "/ai/Yichi/taowen/ckpts/0513_humanoidArenaV3_mergeall_finished" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_sit_sofa.sh
-# run_batch "/ai/Yichi/taowen/ckpts/0513_humanoidArenaV3_mergeall_finished" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_vision_navi.sh
+run_batch "/ai/Yichi/taowen/ckpts/0513_humanoidArenaV3_mergeall_finished" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_pp_box.sh
+run_batch "/ai/Yichi/taowen/ckpts/0513_humanoidArenaV3_mergeall_finished" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_boxing.sh
+run_batch "/ai/Yichi/taowen/ckpts/0513_humanoidArenaV3_mergeall_finished" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_football.sh
+run_batch "/ai/Yichi/taowen/ckpts/0513_humanoidArenaV3_mergeall_finished" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_doubledesk.sh
+run_batch "/ai/Yichi/taowen/ckpts/0513_humanoidArenaV3_mergeall_finished" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_sit_sofa.sh
+run_batch "/ai/Yichi/taowen/ckpts/0513_humanoidArenaV3_mergeall_finished" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_vision_navi.sh
 
