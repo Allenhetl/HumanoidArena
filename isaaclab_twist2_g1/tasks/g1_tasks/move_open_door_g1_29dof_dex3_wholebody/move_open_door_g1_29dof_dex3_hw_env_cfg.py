@@ -1,4 +1,5 @@
 import os
+import math
 from typing import Any
 import torch
 
@@ -185,6 +186,10 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
         self.object_reset_seed_source = "env_seed"
         self.deterministic_object_resets = []
         self._replay_initial_env_state_active = False
+        self._open_door_transform_debug_enabled = False
+        self._open_door_joint_debug_enabled = False
+        self._open_door_joint_catalog_logged = False
+        self._reset_open_door_runtime_debug_state()
 
         self.sim.dt = 0.005
         self.scene.contact_forces.update_period = self.sim.dt

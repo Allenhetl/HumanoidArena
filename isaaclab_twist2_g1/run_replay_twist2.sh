@@ -8,15 +8,16 @@ cd "${SCRIPT_DIR}" || exit 1
 # User config: edit here
 # ------------------------------------------------------------------
 PYTHON_BIN="python"
-# REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_pp_box/twist2/yb/Isaac-Move-PickPlace-Box-G129-Dex3-Wholedoby_1776697669028942.npz"
-REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_boxing/twist2/zz/Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody_1777015855762111.npz"
+REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_pp_box/twist2/yb/Isaac-Move-PickPlace-Box-G129-Dex3-Wholedoby_1776572653661957.npz"
+# REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_boxing/twist2/zz/Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody_1777015855762111.npz"
 REPLAY_MODE="direct"   # inference | direct
 REPLAY_LOOP=0             # 1 | 0
 TASK_NAME=""              # 留空则从 replay 文件读取
 # ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/opendoor_twist2.yaml}"
 # ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/livingroom_sitsofa_twist2.yaml}"
 # ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/livingroom_grapcup_twist2.yaml}"
-ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/boxing_bag_twist2.yaml}"
+ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/pickplace_box_twist2.yaml}"
+# ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/boxing_bag_twist2.yaml}"
 RUN_DEVICE="cpu"
 ROBOT_TYPE="g129"
 ROBOT_COLLIDER_MODE="box" # box | fourpoints
