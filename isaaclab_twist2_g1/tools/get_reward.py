@@ -30,6 +30,12 @@ def sync_task_events_after_physics_step(env) -> None:
             apply_open_door_latch(env, reason="manual_post_physics")
         except Exception as exc:
             print(f"[task_events] open door latch sync failed: {exc}")
+    debug_joint_runtime_step = getattr(env_cfg, "debug_joint_runtime_step", None)
+    if callable(debug_joint_runtime_step):
+        try:
+            debug_joint_runtime_step(env)
+        except Exception as exc:
+            print(f"[task_events] open door joint debug sync failed: {exc}")
 
 
 def sync_reward_after_physics_step(env) -> None:

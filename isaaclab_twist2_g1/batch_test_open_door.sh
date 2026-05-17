@@ -12,6 +12,16 @@ TWIST2_CONFIG="$TEST_CONFIG_DIR/$CONFIG_STEM""_twist2_test.yaml"
 DEFAULT_RESULTS_TAG="$TEST_MODE""_$CONFIG_STEM"
 export RESULTS_TAG="${RESULTS_TAG:-$DEFAULT_RESULTS_TAG}"
 
+configure_open_door_latch_env() {
+  if [[ "${OPEN_DOOR_LATCH_DISABLE:-0}" == "1" ]]; then
+    export OPEN_DOOR_LATCH_DISABLE=1
+    unset OPEN_DOOR_LATCH_ENABLE
+    return 0
+  fi
+
+  export OPEN_DOOR_LATCH_ENABLE="${OPEN_DOOR_LATCH_ENABLE:-1}"
+}
+
 format_duration() {
   local total_seconds="$1"
   local hours=$(( total_seconds / 3600 ))
@@ -26,6 +36,10 @@ print_batch_summary() {
   local batch_end_human="$(date '+%F %T %Z')"
   local batch_elapsed=$(( batch_end_ts - BATCH_START_TS ))
   echo "[batch_test] finished_at=${batch_end_human} total_elapsed=$(format_duration "${batch_elapsed}") exit_code=${exit_code}"
+}
+
+print_latch_env_summary() {
+  echo "[batch_test] open_door_latch env_config_yaml=${ENV_CONFIG_YAML:-<unset>} test_mode=${TEST_MODE:-<unset>} OPEN_DOOR_LATCH_ENABLE=${OPEN_DOOR_LATCH_ENABLE:-<unset>} OPEN_DOOR_LATCH_DISABLE=${OPEN_DOOR_LATCH_DISABLE:-<unset>} OPEN_DOOR_LATCH_DEBUG=${OPEN_DOOR_LATCH_DEBUG:-<unset>} OPEN_DOOR_LATCH_POLL_LOG_INTERVAL=${OPEN_DOOR_LATCH_POLL_LOG_INTERVAL:-<unset>} OPEN_DOOR_HANDLE_UNLOCK_ANGLE_DEG=${OPEN_DOOR_HANDLE_UNLOCK_ANGLE_DEG:-<unset>} OPEN_DOOR_JOINT_DEBUG=${OPEN_DOOR_JOINT_DEBUG:-<unset>} OPEN_DOOR_TRANSFORM_DEBUG=${OPEN_DOOR_TRANSFORM_DEBUG:-<unset>}"
 }
 
 run_task() {
@@ -47,6 +61,7 @@ run_task() {
   local task_start_human="$(date '+%F %T %Z')"
 
   echo "[batch_test] task=${task_name} started_at=${task_start_human}"
+  print_latch_env_summary
   bash "${script_path}"
 
   local task_end_ts="$(date +%s)"
@@ -60,6 +75,7 @@ trap 'print_batch_summary "$?"' EXIT
 echo "[batch_test] started_at=${BATCH_START_HUMAN}"
 
 export RESUME_LATEST="${RESUME_LATEST:-0}"
+configure_open_door_latch_env
 
 # Change this path for each batch run, or override MODEL_ROOT from the shell.
 BATCH_MODEL_ROOT="/ai/Yichi/taowen/ckpts/0424_new/HSI_open_door"

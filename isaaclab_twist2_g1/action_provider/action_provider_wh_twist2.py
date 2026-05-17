@@ -1264,8 +1264,12 @@ class TWIST2ActionProvider(ActionProvider):
                 raise ValueError(f"TWIST2 joints missing in Isaac asset: {missing}")
             self.twist2_action_indices = [self.joint_to_index[n] for n in self.twist2_action_joint_names]
             self.twist2_default_pos = self.env.scene["robot"].data.default_joint_pos[:, self.twist2_action_indices]
-        self.arm_action_pose = [self.joint_to_index[name] for name in self.arm_joint_mapping.keys()]
-        self.arm_action_pose_indices = [self.arm_joint_mapping[name] for name in self.arm_joint_mapping.keys()]
+        if hasattr(self, "arm_joint_mapping") and self.arm_joint_mapping:
+            self.arm_action_pose = [self.joint_to_index[name] for name in self.arm_joint_mapping.keys()]
+            self.arm_action_pose_indices = [self.arm_joint_mapping[name] for name in self.arm_joint_mapping.keys()]
+        else:
+            self.arm_action_pose = []
+            self.arm_action_pose_indices = []
         self.action_to_indices = []
         for action_joint in self.action_joint_names:
             if action_joint in self.all_joint_names:

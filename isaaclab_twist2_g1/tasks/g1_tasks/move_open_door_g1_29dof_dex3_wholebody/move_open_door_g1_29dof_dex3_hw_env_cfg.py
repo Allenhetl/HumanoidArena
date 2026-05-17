@@ -56,14 +56,59 @@ _OPEN_DOOR_DEBUG_PRIM_PATHS = (
     "/World/envs/env_0/Door/E_bodyM1_1",
     "/World/envs/env_0/Door/E_leaf_2",
     "/World/envs/env_0/Door/E_handle_4",
+    "/World/envs/env_0/Door/E_handle_4/E_Component201_5",
+    "/World/envs/env_0/Door/E_handle_4/E_Component3_6",
+    "/World/envs/env_0/Door/E_handle_4/E_Component31_7",
     "/World/envs/env_0/Door/gate",
 )
-_OPEN_DOOR_JOINT_SAMPLE_STEPS = (1, 5, 10, 20, 30, 40, 50)
+_OPEN_DOOR_DIAGNOSTIC_VERSION = "rigid_pose_v1"
+_OPEN_DOOR_JOINT_SAMPLE_STEPS = (
+    1,
+    5,
+    10,
+    20,
+    30,
+    40,
+    50,
+    75,
+    100,
+    150,
+    200,
+    300,
+    400,
+    500,
+    600,
+    700,
+    800,
+    850,
+    900,
+    950,
+    1000,
+    1100,
+    1200,
+    1300,
+    1400,
+    1450,
+    1500,
+    1550,
+    1600,
+    1650,
+    1700,
+    1750,
+    1800,
+)
 _OPEN_DOOR_EVENT_SMOKE_MODE = os.environ.get("OPEN_DOOR_EVENT_SMOKE_MODE", "startup").strip().lower()
 
 
 def _env_flag(name: str) -> bool:
     return os.environ.get(name, "0").strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _env_flag_default(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
 def _env_float(name: str, default: float) -> float:
@@ -75,6 +120,32 @@ def _env_float(name: str, default: float) -> float:
     except ValueError:
         print(f"[open_door_latch] invalid {name}={value!r}; using {default}")
         return default
+
+
+def _format_optional_float(value: float | None) -> str:
+    if value is None:
+        return "None"
+    return f"{value:.3f}"
+
+
+def _first_index(value) -> int | None:
+    if value is None:
+        return None
+    try:
+        if hasattr(value, "detach"):
+            value = value.detach().cpu().reshape(-1).tolist()
+        elif hasattr(value, "reshape") and hasattr(value, "tolist"):
+            value = value.reshape(-1).tolist()
+    except Exception:
+        pass
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return None
+        return int(value[0])
+    try:
+        return int(value)
+    except Exception:
+        return None
 
 
 def _open_door_event_smoke(env, env_ids) -> None:
@@ -108,8 +179,31 @@ def _open_door_latch_interval_event(env, env_ids) -> None:
         poll(env, env_ids=env_ids, reason="event_interval")
 
 
+def _xformable_local_matrix(xformable):
+    result = xformable.GetLocalTransformation()
+    if isinstance(result, tuple):
+        return result[0]
+    return result
+
+
+def _matrix_cell(matrix, row: int, col: int) -> float:
+    try:
+        return float(matrix[row][col])
+    except Exception:
+        pass
+    try:
+        return float(matrix[row, col])
+    except Exception:
+        pass
+    try:
+        return float(matrix[row * 4 + col])
+    except Exception:
+        pass
+    return float(matrix.GetRow(row)[col])
+
+
 def _matrix_to_rows(matrix) -> list[list[float]]:
-    return [[float(matrix[row][col]) for col in range(4)] for row in range(4)]
+    return [[_matrix_cell(matrix, row, col) for col in range(4)] for row in range(4)]
 
 
 def _quat_wxyz_from_matrix(matrix) -> np.ndarray:
@@ -293,13 +387,17 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
         self.object_reset_seed_source = "env_seed"
         self.deterministic_object_resets = []
         self._replay_initial_env_state_active = False
-        self._open_door_transform_debug_enabled = False
-        self._open_door_joint_debug_enabled = False
+        self._open_door_transform_debug_enabled = _env_flag("OPEN_DOOR_TRANSFORM_DEBUG")
+        self._open_door_joint_debug_enabled = _env_flag("OPEN_DOOR_JOINT_DEBUG")
         self._open_door_joint_catalog_logged = False
         self._open_door_latch_enabled = _env_flag("OPEN_DOOR_LATCH_ENABLE") and not _env_flag(
             "OPEN_DOOR_LATCH_DISABLE"
         )
         self._open_door_latch_debug_enabled = _env_flag("OPEN_DOOR_LATCH_DEBUG")
+        self._open_door_tensor_proxy_enabled = _env_flag_default("OPEN_DOOR_TENSOR_PROXY_ENABLE", True) and not _env_flag(
+            "OPEN_DOOR_TENSOR_PROXY_DISABLE"
+        )
+        self._open_door_dc_angle_debug_enabled = _env_flag("OPEN_DOOR_DC_ANGLE_DEBUG")
         self._open_door_handle_unlock_angle_deg = _env_float("OPEN_DOOR_HANDLE_UNLOCK_ANGLE_DEG", -20.0)
         self._open_door_leaf_lock_drive_type = os.environ.get("OPEN_DOOR_LEAF_LOCK_DRIVE_TYPE", "force").strip()
         self._open_door_leaf_lock_stiffness = _env_float("OPEN_DOOR_LEAF_LOCK_STIFFNESS", 100000.0)
@@ -311,8 +409,12 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
             int(_env_float("OPEN_DOOR_LATCH_POLL_LOG_INTERVAL", 25.0)),
         )
         self._open_door_latch_defaults: dict[str, dict[str, Any]] = {}
+        self._open_door_latch_articulation_defaults: dict[int, dict[str, Any]] = {}
         self._open_door_latch_dc_defaults: dict[int, dict[str, Any]] = {}
         self._open_door_latch_reference: dict[int, Any] = {}
+        self._open_door_latch_tensor_proxy_reference: dict[int, float] = {}
+        self._open_door_leaf_tensor_proxy_reference: dict[int, float] = {}
+        self._open_door_latch_articulation_reference: dict[int, float] = {}
         self._open_door_latch_dc_reference: dict[int, float] = {}
         self._open_door_latch_angle_source_by_env: dict[int, str] = {}
         self._open_door_latch_unlocked_env_ids: set[int] = set()
@@ -321,6 +423,8 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
         self._open_door_dc = None
         self._open_door_dc_module = None
         self._open_door_dc_cache: dict[int, dict[str, Any]] = {}
+        self._open_door_tensor_proxy_cache: dict[str, Any] = {}
+        self._open_door_articulation_cache: dict[str, Any] = {}
         self._reset_open_door_runtime_debug_state()
 
         self.sim.dt = 0.005
@@ -454,9 +558,14 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
 
                 self._capture_open_door_latch_defaults(prims)
                 self._capture_open_door_handle_reference(prims, env_id)
-                self._apply_open_door_leaf_lock(leaf_joint)
+                self._open_door_leaf_tensor_proxy_reference.pop(env_id, None)
+                self._capture_open_door_handle_tensor_proxy_reference(env, env_id)
                 self._capture_open_door_dc_defaults(env_id)
                 self._capture_open_door_handle_dc_reference(env_id)
+                self._apply_open_door_leaf_lock(leaf_joint)
+                self._capture_open_door_articulation_defaults(env, env_id)
+                self._capture_open_door_handle_articulation_reference(env, env_id)
+                self._apply_open_door_leaf_lock_articulation(env, env_id)
                 self._apply_open_door_leaf_lock_dynamic(env_id)
                 self._open_door_latch_unlocked_env_ids.discard(env_id)
 
@@ -492,14 +601,29 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
                     continue
 
                 self._capture_open_door_latch_defaults(prims)
-                handle_angle_deg = self._get_open_door_handle_angle_deg(prims, env_id)
+                handle_angle_deg = self._get_open_door_handle_angle_deg(env, prims, env_id)
                 if handle_angle_deg is None:
                     continue
                 angle_source = self._open_door_latch_angle_source_by_env.get(env_id, "unknown")
+                tensor_proxy_angle_deg = self._get_open_door_handle_angle_deg_tensor_proxy(env, env_id)
+                articulation_angle_deg = self._get_open_door_handle_angle_deg_articulation(env, env_id)
+                dynamic_angle_deg = (
+                    self._get_open_door_handle_angle_deg_dynamic(env_id)
+                    if self._open_door_dc_angle_debug_enabled
+                    else None
+                )
+                usd_xform_angle_deg = self._get_open_door_handle_angle_deg_usd_xform(prims, env_id)
+                diagnostic_angles = (
+                    f"tensor_proxy_handle_delta_deg={_format_optional_float(tensor_proxy_angle_deg)} "
+                    f"articulation_handle_delta_deg={_format_optional_float(articulation_angle_deg)} "
+                    f"dc_handle_delta_deg={_format_optional_float(dynamic_angle_deg)} "
+                    f"usd_xform_handle_delta_deg={_format_optional_float(usd_xform_angle_deg)}"
+                )
 
                 if env_id not in self._open_door_latch_unlocked_env_ids:
                     if self._open_door_latch_unlock_threshold_met(handle_angle_deg):
                         self._restore_open_door_leaf_defaults(leaf_joint)
+                        self._restore_open_door_leaf_defaults_articulation(env, env_id)
                         self._restore_open_door_leaf_defaults_dynamic(env_id)
                         self._open_door_latch_unlocked_env_ids.add(env_id)
                         print(
@@ -508,6 +632,7 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
                             f"angle_source={angle_source} "
                             f"handle_angle_deg={handle_angle_deg:.3f} "
                             f"threshold_deg={self._open_door_handle_unlock_angle_deg:.3f} "
+                            f"{diagnostic_angles} "
                             f"leaf_restored={self._format_open_door_leaf_defaults(leaf_joint)}"
                         )
                     elif should_log_poll:
@@ -516,14 +641,16 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
                             f"phase=poll env={env_id} state=locked reason={reason} "
                             f"angle_source={angle_source} "
                             f"handle_angle_deg={handle_angle_deg:.3f} "
-                            f"threshold_deg={self._open_door_handle_unlock_angle_deg:.3f}"
+                            f"threshold_deg={self._open_door_handle_unlock_angle_deg:.3f} "
+                            f"{diagnostic_angles}"
                         )
                 elif should_log_poll:
                     print(
                         "[open_door_latch] "
                         f"phase=poll env={env_id} state=unlocked reason={reason} "
                         f"angle_source={angle_source} "
-                        f"handle_angle_deg={handle_angle_deg:.3f}"
+                        f"handle_angle_deg={handle_angle_deg:.3f} "
+                        f"{diagnostic_angles}"
                     )
         except Exception as exc:
             print(f"[open_door_latch] failed during latch poll: {exc}")
@@ -587,6 +714,396 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
                 f"dynamic_control unavailable; falling back to USD xform handle angle: {exc}",
             )
             return None, None
+
+    def _get_open_door_articulation_handles(self, env) -> dict[str, Any] | None:
+        cached = self._open_door_articulation_cache.get("door")
+        if cached:
+            return cached
+        try:
+            door_asset = env.scene["door"]
+        except Exception as exc:
+            self._log_open_door_latch_missing_once(
+                "articulation_door_asset",
+                f"door articulation unavailable from env.scene: {exc}",
+            )
+            return None
+
+        if not hasattr(door_asset, "data") or not hasattr(door_asset.data, "joint_pos"):
+            self._log_open_door_latch_missing_once(
+                "articulation_joint_pos",
+                "door scene asset has no IsaacLab articulation joint_pos tensor; articulation angle source disabled",
+            )
+            return None
+
+        leaf_id = None
+        handle_id = None
+        if hasattr(door_asset, "find_joints"):
+            try:
+                leaf_id = _first_index(door_asset.find_joints(["RevoluteJoint_door001"], preserve_order=True)[0])
+            except Exception:
+                leaf_id = None
+            for pattern in ("E_handle_4/RevoluteJoint", "RevoluteJoint$"):
+                try:
+                    handle_id = _first_index(door_asset.find_joints([pattern], preserve_order=True)[0])
+                except Exception:
+                    handle_id = None
+                if handle_id is not None:
+                    break
+
+        joint_names = list(getattr(door_asset, "joint_names", []) or getattr(door_asset.data, "joint_names", []) or [])
+        if leaf_id is None:
+            for index, name in enumerate(joint_names):
+                if str(name) == "RevoluteJoint_door001" or str(name).endswith("/E_leaf_2/RevoluteJoint_door001"):
+                    leaf_id = index
+                    break
+        if handle_id is None:
+            for index, name in enumerate(joint_names):
+                if str(name) == "RevoluteJoint" or str(name).endswith("/E_handle_4/RevoluteJoint"):
+                    handle_id = index
+                    break
+
+        if handle_id is None:
+            self._log_open_door_latch_missing_once(
+                "articulation_handle_joint",
+                f"door articulation handle joint not found; joint_names={joint_names}",
+            )
+            return None
+
+        handles = {
+            "door_asset": door_asset,
+            "leaf_id": leaf_id,
+            "handle_id": handle_id,
+            "joint_names": joint_names,
+        }
+        self._open_door_articulation_cache["door"] = handles
+        if self._open_door_latch_debug_enabled:
+            print(
+                "[open_door_latch] "
+                f"phase=articulation_catalog leaf_id={leaf_id} handle_id={handle_id} joint_names={joint_names}"
+            )
+        return handles
+
+    def _resolve_open_door_tensor_proxy_root_expr(self) -> str | None:
+        try:
+            import isaaclab.sim as sim_utils
+            from pxr import UsdPhysics
+        except Exception as exc:
+            self._log_open_door_latch_missing_once(
+                "tensor_proxy_import",
+                f"tensor proxy unavailable; failed to import IsaacLab/PXR helpers: {exc}",
+            )
+            return None
+
+        prim_expr = "/World/envs/env_.*/Door"
+        try:
+            first_env_matching_prim = sim_utils.find_first_matching_prim(prim_expr)
+        except Exception as exc:
+            self._log_open_door_latch_missing_once(
+                "tensor_proxy_find_door",
+                f"tensor proxy failed to resolve {prim_expr}: {exc}",
+            )
+            return None
+        if first_env_matching_prim is None:
+            self._log_open_door_latch_missing_once(
+                "tensor_proxy_find_door",
+                f"tensor proxy failed to find prim for {prim_expr}",
+            )
+            return None
+
+        first_env_matching_path = first_env_matching_prim.GetPath().pathString
+        try:
+            if first_env_matching_prim.HasAPI(UsdPhysics.ArticulationRootAPI):
+                root_prims = [first_env_matching_prim]
+            else:
+                root_prims = sim_utils.get_all_matching_child_prims(
+                    first_env_matching_path,
+                    predicate=lambda prim: prim.HasAPI(UsdPhysics.ArticulationRootAPI),
+                )
+        except Exception as exc:
+            self._log_open_door_latch_missing_once(
+                "tensor_proxy_find_root",
+                f"tensor proxy failed to find articulation root under {first_env_matching_path}: {exc}",
+            )
+            return None
+
+        if len(root_prims) == 0:
+            self._log_open_door_latch_missing_once(
+                "tensor_proxy_find_root",
+                f"tensor proxy found no ArticulationRootAPI under {first_env_matching_path}",
+            )
+            return None
+        if len(root_prims) > 1:
+            self._log_open_door_latch_missing_once(
+                "tensor_proxy_find_root",
+                f"tensor proxy found multiple articulation roots under {first_env_matching_path}: {root_prims}",
+            )
+            return None
+
+        root_path = root_prims[0].GetPath().pathString
+        relative_root_path = root_path[len(first_env_matching_path) :]
+        return prim_expr + relative_root_path
+
+    def _get_open_door_tensor_proxy_handles(self, env) -> dict[str, Any] | None:
+        if not self._open_door_tensor_proxy_enabled:
+            return None
+        cached = self._open_door_tensor_proxy_cache.get("door")
+        if cached:
+            return cached
+
+        root_expr = self._resolve_open_door_tensor_proxy_root_expr()
+        if not root_expr:
+            return None
+
+        try:
+            from isaacsim.core.simulation_manager import SimulationManager
+
+            physics_sim_view = SimulationManager.get_physics_sim_view()
+            view = physics_sim_view.create_articulation_view(root_expr.replace(".*", "*"))
+        except Exception as exc:
+            self._log_open_door_latch_missing_once(
+                "tensor_proxy_create_view",
+                f"tensor proxy failed to create articulation view at {root_expr}: {exc}",
+            )
+            return None
+
+        if getattr(view, "_backend", None) is None:
+            self._log_open_door_latch_missing_once(
+                "tensor_proxy_create_view",
+                f"tensor proxy articulation view has no backend at {root_expr}",
+            )
+            return None
+
+        joint_names = list(getattr(view.shared_metatype, "dof_names", []) or [])
+        leaf_id = None
+        handle_id = None
+        for index, name in enumerate(joint_names):
+            name = str(name)
+            if leaf_id is None and (name == "RevoluteJoint_door001" or name.endswith("/E_leaf_2/RevoluteJoint_door001")):
+                leaf_id = index
+            if handle_id is None and (name == "RevoluteJoint" or name.endswith("/E_handle_4/RevoluteJoint")):
+                handle_id = index
+
+        if handle_id is None:
+            self._log_open_door_latch_missing_once(
+                "tensor_proxy_handle_joint",
+                f"tensor proxy handle joint not found; root_expr={root_expr} joint_names={joint_names}",
+            )
+            return None
+
+        handles = {
+            "view": view,
+            "root_expr": root_expr,
+            "leaf_id": leaf_id,
+            "handle_id": handle_id,
+            "joint_names": joint_names,
+        }
+        self._open_door_tensor_proxy_cache["door"] = handles
+        if self._open_door_latch_debug_enabled:
+            print(
+                "[open_door_latch] "
+                f"phase=tensor_proxy_catalog root_expr={root_expr} "
+                f"leaf_id={leaf_id} handle_id={handle_id} joint_names={joint_names}"
+            )
+        return handles
+
+    def _capture_open_door_handle_tensor_proxy_reference(self, env, env_id: int):
+        handles = self._get_open_door_tensor_proxy_handles(env)
+        if not handles:
+            return
+        pos = self._read_open_door_tensor_proxy_handle_pos(handles, env_id, log_failures=False)
+        if pos is None:
+            handles = self._rebuild_open_door_tensor_proxy_handles(env, env_id, "reference")
+            pos = self._read_open_door_tensor_proxy_handle_pos(handles, env_id) if handles else None
+        if pos is None:
+            return
+        self._open_door_latch_tensor_proxy_reference[env_id] = pos
+        if self._open_door_latch_debug_enabled:
+            print(
+                "[open_door_latch] "
+                f"phase=tensor_proxy_reference env={env_id} "
+                f"handle_pos_rad={pos:.6f} handle_pos_deg={math.degrees(pos):.3f}"
+            )
+
+    def _rebuild_open_door_tensor_proxy_handles(self, env, env_id: int, reason: str) -> dict[str, Any] | None:
+        self._open_door_tensor_proxy_cache.pop("door", None)
+        handles = self._get_open_door_tensor_proxy_handles(env)
+        if handles and self._open_door_latch_debug_enabled:
+            print(f"[open_door_latch] phase=tensor_proxy_rebuild env={env_id} reason={reason}")
+        return handles
+
+    def _read_open_door_tensor_proxy_handle_pos(
+        self, handles: dict[str, Any], env_id: int, log_failures: bool = True
+    ) -> float | None:
+        return self._read_open_door_tensor_proxy_dof_pos(handles, env_id, handles["handle_id"], "handle", log_failures)
+
+    def _read_open_door_tensor_proxy_dof_pos(
+        self,
+        handles: dict[str, Any],
+        env_id: int,
+        dof_id: int | None,
+        label: str,
+        log_failures: bool = True,
+    ) -> float | None:
+        if dof_id is None:
+            if log_failures:
+                self._log_open_door_latch_missing_once(
+                    f"tensor_proxy_{label}_joint",
+                    f"env={env_id} tensor proxy {label} joint unavailable",
+                )
+            return None
+        view = handles["view"]
+        try:
+            joint_pos = view.get_dof_positions()
+        except Exception as exc:
+            if log_failures:
+                self._log_open_door_latch_missing_once(
+                    f"tensor_proxy_positions:{env_id}",
+                    f"env={env_id} tensor proxy failed to read dof positions: {exc}",
+                )
+            return None
+        try:
+            return float(joint_pos[env_id, dof_id].item())
+        except Exception:
+            try:
+                return float(joint_pos[0, dof_id].item())
+            except Exception as exc:
+                self._log_open_door_latch_missing_once(
+                    f"tensor_proxy_angle:{label}:{env_id}",
+                    f"env={env_id} tensor proxy {label} angle unavailable: {exc}",
+                )
+                return None
+
+    def _get_open_door_handle_angle_deg_tensor_proxy(self, env, env_id: int) -> float | None:
+        handles = self._get_open_door_tensor_proxy_handles(env)
+        if not handles:
+            return None
+        pos = self._read_open_door_tensor_proxy_handle_pos(handles, env_id, log_failures=False)
+        if pos is None:
+            handles = self._rebuild_open_door_tensor_proxy_handles(env, env_id, "read_failure")
+            pos = self._read_open_door_tensor_proxy_handle_pos(handles, env_id) if handles else None
+        if pos is None:
+            return None
+        reference = self._open_door_latch_tensor_proxy_reference.setdefault(env_id, pos)
+        return math.degrees(pos - reference)
+
+    def _get_open_door_leaf_angle_deg_tensor_proxy(self, env, env_id: int) -> float | None:
+        handles = self._get_open_door_tensor_proxy_handles(env)
+        if not handles:
+            return None
+        leaf_id = handles.get("leaf_id")
+        if leaf_id is None:
+            return None
+        pos = self._read_open_door_tensor_proxy_dof_pos(handles, env_id, leaf_id, "leaf", log_failures=False)
+        if pos is None:
+            handles = self._rebuild_open_door_tensor_proxy_handles(env, env_id, "leaf_read_failure")
+            if handles:
+                pos = self._read_open_door_tensor_proxy_dof_pos(
+                    handles, env_id, handles.get("leaf_id"), "leaf"
+                )
+        if pos is None:
+            return None
+        reference = self._open_door_leaf_tensor_proxy_reference.setdefault(env_id, pos)
+        return math.degrees(pos - reference)
+
+    def _capture_open_door_articulation_defaults(self, env, env_id: int):
+        handles = self._get_open_door_articulation_handles(env)
+        if not handles or env_id in self._open_door_latch_articulation_defaults:
+            return
+        door_asset = handles["door_asset"]
+        leaf_id = handles.get("leaf_id")
+        if leaf_id is None:
+            return
+        defaults = {}
+        data = getattr(door_asset, "data", None)
+        for attr_name, key in (
+            ("joint_stiffness", "stiffness"),
+            ("joint_damping", "damping"),
+            ("joint_friction_coeff", "friction"),
+        ):
+            values = getattr(data, attr_name, None)
+            if values is None:
+                continue
+            try:
+                defaults[key] = float(values[env_id, leaf_id].item())
+            except Exception:
+                try:
+                    defaults[key] = float(values[0, leaf_id].item())
+                except Exception:
+                    pass
+        self._open_door_latch_articulation_defaults[env_id] = defaults
+        if self._open_door_latch_debug_enabled:
+            print(f"[open_door_latch] phase=articulation_defaults env={env_id} leaf_defaults={defaults}")
+
+    def _capture_open_door_handle_articulation_reference(self, env, env_id: int):
+        handles = self._get_open_door_articulation_handles(env)
+        if not handles:
+            return
+        door_asset = handles["door_asset"]
+        handle_id = handles["handle_id"]
+        try:
+            pos = float(door_asset.data.joint_pos[env_id, handle_id].item())
+        except Exception:
+            try:
+                pos = float(door_asset.data.joint_pos[0, handle_id].item())
+            except Exception as exc:
+                self._log_open_door_latch_missing_once(
+                    f"articulation_reference:{env_id}",
+                    f"env={env_id} articulation handle reference unavailable: {exc}",
+                )
+                return
+        self._open_door_latch_articulation_reference[env_id] = pos
+        if self._open_door_latch_debug_enabled:
+            print(
+                "[open_door_latch] "
+                f"phase=articulation_reference env={env_id} "
+                f"handle_pos_rad={pos:.6f} handle_pos_deg={math.degrees(pos):.3f}"
+            )
+
+    def _write_open_door_leaf_articulation_props(self, env, env_id: int, values: dict[str, Any]) -> bool:
+        handles = self._get_open_door_articulation_handles(env)
+        if not handles:
+            return False
+        door_asset = handles["door_asset"]
+        leaf_id = handles.get("leaf_id")
+        if leaf_id is None:
+            return False
+        joint_ids = [leaf_id]
+        try:
+            if values.get("stiffness") is not None and hasattr(door_asset, "write_joint_stiffness_to_sim"):
+                door_asset.write_joint_stiffness_to_sim(float(values["stiffness"]), joint_ids=joint_ids)
+            if values.get("damping") is not None and hasattr(door_asset, "write_joint_damping_to_sim"):
+                door_asset.write_joint_damping_to_sim(float(values["damping"]), joint_ids=joint_ids)
+            if values.get("friction") is not None and hasattr(door_asset, "write_joint_friction_coefficient_to_sim"):
+                door_asset.write_joint_friction_coefficient_to_sim(float(values["friction"]), joint_ids=joint_ids)
+            if self._open_door_latch_debug_enabled:
+                print(
+                    "[open_door_latch] "
+                    f"phase=articulation_leaf_props env={env_id} leaf_id={leaf_id} values={values}"
+                )
+            return True
+        except Exception as exc:
+            self._log_open_door_latch_missing_once(
+                f"articulation_leaf_props:{env_id}:{values}",
+                f"env={env_id} failed to write articulation leaf props: {exc}",
+            )
+            return False
+
+    def _apply_open_door_leaf_lock_articulation(self, env, env_id: int) -> bool:
+        return self._write_open_door_leaf_articulation_props(
+            env,
+            env_id,
+            {
+                "stiffness": self._open_door_leaf_lock_stiffness,
+                "damping": self._open_door_leaf_lock_damping,
+                "friction": self._open_door_leaf_lock_joint_friction,
+            },
+        )
+
+    def _restore_open_door_leaf_defaults_articulation(self, env, env_id: int) -> bool:
+        defaults = self._open_door_latch_articulation_defaults.get(env_id)
+        if not defaults:
+            return False
+        return self._write_open_door_leaf_articulation_props(env, env_id, defaults)
 
     def _get_open_door_dc_handles(self, env_id: int) -> dict[str, Any] | None:
         dc, dc_mod = self._get_open_door_dc()
@@ -863,11 +1380,22 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
                 f"handle_pos_rad={float(state.pos):.6f} handle_pos_deg={math.degrees(float(state.pos)):.3f}"
             )
 
-    def _get_open_door_handle_angle_deg(self, prims: dict[str, Any], env_id: int) -> float | None:
-        dynamic_angle = self._get_open_door_handle_angle_deg_dynamic(env_id)
-        if dynamic_angle is not None:
-            self._open_door_latch_angle_source_by_env[env_id] = "dynamic_control"
-            return dynamic_angle
+    def _get_open_door_handle_angle_deg(self, env, prims: dict[str, Any], env_id: int) -> float | None:
+        tensor_proxy_angle = self._get_open_door_handle_angle_deg_tensor_proxy(env, env_id)
+        if tensor_proxy_angle is not None:
+            self._open_door_latch_angle_source_by_env[env_id] = "tensor_proxy"
+            return tensor_proxy_angle
+
+        articulation_angle = self._get_open_door_handle_angle_deg_articulation(env, env_id)
+        if articulation_angle is not None:
+            self._open_door_latch_angle_source_by_env[env_id] = "articulation_tensor"
+            return articulation_angle
+
+        if self._open_door_dc_angle_debug_enabled:
+            dynamic_angle = self._get_open_door_handle_angle_deg_dynamic(env_id)
+            if dynamic_angle is not None:
+                self._open_door_latch_angle_source_by_env[env_id] = "dynamic_control"
+                return dynamic_angle
 
         from pxr import Usd, UsdGeom
 
@@ -889,6 +1417,47 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
         delta = reference.GetInverse() * current
         self._open_door_latch_angle_source_by_env[env_id] = "usd_xform"
         return _signed_axis_angle_deg_from_matrix(delta, "Y")
+
+    def _get_open_door_handle_angle_deg_usd_xform(self, prims: dict[str, Any], env_id: int) -> float | None:
+        from pxr import Usd, UsdGeom
+
+        if env_id not in self._open_door_latch_reference:
+            self._capture_open_door_handle_reference(prims, env_id)
+        reference = self._open_door_latch_reference.get(env_id)
+        if reference is None:
+            return None
+
+        leaf_prim = prims.get("leaf")
+        handle_prim = prims.get("handle")
+        if not leaf_prim or not leaf_prim.IsValid() or not handle_prim or not handle_prim.IsValid():
+            return None
+
+        cache = UsdGeom.XformCache(Usd.TimeCode.Default())
+        leaf_world = cache.GetLocalToWorldTransform(leaf_prim)
+        handle_world = cache.GetLocalToWorldTransform(handle_prim)
+        current = leaf_world.GetInverse() * handle_world
+        delta = reference.GetInverse() * current
+        return _signed_axis_angle_deg_from_matrix(delta, "Y")
+
+    def _get_open_door_handle_angle_deg_articulation(self, env, env_id: int) -> float | None:
+        handles = self._get_open_door_articulation_handles(env)
+        if not handles:
+            return None
+        door_asset = handles["door_asset"]
+        handle_id = handles["handle_id"]
+        try:
+            pos = float(door_asset.data.joint_pos[env_id, handle_id].item())
+        except Exception:
+            try:
+                pos = float(door_asset.data.joint_pos[0, handle_id].item())
+            except Exception as exc:
+                self._log_open_door_latch_missing_once(
+                    f"articulation_angle:{env_id}",
+                    f"env={env_id} articulation handle angle unavailable: {exc}",
+                )
+                return None
+        reference = self._open_door_latch_articulation_reference.setdefault(env_id, pos)
+        return math.degrees(pos - reference)
 
     def _get_open_door_handle_angle_deg_dynamic(self, env_id: int) -> float | None:
         handles = self._get_open_door_dc_handles(env_id)
@@ -933,6 +1502,39 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
             f"max_force={float(values.get('max_force', 0.0)):g},"
             f"joint_friction={float(values.get('joint_friction', 0.0)):g}"
         )
+
+    def get_open_door_reward_diagnostics(self, env) -> dict[str, Any]:
+        latch_unlocked = torch.full(
+            (env.num_envs,),
+            not self._open_door_latch_enabled,
+            device=env.device,
+            dtype=torch.bool,
+        )
+        handle_angle_deg = torch.full((env.num_envs,), float("nan"), device=env.device, dtype=torch.float32)
+        leaf_angle_deg = torch.full((env.num_envs,), float("nan"), device=env.device, dtype=torch.float32)
+        angle_source: list[str] = []
+
+        for env_id in range(int(env.num_envs)):
+            if self._open_door_latch_enabled:
+                latch_unlocked[env_id] = env_id in self._open_door_latch_unlocked_env_ids
+
+            handle_angle = self._get_open_door_handle_angle_deg_tensor_proxy(env, env_id)
+            if handle_angle is not None:
+                handle_angle_deg[env_id] = float(handle_angle)
+
+            leaf_angle = self._get_open_door_leaf_angle_deg_tensor_proxy(env, env_id)
+            if leaf_angle is not None:
+                leaf_angle_deg[env_id] = float(leaf_angle)
+
+            angle_source.append(self._open_door_latch_angle_source_by_env.get(env_id, "tensor_proxy_reward_diag"))
+
+        return {
+            "latch_enabled": self._open_door_latch_enabled,
+            "latch_unlocked": latch_unlocked,
+            "handle_angle_deg": handle_angle_deg,
+            "leaf_angle_deg": leaf_angle_deg,
+            "angle_source": angle_source,
+        }
 
     def _disable_overlapping_room_gate_collisions(self):
         try:
@@ -990,11 +1592,11 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
                 return
 
             door_joint_ids, _ = door_asset.find_joints(["RevoluteJoint_door001"], preserve_order=True)
-            handle_joint_ids, _ = door_asset.find_joints(["RevoluteJoint_handle001"], preserve_order=True)
+            handle_joint_ids, _ = door_asset.find_joints(["RevoluteJoint$"], preserve_order=True)
             door_joint = stage.GetPrimAtPath(
                 "/World/envs/env_0/Door/E_leaf_2/RevoluteJoint_door001"
             )
-            handle_joint = stage.GetPrimAtPath("/World/envs/env_0/Door/RevoluteJoint_handle001")
+            handle_joint = stage.GetPrimAtPath("/World/envs/env_0/Door/E_handle_4/RevoluteJoint")
             if not door_joint or not door_joint.IsValid():
                 print("[open_door] door leaf joint not found; skipping drive override")
                 return
@@ -1040,9 +1642,14 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
             leaf_stiffness = door_asset.data.joint_stiffness[0, door_joint_ids[0]].item()
             leaf_damping = door_asset.data.joint_damping[0, door_joint_ids[0]].item()
             leaf_static_friction = door_asset.data.joint_friction_coeff[0, door_joint_ids[0]].item()
-            handle_stiffness = door_asset.data.joint_stiffness[0, handle_joint_ids[0]].item()
-            handle_damping = door_asset.data.joint_damping[0, handle_joint_ids[0]].item()
-            handle_static_friction = door_asset.data.joint_friction_coeff[0, handle_joint_ids[0]].item()
+            if len(handle_joint_ids) > 0:
+                handle_stiffness = door_asset.data.joint_stiffness[0, handle_joint_ids[0]].item()
+                handle_damping = door_asset.data.joint_damping[0, handle_joint_ids[0]].item()
+                handle_static_friction = door_asset.data.joint_friction_coeff[0, handle_joint_ids[0]].item()
+            else:
+                handle_stiffness = None
+                handle_damping = None
+                handle_static_friction = None
 
             joint_names = None
             try:
@@ -1094,7 +1701,7 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
                         "status=missing"
                     )
                     continue
-                local_matrix = UsdGeom.Xformable(prim).GetLocalTransformation()[0]
+                local_matrix = _xformable_local_matrix(UsdGeom.Xformable(prim))
                 world_matrix = cache.GetLocalToWorldTransform(prim)
                 print(
                     f"[open_door_transform_debug] phase={phase} path={path} "
@@ -1201,11 +1808,160 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
                 leaf_to_handle = leaf_world.GetInverse() * handle_world
                 leaf_to_handle_angle = _quat_angle_deg_from_matrix(leaf_to_handle)
 
+            dc_leaf_pos_deg = None
+            dc_handle_pos_deg = None
+            dc_handle_delta_deg = None
+            dc = None
+            dc_mod = None
+            dc_handles = self._get_open_door_dc_handles(0)
+            if dc_handles:
+                dc = dc_handles.get("dc")
+                dc_mod = dc_handles.get("dc_mod")
+                leaf_dof = dc_handles.get("leaf_dof")
+                handle_dof = dc_handles.get("handle_dof")
+                if dc is not None and dc_mod is not None:
+                    if leaf_dof != dc_mod.INVALID_HANDLE:
+                        leaf_state = dc.get_dof_state(leaf_dof, dc_mod.STATE_ALL)
+                        if leaf_state is not None:
+                            dc_leaf_pos_deg = math.degrees(float(leaf_state.pos))
+                    if handle_dof != dc_mod.INVALID_HANDLE:
+                        handle_state = dc.get_dof_state(handle_dof, dc_mod.STATE_ALL)
+                        if handle_state is not None:
+                            handle_pos = float(handle_state.pos)
+                            dc_handle_pos_deg = math.degrees(handle_pos)
+                            reference = self._open_door_latch_dc_reference.get(0, handle_pos)
+                            dc_handle_delta_deg = math.degrees(handle_pos - reference)
+
             print(
                 "[open_door_joint_debug] phase=runtime_sample "
+                f"version={_OPEN_DOOR_DIAGNOSTIC_VERSION} "
                 f"step={step} leaf_rotateZYX_deg={leaf_rotate} handle_rotateZYX_deg={handle_rotate} "
                 f"body_to_leaf_angle_deg={_quat_angle_deg_from_matrix(body_to_leaf):.4f} "
-                f"leaf_to_handle_angle_deg={leaf_to_handle_angle}"
+                f"leaf_to_handle_angle_deg={leaf_to_handle_angle} "
+                f"dc_leaf_pos_deg={dc_leaf_pos_deg} "
+                f"dc_handle_pos_deg={dc_handle_pos_deg} "
+                f"dc_handle_delta_deg={dc_handle_delta_deg}"
             )
+            rigid_debug_paths = [
+                path
+                for path in _OPEN_DOOR_DEBUG_PRIM_PATHS
+                if "/E_leaf_2" in path or "/E_handle_4" in path
+            ]
+            print(
+                "[open_door_joint_debug] phase=runtime_rigid_pose_probe "
+                f"version={_OPEN_DOOR_DIAGNOSTIC_VERSION} "
+                f"step={step} "
+                f"dc_handles_present={dc_handles is not None} "
+                f"dc_present={dc is not None} "
+                f"dc_mod_present={dc_mod is not None} "
+                f"get_rigid_body_api={hasattr(dc, 'get_rigid_body') if dc is not None else False} "
+                f"get_rigid_body_pose_api={hasattr(dc, 'get_rigid_body_pose') if dc is not None else False} "
+                f"path_count={len(rigid_debug_paths)}"
+            )
+            for path in _OPEN_DOOR_DEBUG_PRIM_PATHS:
+                if "/E_handle_4" not in path:
+                    continue
+                try:
+                    prim = stage.GetPrimAtPath(path)
+                    if prim is None or not prim.IsValid():
+                        print(
+                            "[open_door_joint_debug] phase=runtime_component "
+                            f"step={step} path={path} status=missing"
+                        )
+                        continue
+                    local_matrix = _xformable_local_matrix(UsdGeom.Xformable(prim))
+                    world_matrix = cache.GetLocalToWorldTransform(prim)
+                    leaf_relative = leaf_world.GetInverse() * world_matrix
+                    print(
+                        "[open_door_joint_debug] phase=runtime_component "
+                        f"step={step} path={path} "
+                        f"leaf_relative_angle_deg={_quat_angle_deg_from_matrix(leaf_relative):.4f} "
+                        f"local_matrix={_matrix_to_rows(local_matrix)} "
+                        f"world_matrix={_matrix_to_rows(world_matrix)}"
+                    )
+                except Exception as exc:
+                    print(
+                        "[open_door_joint_debug] phase=runtime_component "
+                        f"step={step} path={path} status=failed error={exc}"
+                    )
+            if not rigid_debug_paths:
+                print(
+                    "[open_door_joint_debug] phase=runtime_rigid_pose "
+                    f"version={_OPEN_DOOR_DIAGNOSTIC_VERSION} "
+                    f"step={step} status=no_debug_paths"
+                )
+                return
+            if dc_handles is None:
+                for path in rigid_debug_paths:
+                    print(
+                        "[open_door_joint_debug] phase=runtime_rigid_pose "
+                        f"version={_OPEN_DOOR_DIAGNOSTIC_VERSION} "
+                        f"step={step} path={path} status=no_dc_handles"
+                    )
+                return
+            if dc is None or dc_mod is None:
+                for path in rigid_debug_paths:
+                    print(
+                        "[open_door_joint_debug] phase=runtime_rigid_pose "
+                        f"version={_OPEN_DOOR_DIAGNOSTIC_VERSION} "
+                        f"step={step} path={path} status=no_dc_interface "
+                        f"dc_present={dc is not None} dc_mod_present={dc_mod is not None}"
+                    )
+                return
+            if not hasattr(dc, "get_rigid_body") or not hasattr(dc, "get_rigid_body_pose"):
+                for path in rigid_debug_paths:
+                    print(
+                        "[open_door_joint_debug] phase=runtime_rigid_pose "
+                        f"version={_OPEN_DOOR_DIAGNOSTIC_VERSION} "
+                        f"step={step} path={path} status=no_rigid_body_api "
+                        f"get_rigid_body_api={hasattr(dc, 'get_rigid_body')} "
+                        f"get_rigid_body_pose_api={hasattr(dc, 'get_rigid_body_pose')}"
+                    )
+                return
+            if dc is not None and dc_mod is not None:
+                invalid_handle = getattr(dc_mod, "INVALID_HANDLE", None)
+                for path in rigid_debug_paths:
+                    try:
+                        rigid_body = dc.get_rigid_body(path)
+                    except Exception as exc:
+                        print(
+                            "[open_door_joint_debug] phase=runtime_rigid_pose "
+                            f"version={_OPEN_DOOR_DIAGNOSTIC_VERSION} "
+                            f"step={step} path={path} status=get_rigid_body_failed error={exc}"
+                        )
+                        continue
+                    if rigid_body == invalid_handle:
+                        print(
+                            "[open_door_joint_debug] phase=runtime_rigid_pose "
+                            f"version={_OPEN_DOOR_DIAGNOSTIC_VERSION} "
+                            f"step={step} path={path} status=missing"
+                        )
+                        continue
+                    try:
+                        pose = dc.get_rigid_body_pose(rigid_body)
+                        pos = getattr(pose, "p", None)
+                        rot = getattr(pose, "r", None)
+                        pos_tuple = (
+                            (float(pos.x), float(pos.y), float(pos.z))
+                            if pos is not None and all(hasattr(pos, axis) for axis in ("x", "y", "z"))
+                            else None
+                        )
+                        rot_tuple = (
+                            (float(rot.w), float(rot.x), float(rot.y), float(rot.z))
+                            if rot is not None and all(hasattr(rot, axis) for axis in ("w", "x", "y", "z"))
+                            else None
+                        )
+                        print(
+                            "[open_door_joint_debug] phase=runtime_rigid_pose "
+                            f"version={_OPEN_DOOR_DIAGNOSTIC_VERSION} "
+                            f"step={step} path={path} status=ok "
+                            f"pos={pos_tuple} quat_wxyz={rot_tuple}"
+                        )
+                    except Exception as exc:
+                        print(
+                            "[open_door_joint_debug] phase=runtime_rigid_pose "
+                            f"version={_OPEN_DOOR_DIAGNOSTIC_VERSION} "
+                            f"step={step} path={path} status=get_pose_failed error={exc}"
+                        )
         except Exception as exc:
             print(f"[open_door_joint_debug] phase=runtime_sample step={step} failed: {exc}")
