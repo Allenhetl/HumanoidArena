@@ -22,7 +22,7 @@ _MIN_STANDING_UP_AXIS_Z = 0.60
 _DOOR_FRAME_HALF_WIDTH_M = 0.55
 _DOOR_PASSING_FORWARD_CLEARANCE_M = 0.02
 _STRICT_DOOR_PASSING_FORWARD_CLEARANCE_M = 0.55
-_STRICT_DOOR_LEAF_OPEN_ANGLE_DEG = 15.0
+_STRICT_DOOR_LEAF_OPEN_ANGLE_DEG = 60.0
 _LAST_DOOR_POSE_SOURCE = "unknown"
 _LAST_DOOR_POSE_DETAIL = ""
 _REWARD_DEBUG_COUNTER = 0
@@ -306,6 +306,8 @@ def _log_reward_debug(
     runtime_state: dict[str, Any],
     strict_enabled: bool,
     strict_passed_door: torch.Tensor,
+    strict_geometry_required: bool,
+    strict_geometry_ok: torch.Tensor,
     strict_latch_unlocked: torch.Tensor,
     strict_leaf_open: torch.Tensor,
 ) -> None:
@@ -349,6 +351,8 @@ def _log_reward_debug(
             f"inside_frame_width={_tensor_bool(inside_frame_width, env_id)} "
             f"passed_door={_tensor_bool(passed_door, env_id)} "
             f"strict_passed_door={_tensor_bool(strict_passed_door, env_id)} "
+            f"strict_geometry_required={strict_geometry_required} "
+            f"strict_geometry_ok={_tensor_bool(strict_geometry_ok, env_id)} "
             f"standing={_tensor_bool(standing, env_id)} "
             f"latch_enabled={bool(runtime_state.get('latch_enabled', False))} "
             f"latch_unlocked={_tensor_bool(strict_latch_unlocked, env_id)} "
@@ -398,8 +402,13 @@ def compute_success_mask(env: "ManagerBasedRLEnv") -> torch.Tensor:
     if not _env_flag_default("OPEN_DOOR_STRICT_REQUIRE_LEAF_OPEN", True):
         strict_leaf_open = _bool_tensor(env, True)
 
-    strict_success = inside_frame_width & strict_passed_door & standing & strict_latch_unlocked & strict_leaf_open
-    strict_enabled = _env_flag("OPEN_DOOR_STRICT_SUCCESS")
+    strict_geometry_required = _env_flag_default("OPEN_DOOR_STRICT_REQUIRE_GEOMETRY", False)
+    strict_geometry_ok = inside_frame_width & strict_passed_door
+    if not strict_geometry_required:
+        strict_geometry_ok = _bool_tensor(env, True)
+
+    strict_success = strict_geometry_ok & standing & strict_latch_unlocked & strict_leaf_open
+    strict_enabled = _env_flag_default("OPEN_DOOR_STRICT_SUCCESS", True)
     success = strict_success if strict_enabled else legacy_success
 
     _log_reward_debug(
@@ -418,6 +427,8 @@ def compute_success_mask(env: "ManagerBasedRLEnv") -> torch.Tensor:
         runtime_state=runtime_state,
         strict_enabled=strict_enabled,
         strict_passed_door=strict_passed_door,
+        strict_geometry_required=strict_geometry_required,
+        strict_geometry_ok=strict_geometry_ok,
         strict_latch_unlocked=strict_latch_unlocked,
         strict_leaf_open=strict_leaf_open,
     )

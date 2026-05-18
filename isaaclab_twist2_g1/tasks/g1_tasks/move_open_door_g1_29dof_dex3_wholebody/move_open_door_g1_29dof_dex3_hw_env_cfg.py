@@ -347,7 +347,7 @@ class EventCfg:
                 interval_range_s=(0.25, 0.25),
                 is_global_time=False,
             )
-    if _env_flag("OPEN_DOOR_LATCH_ENABLE") and not _env_flag("OPEN_DOOR_LATCH_DISABLE") and EventTermCfg is not None:
+    if _env_flag_default("OPEN_DOOR_LATCH_ENABLE", True) and not _env_flag("OPEN_DOOR_LATCH_DISABLE") and EventTermCfg is not None:
         open_door_latch_startup = EventTermCfg(
             func=_open_door_latch_startup_event,
             mode="startup",
@@ -390,7 +390,7 @@ class MoveOpenDoorG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
         self._open_door_transform_debug_enabled = _env_flag("OPEN_DOOR_TRANSFORM_DEBUG")
         self._open_door_joint_debug_enabled = _env_flag("OPEN_DOOR_JOINT_DEBUG")
         self._open_door_joint_catalog_logged = False
-        self._open_door_latch_enabled = _env_flag("OPEN_DOOR_LATCH_ENABLE") and not _env_flag(
+        self._open_door_latch_enabled = _env_flag_default("OPEN_DOOR_LATCH_ENABLE", True) and not _env_flag(
             "OPEN_DOOR_LATCH_DISABLE"
         )
         self._open_door_latch_debug_enabled = _env_flag("OPEN_DOOR_LATCH_DEBUG")
