@@ -66,6 +66,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lerobot_server_verify_ssl", action="store_true", default=False)
     parser.add_argument("--lerobot_gripper_threshold", type=float, default=0.5)
     parser.add_argument("--robot_type", type=str, default="unitree_g1_rotlocal_v3")
+    parser.add_argument("--vla_max_root_delta_deg", type=float, default=0.0)
     parser.add_argument("--result_json", type=str, default="")
     parser.add_argument("--success_video_dir", type=str, default="")
     parser.add_argument("--failure_video_dir", type=str, default="")

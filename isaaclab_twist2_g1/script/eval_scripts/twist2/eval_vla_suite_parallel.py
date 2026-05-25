@@ -384,6 +384,7 @@ def main() -> int:
     parser.add_argument('--step_log_every_n', type=int, default=0)
     parser.add_argument('--verbose_startup', action='store_true', default=False)
     parser.add_argument('--robot_type', type=str, default='unitree_g1_rotlocal_v3')
+    parser.add_argument('--vla_max_root_delta_deg', type=float, default=0.0)
     parser.add_argument("--twist2_model_path", type=str, required=True)
     parser.add_argument('--results_dir', type=str, required=True)
     parser.add_argument('--headless', action='store_true', default=False)

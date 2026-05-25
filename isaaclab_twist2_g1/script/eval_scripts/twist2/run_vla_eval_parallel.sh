@@ -48,6 +48,7 @@ NUM_WORKERS="${NUM_WORKERS:-4}"
 SERVER_PORT_BASE="${SERVER_PORT_BASE:-15001}"
 SERVER_PORT_MAX="${SERVER_PORT_MAX:-20000}"
 ROBOT_TYPE="${ROBOT_TYPE:-unitree_g1_rotlocal_v3}"
+VLA_MAX_ROOT_DELTA_DEG="${VLA_MAX_ROOT_DELTA_DEG:-0}"
 
 TWIST2_MODEL_PATH="${TWIST2_MODEL_PATH:-${ISAACLAB_ROOT}/../TWIST2/assets/ckpts/twist2_1017_20k.onnx}"
 
@@ -187,6 +188,7 @@ ARGS=(
   --server_port_base "${SERVER_PORT_BASE}"
   --server_port_max "${SERVER_PORT_MAX}"
   --robot_type "${ROBOT_TYPE}"
+  --vla_max_root_delta_deg "${VLA_MAX_ROOT_DELTA_DEG}"
   --twist2_model_path "${TWIST2_MODEL_PATH}"
   --results_dir "${RESULTS_DIR}"
   --isaac_device "${ISAAC_DEVICE}"

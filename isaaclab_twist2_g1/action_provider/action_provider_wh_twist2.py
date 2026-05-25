@@ -799,7 +799,12 @@ class TWIST2ActionProvider(ActionProvider):
         self._lerobot_predict_action = None
         self._lerobot_device = None
         self._lerobot_http_client = None
-        self._lerobot_vla_runtime = UnifiedRobotCurrentLocalActionRuntimeV3()
+        self._vla_max_root_delta_deg = float(getattr(args_cli, "vla_max_root_delta_deg", 0.0) or 0.0)
+        self._lerobot_vla_runtime = UnifiedRobotCurrentLocalActionRuntimeV3(
+            max_root_delta_deg=self._vla_max_root_delta_deg if self._vla_max_root_delta_deg > 0 else None
+        )
+        if self._vla_max_root_delta_deg > 0:
+            print(f"[{self.name}] VLA max_root_delta_deg={self._vla_max_root_delta_deg}")
         self._vla_initial_robot_quat_wxyz: np.ndarray | None = None
         self._lerobot_gripper_threshold = float(getattr(args_cli, "lerobot_gripper_threshold", 0.5))
         self._latest_vla_action = None

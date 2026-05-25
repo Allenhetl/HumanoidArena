@@ -219,6 +219,8 @@ def _run_episode(
         str(args.lerobot_server_timeout),
         "--robot_type",
         args.robot_type,
+        "--vla_max_root_delta_deg",
+        str(getattr(args, "vla_max_root_delta_deg", 0.0)),
         "--result_json",
         str(result_json),
         "--success_video_dir",
@@ -349,6 +351,8 @@ def _run_episode_batch(
         str(args.lerobot_server_timeout),
         "--robot_type",
         args.robot_type,
+        "--vla_max_root_delta_deg",
+        str(getattr(args, "vla_max_root_delta_deg", 0.0)),
         "--record_video_every_n",
         str(args.record_video_every_n),
         "--step_log_every_n",
@@ -615,6 +619,7 @@ def main() -> int:
     parser.add_argument("--step_log_every_n", type=int, default=0)
     parser.add_argument("--verbose_startup", action="store_true", default=False)
     parser.add_argument("--robot_type", type=str, default="unitree_g1_rotlocal_v3")
+    parser.add_argument("--vla_max_root_delta_deg", type=float, default=0.0)
     parser.add_argument("--twist2_model_path", type=str, required=True)
     parser.add_argument("--results_dir", type=str, required=True)
     parser.add_argument("--headless", action="store_true", default=False)
