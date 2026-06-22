@@ -144,6 +144,13 @@ def parse_args() -> argparse.Namespace:
         choices=["direct", "inference", "direct_replay", "inference_replay"],
     )
     parser.add_argument(
+        "--task-runtime-profile",
+        type=str,
+        default="auto",
+        choices=["auto", "inference", "replay_compat"],
+        help="Task-specific runtime profile forwarded to sim_main.py.",
+    )
+    parser.add_argument(
         "--output-root",
         type=str,
         default="",
@@ -382,6 +389,8 @@ def build_command(
         str(replay_file),
         "--replay_mode",
         args.replay_mode,
+        "--task_runtime_profile",
+        args.task_runtime_profile,
         "--record_during_replay",
         "--exit_when_replay_complete",
         "--recording_save_dir",

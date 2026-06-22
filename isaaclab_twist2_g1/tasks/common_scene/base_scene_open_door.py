@@ -6,13 +6,14 @@ from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 from isaaclab.utils import configclass
+from task_runtime_profiles import resolve_open_door_door_usd_path
 from tasks.common_config import CameraBaseCfg
 
 project_root = os.environ.get("PROJECT_ROOT")
 
 DOOR_POS = [-1.614, 2.314, 0.002]
 DOOR_ROT = [1.0, 0.0, 0.0, 0.0]
-USE_DOOR_ARTICULATION_SCENE = os.environ.get("OPEN_DOOR_SCENE_AS_ARTICULATION", "0").strip().lower() in {
+USE_DOOR_ARTICULATION_SCENE = os.environ.get("OPEN_DOOR_SCENE_AS_ARTICULATION", "1").strip().lower() in {
     "1",
     "true",
     "yes",
@@ -20,9 +21,7 @@ USE_DOOR_ARTICULATION_SCENE = os.environ.get("OPEN_DOOR_SCENE_AS_ARTICULATION", 
 }
 
 DOOR_SPAWN_CFG = UsdFileCfg(
-    # usd_path=f"{project_root}/assets/objects/small_warehouse/small_warehouse_opendoor/interaction_obj/door001/model_door001_vali_gate_welded.usd",
-    # usd_path=f"{project_root}/assets/objects/small_warehouse/small_warehouse_opendoor/interaction_obj/door001/model_door001_vali.usd",
-    usd_path=f"{project_root}/assets/objects/small_warehouse/small_warehouse_opendoor/interaction_obj/door001/model_door001.usd",
+    usd_path=resolve_open_door_door_usd_path(project_root),
     activate_contact_sensors=True,
     rigid_props=sim_utils.RigidBodyPropertiesCfg(
         disable_gravity=True,

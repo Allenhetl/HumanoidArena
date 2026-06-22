@@ -51,6 +51,7 @@ class RerecordInputFilterTests(unittest.TestCase):
             device="cpu",
             robot_type="g129",
             replay_mode="direct_replay",
+            task_runtime_profile="auto",
             sonic_encoder_path="/tmp/encoder.onnx",
             sonic_decoder_path="/tmp/decoder.onnx",
             recording_save_workers=1,
@@ -85,6 +86,8 @@ class RerecordInputFilterTests(unittest.TestCase):
         )
 
         self.assertIn("--enable_cameras", command)
+        self.assertIn("--task_runtime_profile", command)
+        self.assertIn("auto", command)
         self.assertIn("--enable_wrist_cameras", command)
         self.assertIn("--enable_perspective_camera", command)
         self.assertIn("--world_camera_port", command)
@@ -95,6 +98,7 @@ class RerecordInputFilterTests(unittest.TestCase):
             device="cpu",
             robot_type="g129",
             replay_mode="direct_replay",
+            task_runtime_profile="replay_compat",
             sonic_encoder_path="/tmp/encoder.onnx",
             sonic_decoder_path="/tmp/decoder.onnx",
             recording_save_workers=1,
@@ -129,6 +133,8 @@ class RerecordInputFilterTests(unittest.TestCase):
         )
 
         self.assertIn("--enable_cameras", command)
+        self.assertIn("--task_runtime_profile", command)
+        self.assertIn("replay_compat", command)
         self.assertIn("--enable_perspective_camera", command)
         self.assertIn("--disable_front_camera", command)
         self.assertIn("--disable_wrist_cameras", command)
@@ -184,6 +190,7 @@ class RerecordInputFilterTests(unittest.TestCase):
             env_config_yaml="/tmp/env.yaml",
             robot_type="g129",
             replay_mode="direct",
+            task_runtime_profile="auto",
             recording_save_workers=1,
             recording_save_queue_size=4,
             seed=42,
@@ -211,6 +218,8 @@ class RerecordInputFilterTests(unittest.TestCase):
         )
 
         self.assertIn("--enable_cameras", command)
+        self.assertIn("--task_runtime_profile", command)
+        self.assertIn("auto", command)
         self.assertIn("--enable_perspective_camera", command)
         self.assertIn("--disable_front_camera", command)
         self.assertIn("--disable_wrist_cameras", command)

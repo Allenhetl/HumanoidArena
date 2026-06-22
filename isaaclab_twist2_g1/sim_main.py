@@ -22,6 +22,7 @@ import numpy as np
 import torch
 import gymnasium as gym
 from pathlib import Path
+from task_runtime_profiles import apply_task_runtime_profile
 
 # Isaac Lab AppLauncher
 from isaaclab.app import AppLauncher
@@ -73,6 +74,14 @@ parser.add_argument(
     action="store_true",
     default=False,
     help="Loop local replay frames when reaching the end of the npz.",
+)
+parser.add_argument(
+    "--task_runtime_profile",
+    "--task-runtime-profile",
+    type=str,
+    default="auto",
+    choices=["auto", "inference", "replay_compat"],
+    help="Task-specific runtime profile. 'auto' selects defaults from task + replay/rerecord context.",
 )
 
 # SONIC-specific arguments (used when action_source=sonic_wholebody)
@@ -261,6 +270,8 @@ if getattr(args_cli, "record_during_replay", False) and not (
     getattr(args_cli, "input_source", "") == "replay" or getattr(args_cli, "replay_file", "")
 ):
     raise ValueError("--record_during_replay requires replay input (--replay_file / input_source=replay)")
+
+apply_task_runtime_profile(args_cli)
 
 
 if args_cli.enable_dex3_dds and args_cli.enable_dex1_dds and args_cli.enable_inspire_dds:

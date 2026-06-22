@@ -21,6 +21,11 @@ import torch
 import gymnasium as gym
 import numpy as np
 from pathlib import Path
+from task_runtime_profiles import (
+    TASK_RUNTIME_PROFILE_AUTO,
+    apply_task_runtime_profile,
+    normalize_replay_mode,
+)
 
 # Isaac Lab AppLauncher
 from isaaclab.app import AppLauncher
@@ -44,6 +49,14 @@ parser.add_argument("--replay_mode", type=str, default="inference",
                    help="Replay mode: inference (ONNX) or direct (recorded qpos)")
 parser.add_argument("--replay_loop", action="store_true", default=False,
                    help="Loop replay when reaching end")
+parser.add_argument(
+    "--task_runtime_profile",
+    "--task-runtime-profile",
+    type=str,
+    default=TASK_RUNTIME_PROFILE_AUTO,
+    choices=["auto", "inference", "replay_compat"],
+    help="Task-specific runtime profile. 'auto' selects defaults from task + replay context.",
+)
 
 parser.add_argument("--robot_type", type=str, default="g129", help="robot type")
 parser.add_argument("--stats_interval", type=float, default=10.0, help="statistics print interval (seconds)")
@@ -106,6 +119,7 @@ def _resolve_replay_task_name(args_cli):
 
 
 _resolve_replay_task_name(args_cli)
+apply_task_runtime_profile(args_cli, context=normalize_replay_mode(args_cli.replay_mode))
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app

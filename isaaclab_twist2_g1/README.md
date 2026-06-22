@@ -21,6 +21,10 @@
 
 所有启动参数都直接写在脚本顶部，按需手改。
 
+更完整的命令速查见：
+
+- [docs/COMMAND_QUICKSTART.md](/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/docs/COMMAND_QUICKSTART.md)
+
 ### Live
 
 - [run_twist2.sh](/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/run_twist2.sh)
@@ -34,6 +38,13 @@
   启动 `TWIST2` replay。
 - [run_replay_sonic.sh](/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/run_replay_sonic.sh)
   启动 `SONIC` replay。
+
+### Rerecord / VLA Eval
+
+- [run_rerecord.sh](/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/run_rerecord.sh)
+  并行触发 `TWIST2` / `SONIC` rerecord。
+- [docs/COMMAND_QUICKSTART.md#4-lerobot--vla-评测](/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/docs/COMMAND_QUICKSTART.md#4-lerobot--vla-评测)
+  批量评测、LeRobot / VLA 常用命令入口。
 
 ## Replay 模式
 
@@ -56,6 +67,8 @@
   `TWIST2` 录制 `.npz` 数据格式说明。
 - [SONIC_DATA_FORMAT.md](/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/docs/SONIC_DATA_FORMAT.md)
   `SONIC` 录制 `.npz` 数据格式说明。
+- [COMMAND_QUICKSTART.md](/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/docs/COMMAND_QUICKSTART.md)
+  常用运行命令速查。
 
 ## 备注
 

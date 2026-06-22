@@ -11,6 +11,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from task_runtime_profiles import apply_task_runtime_profile
 
 ISAACLAB_ROOT = Path(__file__).resolve().parents[3]
 PROJECT_ROOT = str(ISAACLAB_ROOT)
@@ -848,6 +849,8 @@ def main() -> int:
     args_cli.multi_gpu = False
     _append_unique_kit_arg(args_cli, "--/renderer/multiGpu/enabled=False")
     _configure_renderer_gpu(args_cli)
+    _normalize_control_routing(args_cli)
+    apply_task_runtime_profile(args_cli)
     app_launcher = AppLauncher(args_cli)
     simulation_app = app_launcher.app
 
@@ -861,7 +864,6 @@ def main() -> int:
     from tasks.common_runtime import apply_optional_runtime_augments, setup_vision_test_light
     SimpleVideoRecorder = _load_simple_video_recorder()
 
-    _normalize_control_routing(args_cli)
     episode_specs = _load_episode_specs(args_cli)
     if not episode_specs:
         raise ValueError("No episode specs resolved")

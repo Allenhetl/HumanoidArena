@@ -47,6 +47,10 @@
 
 ## 使用流程
 
+常用命令已经单独整理到：
+
+- [isaaclab_twist2_g1/docs/COMMAND_QUICKSTART.md](./isaaclab_twist2_g1/docs/COMMAND_QUICKSTART.md)
+
 ### Step 1：打开 XRobotToolkit
 
 在 **Linux 机器**上启动 XRobotToolkit，用于接收 PICO 头显的姿态数据。
@@ -86,6 +90,10 @@ actual_human_height=1.79   # 单位：米，根据实际身高调整
 
 ### Step 3：运行 Isaac Lab
 
+常用 live / 录制命令见：
+
+- [isaaclab_twist2_g1/docs/COMMAND_QUICKSTART.md#1-遥操作录制](./isaaclab_twist2_g1/docs/COMMAND_QUICKSTART.md#1-遥操作录制)
+
 在 `isaaclab_twist2_g1` 根目录下启动仿真：
 
 ```bash
@@ -107,6 +115,12 @@ bash run_sonic.sh
 - [isaaclab_twist2_g1/README.md](./isaaclab_twist2_g1/README.md)
 
 ### Step 4：运行 replay
+
+常用 replay / rerecord / LeRobot 评测命令见：
+
+- [isaaclab_twist2_g1/docs/COMMAND_QUICKSTART.md#2-replay](./isaaclab_twist2_g1/docs/COMMAND_QUICKSTART.md#2-replay)
+- [isaaclab_twist2_g1/docs/COMMAND_QUICKSTART.md#3-rerecord](./isaaclab_twist2_g1/docs/COMMAND_QUICKSTART.md#3-rerecord)
+- [isaaclab_twist2_g1/docs/COMMAND_QUICKSTART.md#4-lerobot--vla-评测](./isaaclab_twist2_g1/docs/COMMAND_QUICKSTART.md#4-lerobot--vla-评测)
 
 ```bash
 bash isaaclab_twist2_g1/run_replay_twist2.sh

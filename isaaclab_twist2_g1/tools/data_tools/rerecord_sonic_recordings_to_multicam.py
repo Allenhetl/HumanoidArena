@@ -166,6 +166,13 @@ def parse_args() -> argparse.Namespace:
         help="Replay mode used during migration.",
     )
     parser.add_argument(
+        "--task-runtime-profile",
+        type=str,
+        default="auto",
+        choices=["auto", "inference", "replay_compat"],
+        help="Task-specific runtime profile forwarded to sim_main.py.",
+    )
+    parser.add_argument(
         "--output-suffix",
         type=str,
         default="_multicam_rerecord",
@@ -524,6 +531,8 @@ def build_command(
         str(source_file),
         "--replay_mode",
         args.replay_mode,
+        "--task_runtime_profile",
+        args.task_runtime_profile,
         "--record_during_replay",
         "--exit_when_replay_complete",
         "--recording_save_dir",

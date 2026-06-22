@@ -9,6 +9,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from task_runtime_profiles import apply_task_runtime_profile
 
 ISAACLAB_ROOT = Path(__file__).resolve().parents[3]
 PROJECT_ROOT = str(ISAACLAB_ROOT)
@@ -764,6 +765,8 @@ def main() -> int:
     existing_kit_args = (getattr(args_cli, "kit_args", "") or "").split()
     if disable_multi_gpu_arg not in existing_kit_args:
         args_cli.kit_args = " ".join([*existing_kit_args, disable_multi_gpu_arg]).strip()
+    _normalize_control_routing(args_cli)
+    apply_task_runtime_profile(args_cli)
     app_launcher = AppLauncher(args_cli)
     simulation_app = app_launcher.app
 
@@ -775,7 +778,6 @@ def main() -> int:
 
     SimpleVideoRecorder = _load_simple_video_recorder()
 
-    _normalize_control_routing(args_cli)
     episode_specs = _load_episode_specs(args_cli)
     server_urls = _load_server_urls(args_cli)
     env = None
