@@ -151,10 +151,72 @@ class RerecordInputFilterTests(unittest.TestCase):
             (input_root / "leftover_temp.npz").write_bytes(b"partial")
 
             npz_paths = twist2_rerecord.find_npz_files(input_root)
-            jobs = twist2_rerecord.build_jobs(input_root, output_root, npz_paths)
+            args = SimpleNamespace(env_config_yaml="")
+            jobs = twist2_rerecord.build_jobs(args, input_root, output_root, npz_paths)
 
             self.assertEqual(len(jobs), 1)
             self.assertEqual(Path(jobs[0]["source_file"]).resolve(), good_file.resolve())
+            self.assertTrue(str(jobs[0]["env_config_yaml"]).endswith("pickplace_box_twist2.yaml"))
+
+    def test_twist2_build_jobs_uses_task_env_config_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            input_root = tmp_path / "twist2"
+            output_root = tmp_path / "twist2_multicam_rerecord"
+            input_root.mkdir()
+            output_root.mkdir()
+
+            football_file = input_root / "football.npz"
+            np.savez_compressed(
+                football_file,
+                task=np.array("Isaac-Move-Football-Single-G129-Dex3-Wholebody"),
+            )
+
+            args = SimpleNamespace(env_config_yaml="")
+            jobs = twist2_rerecord.build_jobs(args, input_root, output_root, [football_file])
+
+            self.assertEqual(len(jobs), 1)
+            self.assertTrue(str(jobs[0]["env_config_yaml"]).endswith("football_single_twist2.yaml"))
+
+    def test_twist2_build_command_can_record_perspective_only(self) -> None:
+        args = SimpleNamespace(
+            device="cpu",
+            env_config_yaml="/tmp/env.yaml",
+            robot_type="g129",
+            replay_mode="direct",
+            recording_save_workers=1,
+            recording_save_queue_size=4,
+            seed=42,
+            enable_perspective_camera=True,
+            disable_front_camera=True,
+            disable_wrist_cameras=True,
+            headless=True,
+        )
+        runtime_config = build_worker_runtime_config(
+            worker_index=0,
+            image_port_base=5600,
+            image_port_stride=10,
+            process_id=4321,
+            session_token="deadbeef",
+        )
+
+        command = twist2_rerecord.build_command(
+            args,
+            python_bin="/usr/bin/python",
+            replay_file=Path("/tmp/source.npz"),
+            output_dir=Path("/tmp/output"),
+            task_name="Isaac-Move-PickPlace-Box-G129-Dex3-Wholedoby",
+            env_config_yaml="/tmp/env.yaml",
+            runtime_config=runtime_config,
+        )
+
+        self.assertIn("--enable_cameras", command)
+        self.assertIn("--enable_perspective_camera", command)
+        self.assertIn("--disable_front_camera", command)
+        self.assertIn("--disable_wrist_cameras", command)
+        self.assertNotIn("--enable_wrist_cameras", command)
+        self.assertIn("--world_camera_port", command)
+        self.assertIn("5601", command)
 
 
 if __name__ == "__main__":

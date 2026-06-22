@@ -59,10 +59,25 @@ def resolve_shm_name(shm_name: Optional[str] = None) -> str:
 
 
 SHM_NAME = resolve_shm_name()
+
+
+def resolve_shm_size(default_size: int) -> int:
+    """Resolve shared-memory size from env, falling back to the legacy default."""
+    raw_value = os.environ.get("ISAAC_IMAGE_SHM_SIZE_BYTES", "").strip()
+    if not raw_value:
+        return int(default_size)
+    try:
+        size = int(raw_value)
+    except ValueError:
+        print(f"[MultiImageWriter] Invalid ISAAC_IMAGE_SHM_SIZE_BYTES={raw_value!r}; using {default_size}")
+        return int(default_size)
+    return max(int(default_size), size)
+
+
 # RGB: 640 * 480 * 3 * 4 cameras = 3,686,400 bytes
 # Depth: 640 * 480 * 4 (float32) * 4 cameras = 4,915,200 bytes
 # Total: ~8.6MB + 2KB header
-SHM_SIZE = 640 * 480 * 3 * 4 + 640 * 480 * 4 * 4 + 2048
+SHM_SIZE = resolve_shm_size(640 * 480 * 3 * 4 + 640 * 480 * 4 * 4 + 2048)
 
 
 

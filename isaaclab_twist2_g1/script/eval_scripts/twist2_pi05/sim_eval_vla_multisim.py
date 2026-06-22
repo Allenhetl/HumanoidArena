@@ -50,7 +50,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lerobot_server_timeout", type=float, default=5.0)
     parser.add_argument("--lerobot_server_verify_ssl", action="store_true", default=False)
     parser.add_argument("--lerobot_gripper_threshold", type=float, default=0.5)
-    parser.add_argument("--robot_type", type=str, default="unitree_g1_rotlocal_v3")
+    parser.add_argument("--robot_type", type=str, default="unitree_g1_refpose_v3_1")
     parser.add_argument("--video_fps", type=int, default=30)
     parser.add_argument("--post_termination_record_steps", type=int, default=0)
     parser.add_argument("--recording_save_dir", type=str, default="")
@@ -276,9 +276,9 @@ class MultiEnvVLATwist2Runtime:
         self.obs_single_dim = 127
         self.gripper_threshold = float(getattr(args_cli, "lerobot_gripper_threshold", 0.5))
         self.enable_robot = args_cli.robot_type
-        if self.enable_robot != "unitree_g1_rotlocal_v3":
+        if self.enable_robot != "unitree_g1_refpose_v3_1":
             raise ValueError(
-                "Multi-env VLA v3 runtime requires robot_type=unitree_g1_rotlocal_v3; "
+                "Multi-env VLA v3.1 runtime requires robot_type=unitree_g1_refpose_v3_1; "
                 f"got {self.enable_robot!r}"
             )
 
@@ -467,7 +467,7 @@ class MultiEnvVLATwist2Runtime:
                     chunk = chunk.reshape(1, -1)
                 if chunk.ndim != 2 or chunk.shape[1] != self.vla_action_dim:
                     raise ValueError(
-                        f"Expected rotlocal v3 VLA action chunk shape [N, {self.vla_action_dim}], got {chunk.shape}"
+                        f"Expected refpose v3.1 VLA action chunk shape [N, {self.vla_action_dim}], got {chunk.shape}"
                     )
                 for action in chunk:
                     self._chunk_queues[env_id].append(self.np.asarray(action, dtype=self.np.float32).copy())

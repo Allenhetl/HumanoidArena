@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
 DEFAULT_INPUT_ROOT="${REPO_ROOT}/isaaclab_twist2_g1/recording_data"
-DEFAULT_OUTPUT_ROOT="${REPO_ROOT}/lerobot/outputs/HumanoidArena_datasets_v3"
+DEFAULT_OUTPUT_ROOT="${REPO_ROOT}/lerobot/outputs/HumanoidArena_datasets_v3_1"
 
 INPUT_ROOT="${DEFAULT_INPUT_ROOT}"
 OUTPUT_ROOT="${DEFAULT_OUTPUT_ROOT}"
@@ -24,7 +24,7 @@ usage() {
     cat <<EOF
 Usage: bash ${0} [options]
 
-Batch convert first-level HOI_*/HSI_* IsaacLab recordings into rotlocal v3 LeRobot datasets.
+Batch convert first-level HOI_*/HSI_* IsaacLab recordings into refpose v3.1 LeRobot datasets.
 
 Options:
   --input-root PATH              Source recording root. Default: ${DEFAULT_INPUT_ROOT}
@@ -215,7 +215,7 @@ convert_backend() {
     canonical_task="$(canonical_task_name "${raw_task}")"
     kind="$(backend_kind "${backend_dir}")"
     src_dir="${task_dir}/${backend_dir}"
-    dataset_name="${backend_dir}_rotlocal_v3"
+    dataset_name="${backend_dir}_refpose_v3_1"
     output_dir="${OUTPUT_ROOT}/${canonical_task}/${dataset_name}"
     repo_id="local/${canonical_task}_${dataset_name}"
 

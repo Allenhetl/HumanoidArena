@@ -480,6 +480,9 @@ class RecordingManager:
         front_rgb_list = []
         front_depth_list = []
         front_frame_indices = []
+        world_rgb_list = []
+        world_depth_list = []
+        world_frame_indices = []
         left_wrist_rgb_list = []
         left_wrist_depth_list = []
         left_wrist_frame_indices = []
@@ -550,6 +553,14 @@ class RecordingManager:
                 if depth is not None:
                     front_depth_list.append(depth)
 
+                world_rgb = vision.get('world_rgb')
+                world_depth = vision.get('world_depth')
+                if world_rgb is not None:
+                    world_rgb_list.append(world_rgb)
+                    world_frame_indices.append(i)
+                if world_depth is not None:
+                    world_depth_list.append(world_depth)
+
                 left_rgb = vision.get('left_wrist_rgb')
                 left_depth = vision.get('left_wrist_depth')
                 if left_rgb is not None:
@@ -579,7 +590,7 @@ class RecordingManager:
         add_episode_init_env_object_fields(organized, first_frame.get("episode_init_env"))
 
         # Add vision data
-        if front_rgb_list:
+        if front_rgb_list or world_rgb_list or left_wrist_rgb_list or right_wrist_rgb_list:
             fps = float(np.clip(np.nanmedian(organized["system_control_frequency"]), 1.0, 240.0))
             organized['vision_storage_format'] = np.array("video_v1")
             _store_optional_camera_stream(
@@ -599,6 +610,24 @@ class RecordingManager:
                 video_num_frames_key='vision_rgb_video_num_frames',
                 video_suffix='front_rgb',
             )
+            if _store_optional_camera_stream(
+                organized,
+                save_dir=self.save_dir,
+                task_name=self.task_name,
+                timestamp_us=timestamp_us,
+                fps=fps,
+                frames=world_rgb_list,
+                depth_frames=world_depth_list,
+                frame_indices=world_frame_indices,
+                rgb_key='vision_world_rgb',
+                depth_key='vision_world_depth',
+                indices_key='vision_world_frame_indices',
+                video_path_key='vision_world_rgb_video_path',
+                video_fps_key='vision_world_rgb_video_fps',
+                video_num_frames_key='vision_world_rgb_video_num_frames',
+                video_suffix='world_rgb',
+            ):
+                organized['schema_version'] = np.array("twist2_episode_v3_multicam")
             if _store_optional_camera_stream(
                 organized,
                 save_dir=self.save_dir,
@@ -1455,9 +1484,10 @@ class TWIST2ActionProvider(ActionProvider):
         raise ValueError(f"[{self.name}] Unsupported replay_mode: {replay_mode}")
 
     def _setup_lerobot_vla(self, args_cli) -> None:
-        if self.enable_robot != "unitree_g1_rotlocal_v3":
+        allowed_robot_types = {"unitree_g1_refpose_v3_1", "unitree_g1_rotlocal_v3"}
+        if self.enable_robot not in allowed_robot_types:
             raise ValueError(
-                f"[{self.name}] VLA v3 runtime requires robot_type=unitree_g1_rotlocal_v3; "
+                f"[{self.name}] VLA v3.1 runtime requires robot_type=unitree_g1_refpose_v3_1; "
                 f"got {self.enable_robot!r}"
             )
         if self._lerobot_server_url:
@@ -3287,6 +3317,20 @@ class TWIST2ActionProvider(ActionProvider):
             else:
                 vision_data["right_wrist_rgb"] = None
                 vision_data["right_wrist_depth"] = None
+
+            if "world_camera" in self.env.scene.keys():
+                world_camera = self.env.scene["world_camera"]
+                if "rgb" in world_camera.data.output:
+                    vision_data["world_rgb"] = world_camera.data.output["rgb"][0].cpu().numpy().copy()
+                else:
+                    vision_data["world_rgb"] = None
+                if "distance_to_image_plane" in world_camera.data.output:
+                    vision_data["world_depth"] = world_camera.data.output["distance_to_image_plane"][0].cpu().numpy().copy()
+                else:
+                    vision_data["world_depth"] = None
+            else:
+                vision_data["world_rgb"] = None
+                vision_data["world_depth"] = None
         except Exception as e:
             print(f"[{self.name}] Failed to get camera data: {e}")
             vision_data["rgb"] = None
@@ -3296,6 +3340,8 @@ class TWIST2ActionProvider(ActionProvider):
             vision_data["left_wrist_depth"] = None
             vision_data["right_wrist_rgb"] = None
             vision_data["right_wrist_depth"] = None
+            vision_data["world_rgb"] = None
+            vision_data["world_depth"] = None
 
         robot_data["vision"] = vision_data
 

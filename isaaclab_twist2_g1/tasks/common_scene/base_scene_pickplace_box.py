@@ -96,13 +96,13 @@ class PickPlaceBoxSceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    # world_camera = CameraBaseCfg.get_world_camera_config(
-    #     pos_offset=(0.08792, -4.59362, 2.05127),
-    #     rot_offset=(0.63441, 0.29145, 0.29887, 0.65058),
-    #     focal_length=12,
-    #     horizontal_aperture=27,
-    #     convention="opengl"
-    # )
+    world_camera = CameraBaseCfg.get_world_camera_config(
+        pos_offset=(0.08792, -4.59362, 2.05127),
+        rot_offset=(0.63441, 0.29145, 0.29887, 0.65058),
+        focal_length=12,
+        horizontal_aperture=27,
+        convention="opengl",
+    )
 
 
 # Backward-compatible alias for any older references.

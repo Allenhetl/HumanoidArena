@@ -2181,9 +2181,11 @@ class SonicActionProvider(ActionProvider):
         print('Successful load sonic model')
 
     def _setup_lerobot_vla(self, args_cli) -> None:
-        if self.enable_robot != "unitree_g1_rotlocal_v3":
+        allowed_robot_types = {"unitree_g1_refpose_v3_1", "unitree_g1_rotlocal_v3"}
+        if self.enable_robot not in allowed_robot_types:
             raise ValueError(
-                "[SonicActionProvider] VLA v3 runtime requires robot_type=unitree_g1_rotlocal_v3; "
+                "[SonicActionProvider] VLA v3.1 runtime requires "
+                "robot_type=unitree_g1_refpose_v3_1; "
                 f"got {self.enable_robot!r}"
             )
         if self._lerobot_server_url:
@@ -2398,7 +2400,7 @@ class SonicActionProvider(ActionProvider):
             and getattr(self._lerobot_vla_runtime, "_prev_root_quat_wxyz", None) is None
         ):
             self._lerobot_vla_runtime.prime_root_quat(current_robot_quat_wxyz)
-        prev_runtime_root_quat = getattr(self._lerobot_vla_runtime, "_prev_action_rel_quat_wxyz", None)
+        prev_runtime_root_quat = getattr(self._lerobot_vla_runtime, "_prev_action_ref_quat_wxyz", None)
         row_delta_deg = 0.0
         col_delta_deg = 0.0
         if prev_runtime_root_quat is not None:

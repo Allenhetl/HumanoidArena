@@ -23,6 +23,7 @@ from smpl_lerobot_v3_common import (
     prepare_output_root,
     validate_isaac_time_rows,
     validate_video_frame_indices,
+    write_v31_protocol_metadata,
 )
 
 
@@ -30,24 +31,24 @@ DEFAULT_INPUT_ROOT = Path(
     "/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_grap_cup/sonic"
 )
 DEFAULT_OUTPUT_ROOT = Path(
-    "/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/HumanoidArena_datasets_v3/HOI_grap_cup/sonic_rotlocal_v3"
+    "/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/HumanoidArena_datasets_v3_1/HOI_grap_cup/sonic_refpose_v3_1"
 )
-DEFAULT_REPO_ID = "local/sonic_rotlocal_v3"
+DEFAULT_REPO_ID = "local/sonic_refpose_v3_1"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Convert SONIC IsaacLab recordings into LeRobot rotlocal v3 data. "
+            "Convert SONIC IsaacLab recordings into LeRobot refpose v3.1 data. "
             "The action target is a 40D canonical input at Isaac control time: "
-            "target-heading-local xy delta, root z, robot-current-local target root rot6d, "
+            "reference-base-local xy delta, root z, episode-reference root rot6d, "
             "29 canonical joints, hand binary."
         )
     )
     parser.add_argument("--input-root", type=Path, default=DEFAULT_INPUT_ROOT)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--repo-id", type=str, default=DEFAULT_REPO_ID)
-    parser.add_argument("--robot-type", type=str, default="unitree_g1_rotlocal_v3")
+    parser.add_argument("--robot-type", type=str, default="unitree_g1_refpose_v3_1")
     parser.add_argument("--fps", type=int, default=None)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--overwrite", action="store_true")
@@ -177,8 +178,10 @@ def main() -> None:
     finally:
         dataset.finalize()
 
+    write_v31_protocol_metadata(output_root, backend_source="sonic", fps=fps)
+
     logging.info(
-        "Finished v3 conversion: %d episodes, %d frames. Stats were written by LeRobot metadata.",
+        "Finished v3.1 conversion: %d episodes, %d frames. Stats were written by LeRobot metadata.",
         converted_episodes,
         total_frames,
     )

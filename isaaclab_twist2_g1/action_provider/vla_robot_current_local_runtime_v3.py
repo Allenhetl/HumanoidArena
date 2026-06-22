@@ -25,7 +25,7 @@ from action_provider.vla_smpl_runtime import (
 )
 
 
-ROBOT_CURRENT_LOCAL_V3_SCHEMA_VERSION = "robot_current_local_rot_isaac_time_v3"
+ROBOT_CURRENT_LOCAL_V3_SCHEMA_VERSION = "unitree_g1_gmt_refpose_v3_1"
 VLA_ROBOT_CURRENT_LOCAL_V3_STATE_DIM = VLA_SMPL_STATE_DIM
 VLA_ROBOT_CURRENT_LOCAL_V3_ACTION_DIM = VLA_SMPL_ACTION_DIM
 VLA_ROBOT_CURRENT_LOCAL_V3_HAND_DIM = VLA_SMPL_HAND_DIM
@@ -39,10 +39,10 @@ STATE_NAMES = [
 ]
 
 ACTION_NAMES = [
-    "action.root_target_heading_local_xy_delta.x",
-    "action.root_target_heading_local_xy_delta.y",
+    "action.root_ref_base_local_xy_delta.x",
+    "action.root_ref_base_local_xy_delta.y",
     "action.root_z",
-    *[f"action.root_current_local_target_rot6d.{idx}" for idx in range(6)],
+    *[f"action.root_ref_rot6d.{idx}" for idx in range(6)],
     *[f"action.joint_pos.{name}" for name in CANONICAL_JOINT_NAMES_29],
     "action.hand_binary.left",
     "action.hand_binary.right",
@@ -94,6 +94,23 @@ def rotate_target_heading_local_delta_to_world(
     return _rot_from_quat_wxyz(quat_heading_wxyz(target_root_quat_wxyz)).apply(local_delta_3d)[:2].astype(np.float32)
 
 
+def rotate_target_base_local_xy_delta_to_world(
+    *,
+    target_root_quat_wxyz: np.ndarray,
+    target_base_local_xy_delta: np.ndarray,
+    desired_world_z_delta: float = 0.0,
+) -> np.ndarray:
+    """Map stored base-local xy displacement to world xyz while hitting the target z delta."""
+    rot = _rot_from_quat_wxyz(target_root_quat_wxyz).as_matrix()
+    local_xy = np.asarray(target_base_local_xy_delta, dtype=np.float32).reshape(2)
+    denom = float(rot[2, 2])
+    if abs(denom) < 1e-6:
+        denom = 1e-6 if denom >= 0.0 else -1e-6
+    local_z = (float(desired_world_z_delta) - float(rot[2, 0]) * float(local_xy[0]) - float(rot[2, 1]) * float(local_xy[1])) / denom
+    local_delta = np.array([local_xy[0], local_xy[1], local_z], dtype=np.float32)
+    return (rot @ local_delta).astype(np.float32)
+
+
 def build_vla_rotlocal_v3_observation_state(
     *,
     initial_robot_orientation_wxyz: np.ndarray,
@@ -120,17 +137,17 @@ def build_vla_rotlocal_v3_observation_state(
 
 def build_vla_rotlocal_v3_action(
     *,
-    root_target_heading_local_xy_delta: np.ndarray,
+    root_ref_base_local_xy_delta: np.ndarray,
     root_z: np.ndarray | float,
-    root_current_local_target_rot6d: np.ndarray,
+    root_ref_rot6d: np.ndarray,
     joint_pos_canonical_29: np.ndarray,
     hand_binary: np.ndarray,
 ) -> np.ndarray:
     action = np.concatenate(
         [
-            np.asarray(root_target_heading_local_xy_delta, dtype=np.float32).reshape(2),
+            np.asarray(root_ref_base_local_xy_delta, dtype=np.float32).reshape(2),
             np.asarray(root_z, dtype=np.float32).reshape(1),
-            np.asarray(root_current_local_target_rot6d, dtype=np.float32).reshape(6),
+            np.asarray(root_ref_rot6d, dtype=np.float32).reshape(6),
             np.asarray(joint_pos_canonical_29, dtype=np.float32).reshape(29),
             np.asarray(hand_binary, dtype=np.float32).reshape(2),
         ],
@@ -147,14 +164,18 @@ class UnifiedRobotCurrentLocalActionFrameV3:
     root_xy_delta_world: np.ndarray
     root_z: float
     body_pos_world: np.ndarray
-    root_current_local_target_rot6d: np.ndarray
-    root_current_local_target_quat_wxyz: np.ndarray
+    root_ref_rot6d: np.ndarray
+    root_ref_quat_wxyz: np.ndarray
     target_root_quat_wxyz: np.ndarray
     current_robot_quat_wxyz: np.ndarray
     joint_pos_canonical_29: np.ndarray
     hand_binary: np.ndarray
     prev_target_root_quat_wxyz: np.ndarray | None
     prev_joint_pos_canonical_29: np.ndarray | None
+
+    @property
+    def root_ref_base_local_xy_delta(self) -> np.ndarray:
+        return self.root_target_heading_local_xy_delta
 
     @property
     def root_local_xy_delta(self) -> np.ndarray:
@@ -166,7 +187,15 @@ class UnifiedRobotCurrentLocalActionFrameV3:
 
     @property
     def root_orient_rot6d(self) -> np.ndarray:
-        return self.root_current_local_target_rot6d
+        return self.root_ref_rot6d
+
+    @property
+    def root_current_local_target_rot6d(self) -> np.ndarray:
+        return self.root_ref_rot6d
+
+    @property
+    def root_current_local_target_quat_wxyz(self) -> np.ndarray:
+        return self.root_ref_quat_wxyz
 
     @property
     def root_quat_wxyz(self) -> np.ndarray:
@@ -196,20 +225,24 @@ class UnifiedRobotCurrentLocalActionRuntimeV3:
         target_root_quat_wxyz: np.ndarray | None = None,
     ) -> None:
         self._body_xy_world = None if body_xy_world is None else np.asarray(body_xy_world, dtype=np.float32).reshape(2).copy()
+        self._body_z_world: float | None = None
+        self._episode_anchor_heading_wxyz: np.ndarray | None = None
         self._prev_target_root_quat_wxyz = (
             None
             if target_root_quat_wxyz is None
             else quat_normalize_wxyz(np.asarray(target_root_quat_wxyz, dtype=np.float32).reshape(4))
         )
         self._prev_root_quat_wxyz = None if self._prev_target_root_quat_wxyz is None else self._prev_target_root_quat_wxyz.copy()
+        self._prev_action_ref_quat_wxyz: np.ndarray | None = None
         self._prev_action_rel_quat_wxyz: np.ndarray | None = None
         self._prev_joint_pos_canonical_29: np.ndarray | None = None
         self._last_selected_root_rot6d_layout: str = "row"
 
     def prime_root_quat(self, root_quat_wxyz: np.ndarray) -> None:
-        root_quat = quat_normalize_wxyz(np.asarray(root_quat_wxyz, dtype=np.float32).reshape(4))
-        self._prev_target_root_quat_wxyz = root_quat.copy()
-        self._prev_root_quat_wxyz = root_quat.copy()
+        # Kept for older call sites. V3.1 action rotations are reference-frame
+        # quaternions, so priming with robot-current orientation would reintroduce
+        # residual semantics. The first real action initializes continuity.
+        _ = root_quat_wxyz
 
     def set_max_root_delta_deg(self, max_root_delta_deg: float | None) -> None:
         if max_root_delta_deg is None:
@@ -221,28 +254,28 @@ class UnifiedRobotCurrentLocalActionRuntimeV3:
             return
         self._max_root_delta_rad = float(np.deg2rad(value))
 
-    def _decode_action_rel_quat(self, root_current_local_target_rot6d: np.ndarray) -> np.ndarray:
+    def _decode_action_ref_quat(self, root_ref_rot6d: np.ndarray) -> np.ndarray:
         if self._root_rot6d_layout in {"row", "col"}:
-            rel_quat_wxyz = rot6d_to_quat_wxyz_with_layout(
-                root_current_local_target_rot6d,
+            ref_quat_wxyz = rot6d_to_quat_wxyz_with_layout(
+                root_ref_rot6d,
                 layout=self._root_rot6d_layout,
             ).reshape(4).astype(np.float32)
             self._last_selected_root_rot6d_layout = self._root_rot6d_layout
-            return rel_quat_wxyz
+            return ref_quat_wxyz
 
         quat_row = rot6d_to_quat_wxyz_with_layout(
-            root_current_local_target_rot6d,
+            root_ref_rot6d,
             layout="row",
         ).reshape(4).astype(np.float32)
         quat_col = rot6d_to_quat_wxyz_with_layout(
-            root_current_local_target_rot6d,
+            root_ref_rot6d,
             layout="col",
         ).reshape(4).astype(np.float32)
-        if self._prev_action_rel_quat_wxyz is None:
+        if self._prev_action_ref_quat_wxyz is None:
             self._last_selected_root_rot6d_layout = "row"
             return quat_row
-        row_delta = quat_angle_between_wxyz(self._prev_action_rel_quat_wxyz, quat_row)
-        col_delta = quat_angle_between_wxyz(self._prev_action_rel_quat_wxyz, quat_col)
+        row_delta = quat_angle_between_wxyz(self._prev_action_ref_quat_wxyz, quat_row)
+        col_delta = quat_angle_between_wxyz(self._prev_action_ref_quat_wxyz, quat_col)
         if col_delta < row_delta:
             self._last_selected_root_rot6d_layout = "col"
             return quat_col
@@ -268,15 +301,17 @@ class UnifiedRobotCurrentLocalActionRuntimeV3:
         current_robot_xy_world = np.asarray(current_robot_xy_world, dtype=np.float32).reshape(2)
         if self._body_xy_world is None:
             self._body_xy_world = current_robot_xy_world.copy()
+        if self._episode_anchor_heading_wxyz is None:
+            self._episode_anchor_heading_wxyz = quat_heading_wxyz(current_robot_quat_wxyz)
 
-        root_target_heading_local_xy_delta = action[0:2].astype(np.float32, copy=True)
+        root_ref_base_local_xy_delta = action[0:2].astype(np.float32, copy=True)
         root_z = float(action[2])
-        root_current_local_target_rot6d = action[3:9].astype(np.float32, copy=True)
+        root_ref_rot6d = action[3:9].astype(np.float32, copy=True)
         joint_pos_canonical_29 = action[9:38].astype(np.float32, copy=True)
         hand_binary = action[38:40].astype(np.float32, copy=True)
 
-        action_rel_quat_wxyz = self._decode_action_rel_quat(root_current_local_target_rot6d)
-        target_root_quat_wxyz = quat_mul_wxyz(current_robot_quat_wxyz, action_rel_quat_wxyz)
+        action_ref_quat_wxyz = self._decode_action_ref_quat(root_ref_rot6d)
+        target_root_quat_wxyz = quat_mul_wxyz(self._episode_anchor_heading_wxyz, action_ref_quat_wxyz)
         if self._max_root_delta_rad is not None and self._prev_target_root_quat_wxyz is not None:
             root_delta = quat_angle_between_wxyz(self._prev_target_root_quat_wxyz, target_root_quat_wxyz)
             if root_delta > self._max_root_delta_rad:
@@ -286,15 +321,18 @@ class UnifiedRobotCurrentLocalActionRuntimeV3:
                     target_root_quat_wxyz,
                     blend,
                 )
-                action_rel_quat_wxyz = robot_current_local_target_quat_wxyz(
-                    current_robot_quat_wxyz,
+                action_ref_quat_wxyz = quat_mul_wxyz(
+                    quat_conjugate_wxyz(self._episode_anchor_heading_wxyz),
                     target_root_quat_wxyz,
                 )
 
-        root_xy_delta_world = rotate_target_heading_local_delta_to_world(
+        previous_root_z = root_z if self._body_z_world is None else self._body_z_world
+        root_delta_world = rotate_target_base_local_xy_delta_to_world(
             target_root_quat_wxyz=target_root_quat_wxyz,
-            target_heading_local_xy_delta=root_target_heading_local_xy_delta,
+            target_base_local_xy_delta=root_ref_base_local_xy_delta,
+            desired_world_z_delta=root_z - previous_root_z,
         )
+        root_xy_delta_world = root_delta_world[:2].astype(np.float32)
         prev_target_root_quat = (
             None if self._prev_target_root_quat_wxyz is None else self._prev_target_root_quat_wxyz.copy()
         )
@@ -309,16 +347,18 @@ class UnifiedRobotCurrentLocalActionRuntimeV3:
         )
         self._prev_target_root_quat_wxyz = target_root_quat_wxyz.copy()
         self._prev_root_quat_wxyz = target_root_quat_wxyz.copy()
-        self._prev_action_rel_quat_wxyz = action_rel_quat_wxyz.copy()
+        self._prev_action_ref_quat_wxyz = action_ref_quat_wxyz.copy()
+        self._prev_action_rel_quat_wxyz = action_ref_quat_wxyz.copy()
         self._prev_joint_pos_canonical_29 = joint_pos_canonical_29.copy()
+        self._body_z_world = root_z
 
         return UnifiedRobotCurrentLocalActionFrameV3(
-            root_target_heading_local_xy_delta=root_target_heading_local_xy_delta,
+            root_target_heading_local_xy_delta=root_ref_base_local_xy_delta,
             root_xy_delta_world=root_xy_delta_world,
             root_z=root_z,
             body_pos_world=body_pos_world,
-            root_current_local_target_rot6d=root_current_local_target_rot6d,
-            root_current_local_target_quat_wxyz=action_rel_quat_wxyz,
+            root_ref_rot6d=root_ref_rot6d,
+            root_ref_quat_wxyz=action_ref_quat_wxyz,
             target_root_quat_wxyz=target_root_quat_wxyz,
             current_robot_quat_wxyz=current_robot_quat_wxyz,
             joint_pos_canonical_29=joint_pos_canonical_29,
@@ -335,7 +375,7 @@ def build_twist2_mimic_obs_v3(
 ) -> np.ndarray:
     dt = max(float(control_dt), 1e-6)
     target_root_quat_wxyz = quat_normalize_wxyz(runtime_frame.target_root_quat_wxyz.astype(np.float32, copy=False))
-    xy_vel_heading_local = (runtime_frame.root_target_heading_local_xy_delta / dt).astype(np.float32)
+    xy_vel_base_local = (runtime_frame.root_ref_base_local_xy_delta / dt).astype(np.float32)
     roll_pitch = quat_to_roll_pitch_wxyz(target_root_quat_wxyz)
     yaw_vel = compute_yaw_rate_from_quats(
         runtime_frame.prev_target_root_quat_wxyz,
@@ -345,7 +385,7 @@ def build_twist2_mimic_obs_v3(
     joint_pos_twist2 = reorder_canonical_to_twist2_29(runtime_frame.joint_pos_canonical_29)
     mimic_obs = np.concatenate(
         [
-            xy_vel_heading_local,
+            xy_vel_base_local,
             np.array([runtime_frame.root_z], dtype=np.float32),
             roll_pitch,
             yaw_vel,

@@ -20,8 +20,9 @@ USE_DOOR_ARTICULATION_SCENE = os.environ.get("OPEN_DOOR_SCENE_AS_ARTICULATION", 
 }
 
 DOOR_SPAWN_CFG = UsdFileCfg(
-    usd_path=f"{project_root}/assets/objects/small_warehouse/small_warehouse_opendoor/interaction_obj/door001/model_door001_vali_gate_welded.usd",
+    # usd_path=f"{project_root}/assets/objects/small_warehouse/small_warehouse_opendoor/interaction_obj/door001/model_door001_vali_gate_welded.usd",
     # usd_path=f"{project_root}/assets/objects/small_warehouse/small_warehouse_opendoor/interaction_obj/door001/model_door001_vali.usd",
+    usd_path=f"{project_root}/assets/objects/small_warehouse/small_warehouse_opendoor/interaction_obj/door001/model_door001.usd",
     activate_contact_sensors=True,
     rigid_props=sim_utils.RigidBodyPropertiesCfg(
         disable_gravity=True,
@@ -100,10 +101,10 @@ class OpenDoorSceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    # world_camera = CameraBaseCfg.get_world_camera_config(
-    #     pos_offset=(0.26556, 1.33827, 3.77471),
-    #     rot_offset=(0.6811, 0.21343, 0.20944, 0.66834),
-    #     focal_length=12,
-    #     horizontal_aperture=27,
-    #     convention="opengl"
-    # )
+    world_camera = CameraBaseCfg.get_world_camera_config(
+        pos_offset=(0.26556, 1.33827, 3.77471),
+        rot_offset=(0.6811, 0.21343, 0.20944, 0.66834),
+        focal_length=12,
+        horizontal_aperture=27,
+        convention="opengl",
+    )

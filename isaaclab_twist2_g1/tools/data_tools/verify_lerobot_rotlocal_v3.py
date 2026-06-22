@@ -53,12 +53,12 @@ def verify_feature_names(dataset_root: Path) -> None:
     state_names = _feature_names(info, "observation.state")
     action_names = _feature_names(info, "action")
     if state_names is not None and state_names != STATE_NAMES:
-        raise AssertionError("observation.state feature names do not match v3 STATE_NAMES")
+        raise AssertionError("observation.state feature names do not match v3.1 STATE_NAMES")
     if action_names is not None and action_names != ACTION_NAMES:
-        raise AssertionError("action feature names do not match v3 ACTION_NAMES")
+        raise AssertionError("action feature names do not match v3.1 ACTION_NAMES")
     robot_type = str(info.get("robot_type", ""))
-    if robot_type and robot_type != "unitree_g1_rotlocal_v3":
-        raise AssertionError(f"Expected robot_type=unitree_g1_rotlocal_v3, got {robot_type}")
+    if robot_type and robot_type != "unitree_g1_refpose_v3_1":
+        raise AssertionError(f"Expected robot_type=unitree_g1_refpose_v3_1, got {robot_type}")
 
 
 def load_lerobot_rows(dataset_root: Path) -> dict[int, dict[str, np.ndarray]]:
@@ -155,7 +155,7 @@ def verify_sonic_episode(
         raw_rot6d = quat_to_rot6d_wxyz(raw_quat[indices]).reshape(-1, 6)
         raw_diff = float(np.max(np.abs(raw_rot6d - expected_action[:, 3:9])))
         if raw_diff <= atol and raw_rot6d.shape[0] > 1:
-            logging.warning("%s v3 action rot6d equals raw SONIC body quat; check episode heading distribution", npz_path)
+            logging.warning("%s v3.1 action rot6d equals raw SONIC body quat; check episode heading distribution", npz_path)
 
     _warn_if_hand_binary_degenerate(dataset_rows, npz_path.as_posix())
     return int(expected_action.shape[0])
@@ -205,7 +205,7 @@ def verify_twist2_episode(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Verify rotlocal v3 LeRobot data against source npz files.")
+    parser = argparse.ArgumentParser(description="Verify refpose v3.1 LeRobot data against source npz files.")
     parser.add_argument("--backend", choices=("sonic", "twist2"), required=True)
     parser.add_argument("--input-root", type=Path, required=True)
     parser.add_argument("--dataset-root", type=Path, required=True)

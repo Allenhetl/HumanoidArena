@@ -65,6 +65,10 @@ DEFAULT_BOX_ROBOT_USD = (
     ISAACLAB_ROOT
     / "assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2.usd"
 ).resolve()
+# DEFAULT_BOX_ROBOT_USD = (
+#     ISAACLAB_ROOT
+#     / "assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2_thumd.usd"
+# ).resolve()
 DEFAULT_FOURPOINTS_ROBOT_USD = (
     ISAACLAB_ROOT
     / "assets/robots/g1-29dof_wholebody_dex3/temp/g1_29dof_with_dex3_rev_1_0_fourpoints.usd"
@@ -73,6 +77,30 @@ DEFAULT_INPUT_ROOT = ISAACLAB_ROOT / "recording_data/HSI_boxing/twist2"
 DEFAULT_ENV_CONFIG_YAML = (
     ISAACLAB_ROOT / "tasks/common_env_config/boxing_bag_twist2.yaml"
 ).resolve()
+PERSPECTIVE_RERECORD_SHM_SIZE_BYTES = 64 * 1024 * 1024
+TASK_TO_ENV_CONFIG = {
+    "Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody": (
+        ISAACLAB_ROOT / "tasks/common_env_config/small_warehouse_vision_navigation_twist2.yaml"
+    ).resolve(),
+    "Isaac-Move-Football-Single-G129-Dex3-Wholebody": (
+        ISAACLAB_ROOT / "tasks/common_env_config/football_single_twist2.yaml"
+    ).resolve(),
+    "Isaac-Move-PickPlace-Box-G129-Dex3-Wholedoby": (
+        ISAACLAB_ROOT / "tasks/common_env_config/pickplace_box_twist2.yaml"
+    ).resolve(),
+    "Isaac-Move-Open-Door-G129-Dex3-Wholebody": (
+        ISAACLAB_ROOT / "tasks/common_env_config/opendoor_twist2.yaml"
+    ).resolve(),
+    "Isaac-Move-Sit-Sofa-G129-Dex3-Wholebody": (
+        ISAACLAB_ROOT / "tasks/common_env_config/livingroom_sitsofa_twist2.yaml"
+    ).resolve(),
+    "Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody": (
+        ISAACLAB_ROOT / "tasks/common_env_config/boxing_bag_twist2.yaml"
+    ).resolve(),
+    "Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody": (
+        ISAACLAB_ROOT / "tasks/common_env_config/doubledesk_twist2.yaml"
+    ).resolve(),
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -89,8 +117,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--env-config-yaml",
         type=str,
-        default=str(DEFAULT_ENV_CONFIG_YAML),
-        help="Environment config YAML used for every replay job.",
+        default="",
+        help=(
+            "Environment config YAML used for every replay job. "
+            "Defaults to a per-task TWIST2 config inferred from each recording."
+        ),
     )
     parser.add_argument(
         "--python-bin",
@@ -124,6 +155,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--recording-save-workers", type=int, default=1)
     parser.add_argument("--recording-save-queue-size", type=int, default=4)
     parser.add_argument("--headless", action="store_true", default=True)
+    parser.add_argument(
+        "--enable-perspective-camera",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable the third-person /World/PerspectiveCamera stream and save it "
+            "as vision_world_* data beside the enabled front and wrist cameras."
+        ),
+    )
+    parser.add_argument(
+        "--disable-front-camera",
+        action="store_true",
+        default=False,
+        help="Do not create or record the front camera during rerecord.",
+    )
+    parser.add_argument(
+        "--disable-wrist-cameras",
+        action="store_true",
+        default=False,
+        help="Do not create or record left/right wrist cameras during rerecord.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="Compatibility flag matching SONIC rerecord; TWIST2 currently rerecords all matched files.",
+    )
     parser.add_argument(
         "--parallel-jobs",
         type=int,
@@ -226,6 +284,15 @@ def read_task_name(npz_path: Path) -> str:
         return str(task)
 
 
+def resolve_env_config_yaml(args: argparse.Namespace, task_name: str) -> str:
+    if args.env_config_yaml:
+        return args.env_config_yaml
+    env_config = TASK_TO_ENV_CONFIG.get(task_name)
+    if env_config is None:
+        raise SystemExit(f"No TWIST2 env_config mapping configured for task '{task_name}'")
+    return str(env_config)
+
+
 def read_rerecord_metrics(npz_path: Path) -> tuple[float | None, float | None, bool | None]:
     with np.load(npz_path, allow_pickle=True) as data:
         def _read_float(key: str) -> float | None:
@@ -259,6 +326,32 @@ def find_new_npz_files(output_dir: Path, before_files: set[Path]) -> list[Path]:
     return sorted(after_files - before_files, key=lambda path: path.stat().st_mtime)
 
 
+def infer_failure_status_from_log(log_path: Path) -> str | None:
+    if not log_path.is_file():
+        return None
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+    if "Failed to parse environment configuration" in text:
+        return "failed_to_parse_env_config"
+    if "Failed to create environment:" in text:
+        return "failed_to_create_environment"
+    if "Failed to create action provider:" in text:
+        return "failed_to_create_action_provider"
+    if "Failed to create dds:" in text:
+        return "failed_to_create_dds"
+    if "program exception:" in text:
+        return "program_exception"
+    if "Failed to create any GPU devices" in text:
+        return "failed_to_create_gpu_device"
+    if "no CUDA-capable device is detected" in text:
+        return "failed_to_create_cuda_context"
+    if "Simulation App Shutting Down" in text and "STARTING RECORDING IMMEDIATELY AFTER ENV.RESET()" not in text:
+        return "app_shutdown_before_control_loop"
+    return None
+
+
 def build_command(
     args: argparse.Namespace,
     *,
@@ -266,6 +359,7 @@ def build_command(
     replay_file: Path,
     output_dir: Path,
     task_name: str,
+    env_config_yaml: str,
     runtime_config,
 ) -> list[str]:
     command = [
@@ -275,7 +369,7 @@ def build_command(
         "--device",
         args.device,
         "--env_config_yaml",
-        args.env_config_yaml,
+        env_config_yaml,
         "--task",
         task_name,
         "--robot_type",
@@ -299,10 +393,17 @@ def build_command(
         "--seed",
         str(args.seed),
         "--enable_cameras",
-        "--enable_wrist_cameras",
         "--enable_dex3_dds",
     ]
     append_image_runtime_args(command, runtime_config)
+    if args.disable_front_camera:
+        command.append("--disable_front_camera")
+    if args.disable_wrist_cameras:
+        command.append("--disable_wrist_cameras")
+    else:
+        command.append("--enable_wrist_cameras")
+    if args.enable_perspective_camera:
+        command.append("--enable_perspective_camera")
     if args.headless:
         command.append("--headless")
     return command
@@ -389,7 +490,12 @@ def wait_for_rerecord_completion(
     return process.returncode, bool(new_npz_files), timed_out
 
 
-def build_jobs(input_root: Path, output_root: Path, npz_paths: list[Path]) -> list[dict[str, Any]]:
+def build_jobs(
+    args: argparse.Namespace,
+    input_root: Path,
+    output_root: Path,
+    npz_paths: list[Path],
+) -> list[dict[str, Any]]:
     jobs: list[dict[str, Any]] = []
     for index, npz_path in enumerate(npz_paths, start=1):
         try:
@@ -397,6 +503,7 @@ def build_jobs(input_root: Path, output_root: Path, npz_paths: list[Path]) -> li
         except (zipfile.BadZipFile, pickle.UnpicklingError, OSError, EOFError, ValueError, KeyError) as exc:
             print(f"[skip] unreadable source npz: {npz_path} ({exc})")
             continue
+        env_config_yaml = resolve_env_config_yaml(args, task_name)
         rel_parent = npz_path.relative_to(input_root).parent
         output_dir = (output_root / rel_parent).resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -406,6 +513,7 @@ def build_jobs(input_root: Path, output_root: Path, npz_paths: list[Path]) -> li
                 "source_file": npz_path,
                 "output_dir": output_dir,
                 "task_name": task_name,
+                "env_config_yaml": env_config_yaml,
             }
         )
     return jobs
@@ -472,6 +580,7 @@ def execute_job(
         replay_file=source_file,
         output_dir=temp_output_dir,
         task_name=str(job["task_name"]),
+        env_config_yaml=str(job["env_config_yaml"]),
         runtime_config=runtime_config,
     )
     log_dir = output_root / "rerecord_logs"
@@ -516,6 +625,8 @@ def execute_job(
         status = "missing_output"
     else:
         status = "success"
+    if status in {"failed", "missing_output"}:
+        status = infer_failure_status_from_log(log_path) or status
 
     rerecorded_npz = None
     final_reward = None
@@ -641,13 +752,15 @@ def main() -> int:
     python_bin = resolve_python_bin(args.python_bin)
     robot_usd_override = resolve_robot_usd_override(args)
     subprocess_env = build_env(robot_usd_override)
+    if args.enable_perspective_camera:
+        subprocess_env.setdefault("ISAAC_IMAGE_SHM_SIZE_BYTES", str(PERSPECTIVE_RERECORD_SHM_SIZE_BYTES))
     npz_paths = find_npz_files(input_root)
     if args.limit > 0:
         npz_paths = npz_paths[: args.limit]
     if not npz_paths:
         print("No TWIST2 recordings found.")
         return 0
-    jobs = build_jobs(input_root, output_root, npz_paths)
+    jobs = build_jobs(args, input_root, output_root, npz_paths)
     worker_count = min(args.parallel_jobs, len(jobs))
     summary_path = output_root / DEFAULT_RERECORD_SUMMARY_FILENAME
     if not args.dry_run:

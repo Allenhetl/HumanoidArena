@@ -99,10 +99,10 @@ class DoubleTableSceneCfg(InteractiveSceneCfg): # inherit from the interactive s
       ),
     )
 
-    # world_camera = CameraBaseCfg.get_world_camera_config(
-    #     pos_offset=(-0.55955, -2.63763, 2.16241),
-    #     rot_offset=(0.70287, 0.42371, 0.29498, 0.48932),
-    #     focal_length=12,
-    #     horizontal_aperture=27,
-    #     convention="opengl"
-    # )
+    world_camera = CameraBaseCfg.get_world_camera_config(
+        pos_offset=(-0.55955, -2.63763, 2.16241),
+        rot_offset=(0.70287, 0.42371, 0.29498, 0.48932),
+        focal_length=12,
+        horizontal_aperture=27,
+        convention="opengl",
+    )

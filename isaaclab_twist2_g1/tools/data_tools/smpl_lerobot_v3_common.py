@@ -22,8 +22,6 @@ from action_provider.vla_robot_current_local_runtime_v3 import (
     build_vla_rotlocal_v3_action,
     build_vla_rotlocal_v3_observation_state,
     quat_heading_wxyz,
-    robot_current_local_target_quat_wxyz,
-    rotate_world_delta_to_target_heading_local,
 )
 from action_provider.vla_smpl_runtime import (
     quat_conjugate_wxyz,
@@ -32,7 +30,6 @@ from action_provider.vla_smpl_runtime import (
     quat_normalize_wxyz,
     quat_to_rot6d_wxyz,
     reorder_twist2_to_canonical_29,
-    yaw_from_quat_wxyz,
 )
 
 
@@ -165,6 +162,35 @@ def build_features(image_shape: tuple[int, int, int], use_videos: bool) -> dict[
             "names": ACTION_NAMES,
         },
     }
+
+
+def write_v31_protocol_metadata(
+    output_root: Path,
+    *,
+    backend_source: str,
+    fps: int,
+) -> None:
+    info_path = output_root / "meta" / "info.json"
+    if not info_path.is_file():
+        return
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    info["vla_protocol"] = {
+        "schema": SCHEMA_VERSION,
+        "version": "3.1",
+        "action_dim": VLA_ACTION_DIM,
+        "action_layout": "root_xy_delta_z_rot6d_joints29_hands2",
+        "rotation_6d_layout": "row",
+        "action_semantics": "reference_pose_not_robot_current_residual",
+        "root_xy_delta_frame": "current_reference_base_frame",
+        "root_rotation_frame": "episode_reference_frame",
+        "fps": float(fps),
+        "control_dt": 1.0 / float(fps),
+        "dt_source": "system_control_frequency_or_metadata",
+        "backend_source": str(backend_source),
+        "twist2_reference_source": "mimic_integrated" if backend_source == "twist2" else None,
+        "sonic_reference_source": "body_pos_body_quat" if backend_source == "sonic" else None,
+    }
+    info_path.write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
 
 
 def build_observation_state(
@@ -337,6 +363,19 @@ def rotate_world_vector_xy_wxyz(quat_wxyz: np.ndarray, xy: np.ndarray) -> np.nda
     return R.from_quat(quat_xyzw).apply(vec)[:2].astype(np.float32)
 
 
+def rotate_world_vector_wxyz(quat_wxyz: np.ndarray, xyz: np.ndarray) -> np.ndarray:
+    quat_xyzw = quat_normalize_wxyz(np.asarray(quat_wxyz, dtype=np.float32).reshape(4))[[1, 2, 3, 0]]
+    return R.from_quat(quat_xyzw).apply(np.asarray(xyz, dtype=np.float32).reshape(3)).astype(np.float32)
+
+
+def rotate_world_delta_to_target_base_local_xy(
+    target_root_quat_wxyz: np.ndarray,
+    world_delta_xyz: np.ndarray,
+) -> np.ndarray:
+    quat_xyzw = quat_normalize_wxyz(np.asarray(target_root_quat_wxyz, dtype=np.float32).reshape(4))[[1, 2, 3, 0]]
+    return R.from_quat(quat_xyzw).inv().apply(np.asarray(world_delta_xyz, dtype=np.float32).reshape(3))[:2].astype(np.float32)
+
+
 def _load_sonic_body_fields(data: np.lib.npyio.NpzFile) -> tuple[np.ndarray, np.ndarray]:
     if "human_body_pos" in data:
         body_pos = np.asarray(data["human_body_pos"], dtype=np.float32)
@@ -387,25 +426,21 @@ def build_sonic_rotlocal_v3_actions(
         raise ValueError(f"Unexpected SONIC joint target shape: {joint_targets.shape}")
 
     left_binary, right_binary = get_hand_binary_arrays(data, num_frames)
-    source_to_robot_heading = align_source_heading_to_robot_wxyz(
-        robot_root_orientation[0],
-        body_quat[0],
-    )
+    source_heading_anchor_inv = quat_conjugate_wxyz(quat_heading_wxyz(body_quat[0]))
 
     actions = np.zeros((num_frames, VLA_ACTION_DIM), dtype=np.float32)
     for i in range(num_frames):
-        target_quat = quat_mul_wxyz(source_to_robot_heading, body_quat[i])
+        target_quat = quat_mul_wxyz(source_heading_anchor_inv, body_quat[i])
         if i == 0:
-            root_target_heading_local_xy_delta = np.zeros((2,), dtype=np.float32)
+            root_ref_base_local_xy_delta = np.zeros((2,), dtype=np.float32)
         else:
-            source_world_delta = (body_pos[i, :2] - body_pos[i - 1, :2]).astype(np.float32)
-            target_world_delta = rotate_world_vector_xy_wxyz(source_to_robot_heading, source_world_delta)
-            root_target_heading_local_xy_delta = rotate_world_delta_to_target_heading_local(target_quat, target_world_delta)
-        action_rel_quat = robot_current_local_target_quat_wxyz(robot_root_orientation[i], target_quat)
+            source_world_delta = (body_pos[i] - body_pos[i - 1]).astype(np.float32)
+            target_world_delta = rotate_world_vector_wxyz(source_heading_anchor_inv, source_world_delta)
+            root_ref_base_local_xy_delta = rotate_world_delta_to_target_base_local_xy(target_quat, target_world_delta)
         actions[i] = build_vla_rotlocal_v3_action(
-            root_target_heading_local_xy_delta=root_target_heading_local_xy_delta,
+            root_ref_base_local_xy_delta=root_ref_base_local_xy_delta,
             root_z=body_pos[i, 2],
-            root_current_local_target_rot6d=quat_to_rot6d_wxyz(action_rel_quat).reshape(6),
+            root_ref_rot6d=quat_to_rot6d_wxyz(target_quat).reshape(6),
             joint_pos_canonical_29=joint_targets[i],
             hand_binary=np.array([left_binary[i], right_binary[i]], dtype=np.float32),
         )
@@ -426,26 +461,25 @@ def build_twist2_rotlocal_v3_actions(
 
     left_binary, right_binary = get_hand_binary_arrays(data, num_frames)
     actions = np.zeros((num_frames, VLA_ACTION_DIM), dtype=np.float32)
-    yaw_target = yaw_from_quat_wxyz(robot_root_orientation[0])
+    yaw_target = 0.0
     for i in range(num_frames):
         xy_vel_local = mimic[i, 0:2]
         root_z = float(mimic[i, 2])
         roll = float(mimic[i, 3])
         pitch = float(mimic[i, 4])
         yaw_vel = float(mimic[i, 5])
-        yaw_target = ((yaw_target + yaw_vel * float(control_dt) + np.pi) % (2.0 * np.pi)) - np.pi
+        if i > 0:
+            yaw_target = ((yaw_target + yaw_vel * float(control_dt) + np.pi) % (2.0 * np.pi)) - np.pi
         target_quat = quat_from_roll_pitch_yaw_wxyz(roll=roll, pitch=pitch, yaw=yaw_target)
-        action_rel_quat = robot_current_local_target_quat_wxyz(robot_root_orientation[i], target_quat)
-        # Historical TWIST2 mimic_obs stores xy_vel as full-base-local [:2]
-        # (quat_rotate_inverse(root_quat, world_vel)[:2]). V3 action standardizes
-        # the public 40D target to heading-local xy, so convert through the
-        # projected world-plane delta instead of copying mimic[:, 0:2] verbatim.
-        target_world_delta = rotate_world_vector_xy_wxyz(target_quat, xy_vel_local * float(control_dt))
-        root_target_heading_local_xy_delta = rotate_world_delta_to_target_heading_local(target_quat, target_world_delta)
+        root_ref_base_local_xy_delta = (
+            np.zeros((2,), dtype=np.float32)
+            if i == 0
+            else xy_vel_local.astype(np.float32, copy=False) * float(control_dt)
+        )
         actions[i] = build_vla_rotlocal_v3_action(
-            root_target_heading_local_xy_delta=root_target_heading_local_xy_delta,
+            root_ref_base_local_xy_delta=root_ref_base_local_xy_delta,
             root_z=root_z,
-            root_current_local_target_rot6d=quat_to_rot6d_wxyz(action_rel_quat).reshape(6),
+            root_ref_rot6d=quat_to_rot6d_wxyz(target_quat).reshape(6),
             joint_pos_canonical_29=reorder_twist2_to_canonical_29(mimic[i, 6:35]),
             hand_binary=np.array([left_binary[i], right_binary[i]], dtype=np.float32),
         )

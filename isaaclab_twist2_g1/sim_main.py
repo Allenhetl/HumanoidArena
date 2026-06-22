@@ -416,6 +416,8 @@ def _augment_env_cfg_with_perspective_camera(env_cfg, args_cli):
     if not getattr(args_cli, "enable_world_camera", False):
         return
 
+    from tasks.common_config import CameraPresets
+
     scene_cfg = getattr(env_cfg, "scene", None)
     if scene_cfg is None:
         raise ValueError("PerspectiveCamera requested but env_cfg has no scene config")
@@ -427,9 +429,10 @@ def _augment_env_cfg_with_perspective_camera(env_cfg, args_cli):
         )
         return
 
-    raise ValueError(
-        "PerspectiveCamera requested but scene.world_camera is not configured. "
-        "Add world_camera to the task's base scene in tasks/common_scene/."
+    scene_cfg.world_camera = CameraPresets.g1_world_camera()
+    print(
+        "[sim_main] PerspectiveCamera enabled using default scene config "
+        f"(world_camera={scene_cfg.world_camera.prim_path})"
     )
 
 
