@@ -2,11 +2,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/script/common/runtime_paths.sh"
 cd "${SCRIPT_DIR}" || exit 1
 
-PYTHON_BIN="python"
-DEFAULT_ISAACLAB_PY="/home/dreams/miniconda3/envs/unitree_sim_env_isaaclab5_0/bin/python"
-REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_sit_sofa/sonic/zz/Isaac-Move-Sit-Sofa-G129-Dex3-Wholebody_sonic_1776951566336481.npz"
+PYTHON_BIN="${PYTHON_BIN:-${ISAACLAB_PYTHON}}"
+REPLAY_FILE="${REPLAY_FILE:-}"
 REPLAY_MODE="direct_replay"
 REPLAY_LOOP=0
 TASK_NAME="${TASK_NAME:-}"
@@ -18,8 +18,8 @@ ENABLE_CAMERAS=1
 ENABLE_WRIST_CAMERAS=1
 ENABLE_DEX3_DDS=1
 HEADLESS=1
-SONIC_ENCODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_encoder.onnx"
-SONIC_DECODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_decoder.onnx"
+SONIC_ENCODER_PATH="${SONIC_ENCODER_PATH:-${SONIC_POLICY_ROOT}/model_encoder.onnx}"
+SONIC_DECODER_PATH="${SONIC_DECODER_PATH:-${SONIC_POLICY_ROOT}/model_decoder.onnx}"
 IMAGE_TRANSPORT="zmq"
 IMAGE_ZMQ_PORT="5555"
 LEFT_WRIST_CAMERA_PORT="5557"
@@ -31,6 +31,11 @@ RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording4pic/sofa/"
 export PROJECT_ROOT="${SCRIPT_DIR}"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
 
+if [ -z "${REPLAY_FILE}" ]; then
+  echo "Usage: REPLAY_FILE=/path/to/episode.npz bash ${0}"
+  echo "Error: REPLAY_FILE is empty"
+  exit 1
+fi
 if [ ! -f "${REPLAY_FILE}" ]; then
   echo "Error: replay file not found: ${REPLAY_FILE}"
   exit 1
@@ -49,12 +54,8 @@ if [ ! -f "${SONIC_DECODER_PATH}" ]; then
 fi
 
 if ! "${PYTHON_BIN}" -c "import onnxruntime" >/dev/null 2>&1; then
-  if [ -x "${DEFAULT_ISAACLAB_PY}" ] && "${DEFAULT_ISAACLAB_PY}" -c "import onnxruntime" >/dev/null 2>&1; then
-    PYTHON_BIN="${DEFAULT_ISAACLAB_PY}"
-  fi
-fi
-if ! "${PYTHON_BIN}" -c "import onnxruntime" >/dev/null 2>&1; then
   echo "Error: usable python with onnxruntime not found"
+  echo "Set PYTHON_BIN or ISAACLAB_PYTHON to an environment with onnxruntime."
   exit 1
 fi
 

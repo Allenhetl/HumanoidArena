@@ -62,8 +62,8 @@ python isaaclab_twist2_g1/sim_main.py \
   --robot_type g129 \
   --input_source replay \
   --gmt_backend sonic \
-  --sonic_encoder_path /home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_encoder.onnx \
-  --sonic_decoder_path /home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_decoder.onnx \
+  --sonic_encoder_path ${GROOT_ROOT}/gear_sonic_deploy/policy/release/model_encoder.onnx \
+  --sonic_decoder_path ${GROOT_ROOT}/gear_sonic_deploy/policy/release/model_decoder.onnx \
   --replay_file /path/to/open_door_sonic_recording.npz \
   --replay_mode direct_replay \
   --enable_cameras \
@@ -115,7 +115,7 @@ python isaaclab_twist2_g1/tools/data_tools/rerecord_sonic_recordings_to_multicam
 
 ```bash
 python isaaclab_twist2_g1/tools/data_tools/rerecord_sonic_recordings_to_multicam.py \
-  /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/perspective-use/ \
+  ${ISAACLAB_ROOT}/recording_data/perspective-use/ \
   --enable-perspective-camera \
   --disable-front-camera \
   --disable-wrist-cameras \
@@ -138,7 +138,7 @@ OPEN_DOOR_LATCH_DISABLE=1 OPEN_DOOR_SCENE_AS_ARTICULATION=0 ...
 
 ```bash
 python isaaclab_twist2_g1/tools/data_tools/rerecord_sonic_recordings_to_multicam.py \
-  /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/perspective-use/ \
+  ${ISAACLAB_ROOT}/recording_data/perspective-use/ \
   --task-runtime-profile replay_compat \
   --enable-perspective-camera \
   --disable-front-camera \
@@ -184,13 +184,13 @@ bash isaaclab_twist2_g1/script/eval_scripts/twist2/run_vla_eval_parallel.sh
 按任务分的 batch 脚本例如：
 
 ```bash
-TEST_MODE=semantic EVAL_BACKEND=sonic MODEL_ROOT="/ai/Yichi/taowen/ckpts/0424_new_100000/pi0.5_100000/Pi0.5_sonic_doubledesk_0418_100000" MODEL_GLOB="*" NUM_WORKERS=2 RESULTS_TAG_PREFIX=pi05_semantic bash isaaclab_twist2_g1/pi05_batch_test_doubledesk.sh
+TEST_MODE=semantic EVAL_BACKEND=sonic MODEL_ROOT="/path/to/pi0.5_sonic_doubledesk_checkpoint" MODEL_GLOB="*" NUM_WORKERS=2 RESULTS_TAG_PREFIX=pi05_semantic bash isaaclab_twist2_g1/pi05_batch_test_doubledesk.sh
 ```
 
 OpenDoor：
 
 ```bash
-TEST_MODE=semantic EVAL_BACKEND=sonic MODEL_ROOT="/ai/Yichi/taowen/ckpts/0424_new_100000/pi0.5_100000/Pi0.5_sonic_opendoor_0421_100000" MODEL_GLOB="*" NUM_WORKERS=2 RESULTS_TAG_PREFIX=pi05_semantic bash isaaclab_twist2_g1/pi05_batch_test_open_door.sh
+TEST_MODE=semantic EVAL_BACKEND=sonic MODEL_ROOT="/path/to/pi0.5_sonic_opendoor_checkpoint" MODEL_GLOB="*" NUM_WORKERS=2 RESULTS_TAG_PREFIX=pi05_semantic bash isaaclab_twist2_g1/pi05_batch_test_open_door.sh
 ```
 
 ### 4.3 你提到的这类入口
@@ -211,7 +211,7 @@ TEST_MODE=base_test EVAL_BACKEND=sonic MODEL_GLOB="*all*" RESULTS_TAG_PREFIX=mer
 
 ## 5. 相关说明文档
 
-- [TWIST2_DATA_FORMAT.md](/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/docs/TWIST2_DATA_FORMAT.md)
-- [SONIC_DATA_FORMAT.md](/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/docs/SONIC_DATA_FORMAT.md)
-- [OPEN_DOOR_LATCH_EVENT_AND_ASSET_NOTES.md](/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/docs/OPEN_DOOR_LATCH_EVENT_AND_ASSET_NOTES.md)
-- [SCENE_RANDOMIZATION_SEED_RULES.md](/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/docs/SCENE_RANDOMIZATION_SEED_RULES.md)
+- [TWIST2_DATA_FORMAT.md](docs/TWIST2_DATA_FORMAT.md)
+- [SONIC_DATA_FORMAT.md](docs/SONIC_DATA_FORMAT.md)
+- [OPEN_DOOR_LATCH_EVENT_AND_ASSET_NOTES.md](docs/OPEN_DOOR_LATCH_EVENT_AND_ASSET_NOTES.md)
+- [SCENE_RANDOMIZATION_SEED_RULES.md](docs/SCENE_RANDOMIZATION_SEED_RULES.md)

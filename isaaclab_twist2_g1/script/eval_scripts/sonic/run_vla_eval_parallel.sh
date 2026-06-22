@@ -4,12 +4,13 @@ set -euo pipefail
 
 RUN_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ISAACLAB_ROOT="$(cd "${RUN_SCRIPT_DIR}/../../.." && pwd)"
+source "${ISAACLAB_ROOT}/script/common/runtime_paths.sh"
 source "${RUN_SCRIPT_DIR}/../common/model_batch_utils.sh"
 
-CONDA_BASE="${CONDA_BASE:-/ai/Yichi/0_Systems/miniconda3}"
+CONDA_BASE="${CONDA_BASE:-}"
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-unitree_sim_env}"
 AUTO_ACTIVATE_CONDA="${AUTO_ACTIVATE_CONDA:-1}"
-if [[ "${AUTO_ACTIVATE_CONDA}" == "1" ]]; then
+if [[ "${AUTO_ACTIVATE_CONDA}" == "1" && -n "${CONDA_BASE}" && -f "${CONDA_BASE}/etc/profile.d/conda.sh" ]]; then
   TARGET_CONDA_PREFIX="${CONDA_BASE}/envs/${CONDA_ENV_NAME}"
   if [[ "${CONDA_PREFIX:-}" != "${TARGET_CONDA_PREFIX}" ]]; then
     export ZSH_VERSION="${ZSH_VERSION:-}"
@@ -58,10 +59,10 @@ ROBOT_TYPE="${ROBOT_TYPE:-unitree_g1_refpose_v3_1}"
 SONIC_VLA_ROOT_ROT6D_LAYOUT="${SONIC_VLA_ROOT_ROT6D_LAYOUT:-row}"
 SONIC_VLA_ROOT_MAX_DELTA_DEG="${SONIC_VLA_ROOT_MAX_DELTA_DEG:-26.0}"
 
-SONIC_ENCODER_PATH="${SONIC_ENCODER_PATH:-/ai/Yichi/taowen/HumanoidArena/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_encoder.onnx}"
-SONIC_DECODER_PATH="${SONIC_DECODER_PATH:-/ai/Yichi/taowen/HumanoidArena/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_decoder.onnx}"
+SONIC_ENCODER_PATH="${SONIC_ENCODER_PATH:-${SONIC_POLICY_ROOT}/model_encoder.onnx}"
+SONIC_DECODER_PATH="${SONIC_DECODER_PATH:-${SONIC_POLICY_ROOT}/model_decoder.onnx}"
 
-SERVER_PYTHON="${SERVER_PYTHON:-/ai/Yichi/0_Systems/miniconda3/envs/lerobot/bin/python}"
+SERVER_PYTHON="${SERVER_PYTHON:-python}"
 SERVER_SCRIPT="${SERVER_SCRIPT:-${ISAACLAB_ROOT}/../lerobot/scripts/serve_lerobot_vla_http.py}"
 SERVER_GPU_IDS="${SERVER_GPU_IDS:-0,1,2,3,4,5,6,7}"
 # SERVER_GPU_IDS="${SERVER_GPU_IDS:-7}"

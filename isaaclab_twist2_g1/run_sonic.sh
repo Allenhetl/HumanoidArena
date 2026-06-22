@@ -2,12 +2,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/script/common/runtime_paths.sh"
 cd "${SCRIPT_DIR}" || exit 1
 
 # ------------------------------------------------------------------
 # User config: edit here
 # ------------------------------------------------------------------
-PYTHON_BIN="python"
+PYTHON_BIN="${PYTHON_BIN:-${ISAACLAB_PYTHON}}"
 ENV_CONFIG_YAML="tasks/common_env_config/boxing_bag_sonic.yaml"
 RUN_DEVICE="cpu"
 ROBOT_TYPE="g129"
@@ -18,8 +19,8 @@ ENABLE_DEX3_DDS=1
 HEADLESS=0
 SONIC_REDIS_HOST="localhost"
 SONIC_REDIS_PORT="6379"
-SONIC_ENCODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_encoder.onnx"
-SONIC_DECODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_decoder.onnx"
+SONIC_ENCODER_PATH="${SONIC_ENCODER_PATH:-${SONIC_POLICY_ROOT}/model_encoder.onnx}"
+SONIC_DECODER_PATH="${SONIC_DECODER_PATH:-${SONIC_POLICY_ROOT}/model_decoder.onnx}"
 IMAGE_TRANSPORT="xrobot"
 IMAGE_XROBOT_HOST="10.42.0.35"
 IMAGE_XROBOT_PORT="12345"

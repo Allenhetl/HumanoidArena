@@ -2,25 +2,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/script/common/runtime_paths.sh"
 cd "${SCRIPT_DIR}" || exit 1
 
 # ------------------------------------------------------------------
 # User config: edit here
 # ------------------------------------------------------------------
-PYTHON_BIN="python"
-DEFAULT_ISAACLAB_PY="/home/dreams/miniconda3/envs/unitree_sim_env_isaaclab5_0/bin/python"
-# Double-desk HOI recording (edit REPLAY_FILE for other runs)
-# REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/zk/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1776167292368374.npz"
-# REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_vision_navi/sonic/yb/Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody_sonic_1776484843166394.npz"
-# REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/zk/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1776167997659335.npz"
-# REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/perspective-use/doubledesk/Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody_sonic_1776306473351243.npz"
-# REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_double_desk/sonic_v2/tw/Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody_sonic_1777526201640070.npz"
-
-# REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_boxing/sonic/zz/Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody_sonic_1777019812335356.npz"
-# REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_grapcup/sonic/zz/Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody_1776841155097978.npz"
-# REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_open_door/sonic/zz/Isaac-Move-Open-Door-G129-Dex3-Wholebody_sonic_1776664605284241.npz"
-# REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_football_v2/sonic/zk/Isaac-Move-Football-Single-G129-Dex3-Wholebody_sonic_1776167367864058.npz"
-REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HSI_open_door/sonic/zz/Isaac-Move-Open-Door-G129-Dex3-Wholebody_sonic_1776666239555801.npz"
+PYTHON_BIN="${PYTHON_BIN:-${ISAACLAB_PYTHON}}"
+REPLAY_FILE="${REPLAY_FILE:-}"
 REPLAY_MODE="direct_replay"   # inference_replay | direct_replay
 REPLAY_LOOP=0                    # 1 | 0
 TASK_NAME="${TASK_NAME:-}"       # 留空则从 replay 文件读取
@@ -42,8 +31,8 @@ ENABLE_CAMERAS=1
 ENABLE_WRIST_CAMERAS=0
 ENABLE_DEX3_DDS=1
 HEADLESS=0
-SONIC_ENCODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_encoder.onnx"
-SONIC_DECODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_decoder.onnx"
+SONIC_ENCODER_PATH="${SONIC_ENCODER_PATH:-${SONIC_POLICY_ROOT}/model_encoder.onnx}"
+SONIC_DECODER_PATH="${SONIC_DECODER_PATH:-${SONIC_POLICY_ROOT}/model_decoder.onnx}"
 IMAGE_TRANSPORT="zmq"
 IMAGE_ZMQ_PORT="5555"
 LEFT_WRIST_CAMERA_PORT="5557"
@@ -55,6 +44,11 @@ SEED="42"
 export PROJECT_ROOT="${SCRIPT_DIR}"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
 
+if [ -z "${REPLAY_FILE}" ]; then
+  echo "Usage: REPLAY_FILE=/path/to/episode.npz bash ${0}"
+  echo "Error: REPLAY_FILE is empty"
+  exit 1
+fi
 if [ ! -f "${REPLAY_FILE}" ]; then
   echo "Error: replay file not found: ${REPLAY_FILE}"
   exit 1
@@ -73,12 +67,8 @@ if [ ! -f "${SONIC_DECODER_PATH}" ]; then
 fi
 
 if ! "${PYTHON_BIN}" -c "import onnxruntime" >/dev/null 2>&1; then
-  if [ -x "${DEFAULT_ISAACLAB_PY}" ] && "${DEFAULT_ISAACLAB_PY}" -c "import onnxruntime" >/dev/null 2>&1; then
-    PYTHON_BIN="${DEFAULT_ISAACLAB_PY}"
-  fi
-fi
-if ! "${PYTHON_BIN}" -c "import onnxruntime" >/dev/null 2>&1; then
   echo "Error: usable python with onnxruntime not found"
+  echo "Set PYTHON_BIN or ISAACLAB_PYTHON to an environment with onnxruntime."
   exit 1
 fi
 

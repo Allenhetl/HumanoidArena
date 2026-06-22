@@ -4,6 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ISAACLAB_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+source "${ISAACLAB_ROOT}/script/common/runtime_paths.sh"
 export ROBOT_USD_OVERRIDE="${ISAACLAB_ROOT}/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2.usd"
 ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/football_single_sonic.yaml}"
 ISAAC_DEVICE="cpu"
@@ -16,10 +17,10 @@ SONIC_VLA_ROOT_ROT6D_LAYOUT="row"
 SONIC_VLA_ROOT_MAX_DELTA_DEG="26.0"
 LEROBOT_VLA_RECORD_OUTPUTS="${LEROBOT_VLA_RECORD_OUTPUTS:-1}"
 
-SONIC_ENCODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_encoder.onnx"
-SONIC_DECODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_decoder.onnx"
+SONIC_ENCODER_PATH="${SONIC_ENCODER_PATH:-${SONIC_POLICY_ROOT}/model_encoder.onnx}"
+SONIC_DECODER_PATH="${SONIC_DECODER_PATH:-${SONIC_POLICY_ROOT}/model_decoder.onnx}"
 
-SERVER_PYTHON="/home/dreams/miniconda3/envs/lerobot/bin/python"
+SERVER_PYTHON="${SERVER_PYTHON:-python}"
 SERVER_SCRIPT="${ISAACLAB_ROOT}/../lerobot/scripts/serve_lerobot_vla_http.py"
 SERVER_DEVICE="cuda:0"
 SERVER_HOST="127.0.0.1"
@@ -61,7 +62,7 @@ TASK_NAME="${TASK_NAME:-$(load_task_name_from_yaml "${ENV_CONFIG_YAML}")}"
 
 
 MODEL_PATHS=(
-  "/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/train/act_sonic_football_rand_0414_64_40/checkpoints/last/pretrained_model"
+  "${LEROBOT_ROOT}/outputs/train/act_sonic_football_rand_0414_64_40/checkpoints/last/pretrained_model"
 )
 
 RESULTS_DIR="${SCRIPT_DIR}/eval_results/act_sonic_football_batchtest_0418$(date +%Y%m%d_%H%M%S)"

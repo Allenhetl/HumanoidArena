@@ -2,24 +2,24 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/script/common/runtime_paths.sh"
 cd "${SCRIPT_DIR}" || exit 1
 
-PYTHON_BIN="python"
+PYTHON_BIN="${PYTHON_BIN:-${ISAACLAB_PYTHON}}"
 
 VISION_RANDOMIZATION="${VISION_RANDOMIZATION:-0}"
 if [ "${VISION_RANDOMIZATION}" = "1" ]; then
   DEFAULT_ENV_CONFIG_YAML="tasks/common_test_config/vision/vision_navi_sonic_test.yaml"
 else
-  DEFAULT_ENV_CONFIG_YAML="tasks/common_env_config/small_warehouse_vision_navigation_sonic.yaml"
+  DEFAULT_ENV_CONFIG_YAML="${ISAACLAB_ROOT}/tasks/common_env_config/opendoor_sonic.yaml"
 fi
 ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-${DEFAULT_ENV_CONFIG_YAML}}"
-ENV_CONFIG_YAML="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/tasks/common_env_config/opendoor_sonic.yaml"
-# ENV_CONFIG_YAML="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/tasks/common_env_config/doubledesk_sonic.yaml"
-# ENV_CONFIG_YAML="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/tasks/common_env_config/livingroom_sitsofa_sonic.yaml"
-# ENV_CONFIG_YAML="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/tasks/common_env_config/livingroom_grapcup_sonic.yaml"
+# ENV_CONFIG_YAML="${ISAACLAB_ROOT}/tasks/common_env_config/doubledesk_sonic.yaml"
+# ENV_CONFIG_YAML="${ISAACLAB_ROOT}/tasks/common_env_config/livingroom_sitsofa_sonic.yaml"
+# ENV_CONFIG_YAML="${ISAACLAB_ROOT}/tasks/common_env_config/livingroom_grapcup_sonic.yaml"
 # ENV_CONFIG_YAML="tasks/common_env_config/pickplace_box_sonic.yaml"
-# ENV_CONFIG_YAML="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/tasks/common_env_config/football_single_sonic.yaml"
-# ENV_CONFIG_YAML="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/tasks/common_env_config/boxing_bag_sonic.yaml"
+# ENV_CONFIG_YAML="${ISAACLAB_ROOT}/tasks/common_env_config/football_single_sonic.yaml"
+# ENV_CONFIG_YAML="${ISAACLAB_ROOT}/tasks/common_env_config/boxing_bag_sonic.yaml"
 
 RUN_DEVICE="cpu"
 ROBOT_TYPE="g129"
@@ -30,8 +30,8 @@ ENABLE_DEX3_DDS=1
 HEADLESS=0
 SONIC_REDIS_HOST="localhost"
 SONIC_REDIS_PORT="6379"
-SONIC_ENCODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_encoder.onnx"
-SONIC_DECODER_PATH="/home/dreams/Users/taowen/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_decoder.onnx"
+SONIC_ENCODER_PATH="${SONIC_ENCODER_PATH:-${SONIC_POLICY_ROOT}/model_encoder.onnx}"
+SONIC_DECODER_PATH="${SONIC_DECODER_PATH:-${SONIC_POLICY_ROOT}/model_decoder.onnx}"
 IMAGE_TRANSPORT="xrobot"
 # IMAGE_XROBOT_HOST="10.42.0.35"
 IMAGE_XROBOT_HOST="192.168.100.87"

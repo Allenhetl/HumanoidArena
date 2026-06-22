@@ -4,6 +4,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ISAACLAB_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+LEROBOT_CONDA_ENV_NAME="${LEROBOT_CONDA_ENV_NAME:-lerobot2}"
+source "${ISAACLAB_ROOT}/script/common/runtime_paths.sh"
 export ROBOT_USD_OVERRIDE="${ISAACLAB_ROOT}/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2.usd"
 ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/football_single_twist2_vla.yaml}"
 ISAAC_DEVICE="cpu"
@@ -13,9 +15,9 @@ VIDEO_FPS=30
 POST_TERMINATION_RECORD_STEPS=50
 ROBOT_TYPE="unitree_g1_refpose_v3_1"
 
-TWIST2_MODEL_PATH="${ISAACLAB_ROOT}/../TWIST2/assets/ckpts/twist2_1017_20k.onnx"
+TWIST2_MODEL_PATH="${TWIST2_MODEL_PATH:-${TWIST2_ROOT}/assets/ckpts/twist2_1017_20k.onnx}"
 
-SERVER_PYTHON="/ai/Yichi/0_Systems/miniconda3/envs/lerobot2/bin/python"
+SERVER_PYTHON="${SERVER_PYTHON:-python}"
 SERVER_SCRIPT="${ISAACLAB_ROOT}/../lerobot/scripts/serve_lerobot_vla_http.py"
 SERVER_DEVICE="cuda:0"
 SERVER_HOST="127.0.0.1"
@@ -57,7 +59,7 @@ TASK_NAME="${TASK_NAME:-$(load_task_name_from_yaml "${ENV_CONFIG_YAML}")}"
 
 
 MODEL_PATHS=(
-  "/home/dreams/Users/taowen/HumanoidArena/lerobot/outputs/train/diffusion_twist2_0401/checkpoints/last/pretrained_model"
+  "${LEROBOT_ROOT}/outputs/train/diffusion_twist2_0401/checkpoints/last/pretrained_model"
 )
 
 RESULTS_DIR="${SCRIPT_DIR}/eval_results/act_rand_trained_0410_64_40_$(date +%Y%m%d_%H%M%S)"

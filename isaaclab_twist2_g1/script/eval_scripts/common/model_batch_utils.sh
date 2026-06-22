@@ -5,9 +5,11 @@ if [[ -n "${_VLA_MODEL_BATCH_UTILS_SH:-}" ]]; then
 fi
 readonly _VLA_MODEL_BATCH_UTILS_SH=1
 
-# DEFAULT_BATCH_MODEL_ROOT="/ai/Yichi/taowen/ckpts/mnt/workspace/users/xujunzhe/yunhengwang/lerobot/lerobot/results/train"
-# DEFAULT_BATCH_MODEL_ROOT="/ai/Yichi/taowen/ckpts/0421"
-DEFAULT_BATCH_MODEL_ROOT="/ai/Yichi/taowen/ckpts/HumanoidArena_test/HOI_double_desk"
+MODEL_BATCH_UTILS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ISAACLAB_ROOT="${ISAACLAB_ROOT:-$(cd "${MODEL_BATCH_UTILS_DIR}/../../.." && pwd)}"
+source "${ISAACLAB_ROOT}/script/common/runtime_paths.sh"
+
+DEFAULT_BATCH_MODEL_ROOT="${DEFAULT_BATCH_MODEL_ROOT:-${LEROBOT_ROOT}/outputs/train}"
 readonly DEFAULT_BATCH_MODEL_ROOT
 
 trim_model_batch_value() {

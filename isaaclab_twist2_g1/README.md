@@ -23,27 +23,27 @@
 
 更完整的命令速查见：
 
-- [docs/COMMAND_QUICKSTART.md](/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/docs/COMMAND_QUICKSTART.md)
+- [docs/COMMAND_QUICKSTART.md](docs/COMMAND_QUICKSTART.md)
 
 ### Live
 
-- [run_twist2.sh](/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/run_twist2.sh)
+- [run_twist2.sh](run_twist2.sh)
   启动 `TWIST2` live 遥操作录制。
-- [run_sonic.sh](/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/run_sonic.sh)
+- [run_sonic.sh](run_sonic.sh)
   启动 `SONIC` live 遥操作录制。
 
 ### Replay
 
-- [run_replay_twist2.sh](/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/run_replay_twist2.sh)
+- [run_replay_twist2.sh](run_replay_twist2.sh)
   启动 `TWIST2` replay。
-- [run_replay_sonic.sh](/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/run_replay_sonic.sh)
+- [run_replay_sonic.sh](run_replay_sonic.sh)
   启动 `SONIC` replay。
 
 ### Rerecord / VLA Eval
 
-- [run_rerecord.sh](/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/run_rerecord.sh)
+- [run_rerecord.sh](run_rerecord.sh)
   并行触发 `TWIST2` / `SONIC` rerecord。
-- [docs/COMMAND_QUICKSTART.md#4-lerobot--vla-评测](/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/docs/COMMAND_QUICKSTART.md#4-lerobot--vla-评测)
+- [docs/COMMAND_QUICKSTART.md#4-lerobot--vla-评测](docs/COMMAND_QUICKSTART.md#4-lerobot--vla-评测)
   批量评测、LeRobot / VLA 常用命令入口。
 
 ## Replay 模式
@@ -59,15 +59,15 @@
 
 ## 文档索引
 
-- [REPLAY_DEBUG_SUMMARY.md](/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/REPLAY_DEBUG_SUMMARY.md)
+- [REPLAY_DEBUG_SUMMARY.md](REPLAY_DEBUG_SUMMARY.md)
   当前 replay 问题、经验和修复总结。
-- [SCENE_RANDOMIZATION_SEED_RULES.md](/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/docs/SCENE_RANDOMIZATION_SEED_RULES.md)
+- [SCENE_RANDOMIZATION_SEED_RULES.md](docs/SCENE_RANDOMIZATION_SEED_RULES.md)
   场景随机化、录制和 replay 必须共用单一 `episode_object_seed` 的约束说明。
-- [TWIST2_DATA_FORMAT.md](/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/docs/TWIST2_DATA_FORMAT.md)
+- [TWIST2_DATA_FORMAT.md](docs/TWIST2_DATA_FORMAT.md)
   `TWIST2` 录制 `.npz` 数据格式说明。
-- [SONIC_DATA_FORMAT.md](/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/docs/SONIC_DATA_FORMAT.md)
+- [SONIC_DATA_FORMAT.md](docs/SONIC_DATA_FORMAT.md)
   `SONIC` 录制 `.npz` 数据格式说明。
-- [COMMAND_QUICKSTART.md](/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/docs/COMMAND_QUICKSTART.md)
+- [COMMAND_QUICKSTART.md](docs/COMMAND_QUICKSTART.md)
   常用运行命令速查。
 
 ## 备注

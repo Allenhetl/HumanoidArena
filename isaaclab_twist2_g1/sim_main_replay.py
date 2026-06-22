@@ -27,6 +27,12 @@ from task_runtime_profiles import (
     normalize_replay_mode,
 )
 
+REPO_ROOT = Path(project_root).parent
+DEFAULT_TWIST2_MODEL_PATH = os.environ.get(
+    "TWIST2_MODEL_PATH",
+    str(REPO_ROOT / "TWIST2" / "assets" / "ckpts" / "twist2_1017_20k.onnx"),
+)
+
 # Isaac Lab AppLauncher
 from isaaclab.app import AppLauncher
 
@@ -70,7 +76,7 @@ parser.add_argument("--video_fps", type=int, default=30, help="FPS for saved rep
 
 # ONNX model path (for inference mode)
 parser.add_argument("--model_path", type=str,
-                   default="/home/dreams/Users/taowen/HumanoidArena/TWIST2/assets/ckpts/twist2_1017_20k.onnx",
+                   default=DEFAULT_TWIST2_MODEL_PATH,
                    help="ONNX model path for inference mode")
 
 # image streaming parameters

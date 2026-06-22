@@ -24,6 +24,13 @@ import gymnasium as gym
 from pathlib import Path
 from task_runtime_profiles import apply_task_runtime_profile
 
+REPO_ROOT = Path(project_root).parent
+DEFAULT_TWIST2_MODEL_PATH = os.environ.get(
+    "TWIST2_MODEL_PATH",
+    str(REPO_ROOT / "TWIST2" / "assets" / "ckpts" / "twist2_1017_20k.onnx"),
+)
+DEFAULT_SMPLX_MODEL_PATH = os.environ.get("SMPLX_MODEL_PATH", "")
+
 # Isaac Lab AppLauncher
 from isaaclab.app import AppLauncher
 
@@ -119,7 +126,7 @@ parser.add_argument("--lerobot_server_timeout", type=float, default=5.0,
 parser.add_argument("--lerobot_server_verify_ssl", action="store_true", default=False,
                     help="Verify TLS certificates for LeRobot HTTPS connections")
 parser.add_argument("--smplx_model_path", type=str,
-                    default="/home/hcl4070-1/Desktop/taowen/projects/smplx_models",
+                    default=DEFAULT_SMPLX_MODEL_PATH,
                     help="Path to SMPL-X model files")
 parser.add_argument("--human_height", type=float, default=1.75,
                     help="Human height in meters for GMR scaling")
@@ -139,7 +146,7 @@ parser.add_argument("--enable_dex3_dds", action="store_true", help="enable dexte
 parser.add_argument("--enable_inspire_dds", action="store_true", help="enable inspire hand DDS")
 parser.add_argument("--stats_interval", type=float, default=10.0, help="statistics print interval (seconds)")
 
-parser.add_argument("--file_path", type=str, default="/home/unitree/newDisk/sim-data/Placewoodenblock", help="file path (when action_source=file)")
+parser.add_argument("--file_path", type=str, default="", help="file path (when action_source=file)")
 parser.add_argument("--generate_data_dir", type=str, default="./data", help="save data dir")
 parser.add_argument("--generate_data", action="store_true", default=False, help="generate data")
 parser.add_argument("--rerun_log", action="store_true", default=False, help="rerun log")
@@ -184,7 +191,7 @@ parser.add_argument("--step_hz", type=int, default=500, help="control frequency"
 parser.add_argument("--enable_profiling", action="store_true", default=True, help="enable performance analysis")
 parser.add_argument("--profile_interval", type=int, default=500, help="performance analysis report interval (steps)")
 
-parser.add_argument("--model_path", type=str, default="/home/dreams/Users/taowen/HumanoidArena/TWIST2/assets/ckpts/twist2_1017_20k.onnx", help="model path")
+parser.add_argument("--model_path", type=str, default=DEFAULT_TWIST2_MODEL_PATH, help="model path")
 parser.add_argument("--enable_wholebody_dds", action="store_true", default=False, help="enable wh dds")
 parser.add_argument("--setpgrp", action="store_true", default=False, help="detach to a new process group")
 
