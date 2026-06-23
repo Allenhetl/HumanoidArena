@@ -125,7 +125,6 @@ exec "${cmd[@]}"
 #单足球: tasks/common_env_config/football_single_twist2.yaml
 #双桌面拾放: tasks/common_env_config/doubledesk_twist2.yaml
 #Push-T: tasks/common_env_config/push_t_twist2.yaml
-#客厅抓杯：tasks/common_env_config/livingroom_grapcup_twist2.yaml
 #三级台阶平台：tasks/common_env_config/three_step_platform_twist2.yaml
 #开门：tasks/common_env_config/opendoor_twist2.yaml
 #小推车：tasks/common_env_config/pickplace_small_trolley_twist2.yaml

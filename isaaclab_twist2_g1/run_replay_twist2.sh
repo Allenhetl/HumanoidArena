@@ -15,7 +15,6 @@ REPLAY_LOOP=0             # 1 | 0
 TASK_NAME=""              # 留空则从 replay 文件读取
 # ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/opendoor_twist2.yaml}"
 # ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/livingroom_sitsofa_twist2.yaml}"
-# ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/livingroom_grapcup_twist2.yaml}"
 ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-}"
 # ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/boxing_bag_twist2.yaml}"
 RUN_DEVICE="cpu"

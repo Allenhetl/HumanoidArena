@@ -135,7 +135,6 @@ exec "${cmd[@]}"
 #单足球: tasks/common_env_config/football_single_sonic.yaml
 #双桌面拾放: tasks/common_env_config/doubledesk_sonic.yaml
 #Push-T: tasks/common_env_config/push_t_sonic.yaml
-#客厅抓杯：tasks/common_env_config/livingroom_grapcup_sonic.yaml
 #三级台阶平台：tasks/common_env_config/three_step_platform_sonic.yaml
 #开门：tasks/common_env_config/opendoor_sonic.yaml
 #小推车：tasks/common_env_config/pickplace_small_trolley_sonic.yaml

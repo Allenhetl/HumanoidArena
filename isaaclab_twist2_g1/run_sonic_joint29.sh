@@ -16,7 +16,6 @@ fi
 ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-${DEFAULT_ENV_CONFIG_YAML}}"
 # ENV_CONFIG_YAML="${ISAACLAB_ROOT}/tasks/common_env_config/doubledesk_sonic.yaml"
 # ENV_CONFIG_YAML="${ISAACLAB_ROOT}/tasks/common_env_config/livingroom_sitsofa_sonic.yaml"
-# ENV_CONFIG_YAML="${ISAACLAB_ROOT}/tasks/common_env_config/livingroom_grapcup_sonic.yaml"
 # ENV_CONFIG_YAML="tasks/common_env_config/pickplace_box_sonic.yaml"
 # ENV_CONFIG_YAML="${ISAACLAB_ROOT}/tasks/common_env_config/football_single_sonic.yaml"
 # ENV_CONFIG_YAML="${ISAACLAB_ROOT}/tasks/common_env_config/boxing_bag_sonic.yaml"
@@ -46,7 +45,7 @@ IMAGE_XROBOT_FFMPEG="/usr/bin/ffmpeg"
 # RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HSI_open_door/sonic/zz"
 # RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HSI_boxing/sonic/zz"
 # RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HSI_sitingsofa/sonic/yb"
-RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HOI_grapcup/sonic_v2/tw"
+RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HSI_open_door/sonic/zz"
 # RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HSI_sitingsofa/sonic/zk"
 # RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HSI_pp_box/sonic/yb"
 # RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HOI_double_desk/sonic/tw"
@@ -180,7 +179,6 @@ exec "${cmd[@]}" 2>&1 | tee -a "${SIM_LOG}"
 #单足球: tasks/common_env_config/football_single_sonic.yaml
 #双桌面拾放: tasks/common_env_config/doubledesk_sonic.yaml
 #Push-T: tasks/common_env_config/push_t_sonic.yaml
-#客厅抓杯：tasks/common_env_config/livingroom_grapcup_sonic.yaml
 #三级台阶平台：tasks/common_env_config/three_step_platform_sonic.yaml
 #开门：tasks/common_env_config/opendoor_sonic.yaml
 #小推车：tasks/common_env_config/pickplace_small_trolley_sonic.yaml

@@ -81,9 +81,7 @@ DEFAULT_FOURPOINTS_ROBOT_USD = (
     ISAACLAB_ROOT
     / "assets/robots/g1-29dof_wholebody_dex3/temp/g1_29dof_with_dex3_rev_1_0_fourpoints.usd"
 ).resolve()
-DEFAULT_SOURCE_ROOTS = [
-    ISAACLAB_ROOT / "recording_data/HOI_grapcup/sonic_v2",
-]
+DEFAULT_SOURCE_ROOTS = []
 TASK_TO_ENV_CONFIG = {
       "Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody": (
           ISAACLAB_ROOT / "tasks/common_env_config/small_warehouse_vision_navigation_sonic.yaml"
@@ -100,9 +98,6 @@ TASK_TO_ENV_CONFIG = {
       "Isaac-Move-Sit-Sofa-G129-Dex3-Wholebody": (
           ISAACLAB_ROOT / "tasks/common_env_config/livingroom_sitsofa_sonic.yaml"
       ).resolve(),
-      "Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody": (
-          ISAACLAB_ROOT / "tasks/common_env_config/livingroom_grapcup_sonic.yaml"
-      ).resolve(),""
       "Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody": (
           ISAACLAB_ROOT / "tasks/common_env_config/boxing_bag_sonic.yaml"
       ).resolve(),

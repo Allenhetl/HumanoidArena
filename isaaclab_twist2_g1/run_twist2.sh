@@ -12,7 +12,6 @@ PYTHON_BIN="python"
 # ENV_CONFIG_YAML="tasks/common_env_config/pickplace_box_twist2.yaml"
 # ENV_CONFIG_YAML="tasks/common_env_config/opendoor_twist2.yaml"
 ENV_CONFIG_YAML="tasks/common_env_config/livingroom_sitsofa_twist2.yaml"
-# ENV_CONFIG_YAML="tasks/common_env_config/livingroom_grapcup_twist2.yaml"
 # ENV_CONFIG_YAML="tasks/common_env_config/boxing_bag_twist2.yaml"
 # ENV_CONFIG_YAML="tasks/common_env_config/football_single_twist2.yaml"
 # ENV_CONFIG_YAML="tasks/common_env_config/doubledesk_twist2.yaml"
@@ -36,8 +35,6 @@ IMAGE_XROBOT_FFMPEG="/usr/bin/ffmpeg"
 RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HSI_open_door/twist2/zz"
 # RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HSI_sit_sofa/twist2/zz"
 # RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HSI_sitingsofa/twist2/zk"
-# RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HOI_grapcup/twist2/yb"
-# RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HOI_grapcup/twist2/zz"
 # RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HSI_boxing/twist2/zz"
 # RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HSI_vision_target/twist2/yb"
 # RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording_data/HSI_double_desk/twist2/tw_supply"
@@ -128,7 +125,6 @@ exec "${cmd[@]}"
 #单足球: tasks/common_env_config/football_single_twist2.yaml
 #双桌面拾放: tasks/common_env_config/doubledesk_twist2.yaml
 #Push-T: tasks/common_env_config/push_t_twist2.yaml
-#客厅抓杯：tasks/common_env_config/livingroom_grapcup_twist2.yaml
 #三级台阶平台：tasks/common_env_config/three_step_platform_twist2.yaml
 #开门：tasks/common_env_config/opendoor_twist2.yaml
 #小推车：tasks/common_env_config/pickplace_small_trolley_twist2.yaml

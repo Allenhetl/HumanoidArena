@@ -86,7 +86,6 @@ def compute_metrics(result_dir: str, backend_filter: str | None) -> dict[str, di
             "football": "HOI",
             "pp_box": "HOI",
             "pickplace_box": "HOI",
-            "grap_cup": "HOI",
             "boxing": "HSI",
             "open_door": "HSI",
             "sit_sofa": "HSI",

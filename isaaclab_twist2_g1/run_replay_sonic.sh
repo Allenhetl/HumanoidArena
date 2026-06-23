@@ -13,16 +13,7 @@ REPLAY_FILE="${REPLAY_FILE:-}"
 REPLAY_MODE="direct_replay"   # inference_replay | direct_replay
 REPLAY_LOOP=0                    # 1 | 0
 TASK_NAME="${TASK_NAME:-}"       # 留空则从 replay 文件读取
-ENV_CONFIG_YAML="tasks/common_env_config/opendoor_sonic.yaml"
-# ENV_CONFIG_YAML="tasks/common_env_config/doubledesk_sonic.yaml"
-# ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/doubledesk_sonic.yaml}"
-# ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/boxing_bag_sonic.yaml}"
-# ENV_CONFIG_YAML="tasks/common_env_config/opendoor_sonic.yaml"
-# ENV_CONFIG_YAML="tasks/common_env_config/livingroom_grapcup_sonic.yaml"
-# ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/doubledesk_sonic.yaml}"
-# ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/small_warehouse_vision_navigation_sonic.yaml}"
-# ENV_CONFIG_YAML="tasks/common_env_config/livingroom_sitsofa_sonic.yaml"
-# ENV_CONFIG_YAML="tasks/common_env_config/football_single_sonic.yaml"
+ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-}"
 
 RUN_DEVICE="cpu"
 ROBOT_TYPE="g129"
@@ -90,6 +81,42 @@ PY
 )"
 fi
 
+resolve_sonic_env_config_yaml() {
+  case "$1" in
+    Isaac-Move-Open-Door-G129-Dex3-Wholebody)
+      printf '%s\n' "tasks/common_env_config/opendoor_sonic.yaml"
+      ;;
+    Isaac-Move-PickPlace-Box-G129-Dex3-Wholedoby)
+      printf '%s\n' "tasks/common_env_config/pickplace_box_sonic.yaml"
+      ;;
+    Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody)
+      printf '%s\n' "tasks/common_env_config/doubledesk_sonic.yaml"
+      ;;
+    Isaac-Move-Football-Single-G129-Dex3-Wholebody)
+      printf '%s\n' "tasks/common_env_config/football_single_sonic.yaml"
+      ;;
+    Isaac-Move-Sit-Sofa-G129-Dex3-Wholebody)
+      printf '%s\n' "tasks/common_env_config/livingroom_sitsofa_sonic.yaml"
+      ;;
+    Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody)
+      printf '%s\n' "tasks/common_env_config/boxing_bag_sonic.yaml"
+      ;;
+    Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody)
+      printf '%s\n' "tasks/common_env_config/small_warehouse_vision_navigation_sonic.yaml"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+if [ -z "${ENV_CONFIG_YAML}" ]; then
+  if ! ENV_CONFIG_YAML="$(resolve_sonic_env_config_yaml "${TASK_NAME}")"; then
+    echo "Error: cannot infer SONIC env config for task: ${TASK_NAME}"
+    echo "Set ENV_CONFIG_YAML explicitly."
+    exit 1
+  fi
+fi
 
 export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2.usd"
 
