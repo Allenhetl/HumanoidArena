@@ -23,7 +23,7 @@ OPEN_DOOR_DOOR_ASSET_VARIANT_RECORDED_COMPAT = "recorded_compat"
 OPEN_DOOR_TASK_PROFILES: dict[str, dict[str, str]] = {
     TASK_RUNTIME_PROFILE_INFERENCE: {
         "OPEN_DOOR_LATCH_DISABLE": "0",
-        "OPEN_DOOR_SCENE_AS_ARTICULATION": "1",
+        "OPEN_DOOR_SCENE_AS_ARTICULATION": "0",
         OPEN_DOOR_DOOR_ASSET_VARIANT_ENV: OPEN_DOOR_DOOR_ASSET_VARIANT_INFERENCE_VALI,
     },
     TASK_RUNTIME_PROFILE_REPLAY_COMPAT: {
@@ -48,7 +48,7 @@ TASK_RUNTIME_RULES: dict[str, dict[str, Mapping[str, Mapping[str, str]] | Mappin
 OPEN_DOOR_DOOR_ASSET_RELATIVE_PATHS = {
     OPEN_DOOR_DOOR_ASSET_VARIANT_INFERENCE_VALI: (
         "assets/objects/small_warehouse/small_warehouse_opendoor/interaction_obj/"
-        "door001/model_door001_vali.usd"
+        "door001/model_door001_vali_gate_welded.usd"
     ),
     OPEN_DOOR_DOOR_ASSET_VARIANT_RECORDED_COMPAT: (
         "assets/objects/small_warehouse/small_warehouse_opendoor/interaction_obj/"

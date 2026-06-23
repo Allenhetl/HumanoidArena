@@ -48,11 +48,11 @@ run_batch() {
   run_batch_backend twist2 "${model_root}" "${script_path}"
 }
   
+
 # run_batch "/ai/Yichi/taowen/ckpts/0529/small/HSI_open_door" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_open_door.sh
-# run_batch "/ai/Yichi/taowen/ckpts/0529/small/HOI_pp_box" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_pp_box.sh
+run_batch "/ai/Yichi/taowen/ckpts/0529/small/HOI_pp_box" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_pp_box.sh
 run_batch "/ai/Yichi/taowen/ckpts/0529/small/HSI_boxing" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_boxing.sh
 run_batch "/ai/Yichi/taowen/ckpts/0529/small/HOI_football" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_football.sh
 run_batch "/ai/Yichi/taowen/ckpts/0529/small/HOI_double_desk" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_doubledesk.sh
 run_batch "/ai/Yichi/taowen/ckpts/0529/small/HSI_sit_sofa" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_sit_sofa.sh
 run_batch "/ai/Yichi/taowen/ckpts/0529/small/HSI_vision_navi" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_vision_navi.sh
-

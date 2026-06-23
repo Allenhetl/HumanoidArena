@@ -2181,11 +2181,9 @@ class SonicActionProvider(ActionProvider):
         print('Successful load sonic model')
 
     def _setup_lerobot_vla(self, args_cli) -> None:
-        allowed_robot_types = {"unitree_g1_refpose_v3_1", "unitree_g1_rotlocal_v3"}
-        if self.enable_robot not in allowed_robot_types:
+        if self.enable_robot != "unitree_g1_refpose_v3_1":
             raise ValueError(
-                "[SonicActionProvider] VLA v3.1 runtime requires "
-                "robot_type=unitree_g1_refpose_v3_1; "
+                "[SonicActionProvider] VLA v3.1 runtime requires robot_type=unitree_g1_refpose_v3_1; "
                 f"got {self.enable_robot!r}"
             )
         if self._lerobot_server_url:
@@ -2235,12 +2233,12 @@ class SonicActionProvider(ActionProvider):
         action_shape = tuple(getattr(action_feature, "shape", ()) or ())
         if state_shape and state_shape != (SONIC_VLA_STATE_DIM,):
             raise ValueError(
-                f"[SonicActionProvider] VLA v3 policy must use observation.state shape {(SONIC_VLA_STATE_DIM,)}, "
+                f"[SonicActionProvider] VLA v3.1 policy must use observation.state shape {(SONIC_VLA_STATE_DIM,)}, "
                 f"got {state_shape}"
             )
         if action_shape and action_shape != (SONIC_VLA_ACTION_DIM,):
             raise ValueError(
-                f"[SonicActionProvider] VLA v3 policy must use action shape {(SONIC_VLA_ACTION_DIM,)}, "
+                f"[SonicActionProvider] VLA v3.1 policy must use action shape {(SONIC_VLA_ACTION_DIM,)}, "
                 f"got {action_shape}"
             )
         policy_cls = get_policy_class(config.type)
@@ -2331,6 +2329,7 @@ class SonicActionProvider(ActionProvider):
                 front_rgb=rgb,
                 observation_state=state,
                 robot_type=self.enable_robot,
+                task=self.task_name,
             )
         else:
             if self._lerobot_policy is None or self._lerobot_predict_action is None:
@@ -2346,7 +2345,7 @@ class SonicActionProvider(ActionProvider):
                 preprocessor=self._lerobot_preprocessor,
                 postprocessor=self._lerobot_postprocessor,
                 use_amp=self._lerobot_device.type == "cuda",
-                task=None,
+                task=self.task_name,
                 robot_type=self.enable_robot,
             )
             if isinstance(action, torch.Tensor):
@@ -2395,12 +2394,7 @@ class SonicActionProvider(ActionProvider):
             if prev_root_rot6d_action is None
             else float(np.linalg.norm(root_rot6d_action - prev_root_rot6d_action))
         )
-        if (
-            self._vla_root_rot6d_layout == "auto"
-            and getattr(self._lerobot_vla_runtime, "_prev_root_quat_wxyz", None) is None
-        ):
-            self._lerobot_vla_runtime.prime_root_quat(current_robot_quat_wxyz)
-        prev_runtime_root_quat = getattr(self._lerobot_vla_runtime, "_prev_action_ref_quat_wxyz", None)
+        prev_runtime_root_quat = getattr(self._lerobot_vla_runtime, "_prev_action_rel_quat_wxyz", None)
         row_delta_deg = 0.0
         col_delta_deg = 0.0
         if prev_runtime_root_quat is not None:

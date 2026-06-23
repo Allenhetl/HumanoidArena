@@ -16,24 +16,28 @@ from action_provider.vla_robot_current_local_runtime_v3 import (
     UnifiedRobotCurrentLocalActionRuntimeV3,
     build_sonic_joint29_payload_v3,
     build_twist2_mimic_obs_v3,
+    build_vla_refpose_v31_action,
     build_vla_rotlocal_v3_action,
     build_vla_rotlocal_v3_observation_state,
     heading_canonical_robot_quat_wxyz,
+    quat_heading_wxyz,
     robot_current_local_target_quat_wxyz,
-    rotate_target_base_local_xy_delta_to_world,
+    rotate_ref_base_local_delta_to_world,
     rotate_target_heading_local_delta_to_world,
     rotate_world_delta_to_target_heading_local,
 )
 from action_provider.vla_smpl_runtime import (
     quat_angle_between_wxyz,
+    quat_conjugate_wxyz,
     quat_from_roll_pitch_yaw_wxyz,
+    quat_mul_wxyz,
     quat_to_rot6d_wxyz,
     reorder_twist2_to_canonical_29,
     yaw_from_quat_wxyz,
 )
 
 
-def test_v3_feature_names_are_explicit() -> None:
+def test_v31_feature_names_are_explicit() -> None:
     assert STATE_NAMES[0] == "state.root_heading_canonical_rot6d.0"
     assert ACTION_NAMES[0] == "action.root_ref_base_local_xy_delta.x"
     assert ACTION_NAMES[3] == "action.root_ref_rot6d.0"
@@ -75,29 +79,38 @@ def test_heading_canonical_state_removes_episode_initial_heading() -> None:
     assert state.shape == (64,)
 
 
-def test_runtime_reconstructs_reference_target_from_episode_anchor() -> None:
+def test_runtime_uses_refpose_action_without_current_robot_residual() -> None:
     current_robot = quat_from_roll_pitch_yaw_wxyz(roll=0.0, pitch=0.0, yaw=np.pi / 2.0)
-    ref = quat_from_roll_pitch_yaw_wxyz(roll=0.0, pitch=0.0, yaw=np.pi / 4.0)
     target = quat_from_roll_pitch_yaw_wxyz(roll=0.0, pitch=0.0, yaw=3.0 * np.pi / 4.0)
+    target_in_episode_ref = quat_mul_wxyz(
+        quat_conjugate_wxyz(quat_heading_wxyz(current_robot)),
+        target,
+    )
     joint_pos_canonical = np.linspace(-0.2, 0.2, 29, dtype=np.float32)
-    action = build_vla_rotlocal_v3_action(
+    action = build_vla_refpose_v31_action(
         root_ref_base_local_xy_delta=np.array([0.1, 0.0], dtype=np.float32),
         root_z=0.82,
-        root_ref_rot6d=quat_to_rot6d_wxyz(ref).reshape(6),
+        root_ref_rot6d=quat_to_rot6d_wxyz(target_in_episode_ref).reshape(6),
         joint_pos_canonical_29=joint_pos_canonical,
         hand_binary=np.array([1.0, 0.0], dtype=np.float32),
     )
 
     runtime = UnifiedRobotCurrentLocalActionRuntimeV3()
+    runtime.reset(
+        body_xy_world=np.array([2.0, -1.0], dtype=np.float32),
+        target_root_quat_wxyz=current_robot,
+    )
     frame = runtime.step(
         action,
         current_robot_quat_wxyz=current_robot,
         current_robot_xy_world=np.array([2.0, -1.0], dtype=np.float32),
     )
-    expected_world_delta = rotate_target_base_local_xy_delta_to_world(
-        target_root_quat_wxyz=target,
-        target_base_local_xy_delta=np.array([0.1, 0.0], dtype=np.float32),
-    )[:2]
+    expected_world_delta = rotate_ref_base_local_delta_to_world(
+        root_ref_quat_wxyz=target,
+        root_ref_base_local_xy_delta=np.array([0.1, 0.0], dtype=np.float32),
+        root_z=0.82,
+        prev_root_z=0.82,
+    )
     mimic_obs = build_twist2_mimic_obs_v3(runtime_frame=frame, control_dt=0.1)
     sonic_payload = build_sonic_joint29_payload_v3(runtime_frame=frame, control_dt=0.1)
 
@@ -109,38 +122,29 @@ def test_runtime_reconstructs_reference_target_from_episode_anchor() -> None:
     np.testing.assert_allclose(reorder_twist2_to_canonical_29(mimic_obs[6:35]), joint_pos_canonical)
 
 
-def test_runtime_does_not_reinterpret_reference_as_robot_current_residual() -> None:
-    anchor_robot = quat_from_roll_pitch_yaw_wxyz(roll=0.0, pitch=0.0, yaw=np.pi / 2.0)
-    changed_robot = quat_from_roll_pitch_yaw_wxyz(roll=0.0, pitch=0.0, yaw=-np.pi / 2.0)
-    ref0 = quat_from_roll_pitch_yaw_wxyz(roll=0.0, pitch=0.0, yaw=0.0)
-    ref1 = quat_from_roll_pitch_yaw_wxyz(roll=0.0, pitch=0.0, yaw=np.pi / 4.0)
-    action0 = build_vla_rotlocal_v3_action(
+def test_runtime_anchors_v31_identity_ref_to_initial_robot_heading() -> None:
+    current_robot = quat_from_roll_pitch_yaw_wxyz(roll=0.0, pitch=0.0, yaw=-np.pi / 2.0)
+    joint_pos_canonical = np.zeros(29, dtype=np.float32)
+    action = build_vla_refpose_v31_action(
         root_ref_base_local_xy_delta=np.zeros(2, dtype=np.float32),
-        root_z=0.8,
-        root_ref_rot6d=quat_to_rot6d_wxyz(ref0).reshape(6),
-        joint_pos_canonical_29=np.zeros(29, dtype=np.float32),
+        root_z=0.82,
+        root_ref_rot6d=quat_to_rot6d_wxyz(np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)).reshape(6),
+        joint_pos_canonical_29=joint_pos_canonical,
         hand_binary=np.zeros(2, dtype=np.float32),
-    )
-    action1 = build_vla_rotlocal_v3_action(
-        root_ref_base_local_xy_delta=np.zeros(2, dtype=np.float32),
-        root_z=0.8,
-        root_ref_rot6d=quat_to_rot6d_wxyz(ref1).reshape(6),
-        joint_pos_canonical_29=np.zeros(29, dtype=np.float32),
-        hand_binary=np.zeros(2, dtype=np.float32),
-    )
-    runtime = UnifiedRobotCurrentLocalActionRuntimeV3()
-    runtime.step(
-        action0,
-        current_robot_quat_wxyz=anchor_robot,
-        current_robot_xy_world=np.zeros(2, dtype=np.float32),
-    )
-    frame = runtime.step(
-        action1,
-        current_robot_quat_wxyz=changed_robot,
-        current_robot_xy_world=np.zeros(2, dtype=np.float32),
     )
 
-    assert np.isclose(yaw_from_quat_wxyz(frame.target_root_quat_wxyz), 3.0 * np.pi / 4.0, atol=1e-6)
+    runtime = UnifiedRobotCurrentLocalActionRuntimeV3()
+    runtime.reset(
+        body_xy_world=np.array([0.0, 0.0], dtype=np.float32),
+        target_root_quat_wxyz=current_robot,
+    )
+    frame = runtime.step(
+        action,
+        current_robot_quat_wxyz=current_robot,
+        current_robot_xy_world=np.array([0.0, 0.0], dtype=np.float32),
+    )
+
+    assert quat_angle_between_wxyz(frame.target_root_quat_wxyz, current_robot) < 1e-5
 
 
 def test_heading_local_xy_roundtrip_preserves_world_delta_with_pitch() -> None:

@@ -62,9 +62,16 @@ class LeRobotVLAHttpClient:
             raise RuntimeError(f"HTTP {exc.code} from {self._build_url(path)}: {error_body}") from exc
         return json.loads(raw.decode("utf-8"))
 
-    def infer_chunk(self, front_rgb: np.ndarray, observation_state: np.ndarray, robot_type: str) -> np.ndarray:
+    def infer_chunk(
+        self,
+        front_rgb: np.ndarray,
+        observation_state: np.ndarray,
+        robot_type: str,
+        task: str | None = None,
+    ) -> np.ndarray:
         rgb = np.asarray(front_rgb)
         state = np.asarray(observation_state, dtype=np.float32).reshape(-1)
+        task_name = None if task is None else str(task).strip()
         payload = {
             "observation": {
                 "images": {
@@ -79,6 +86,8 @@ class LeRobotVLAHttpClient:
             "robot_type": robot_type,
             "return_chunk": True,
         }
+        if task_name:
+            payload["task"] = task_name
         response = self._post_json("/infer", payload)
         action_chunk = response.get("action_chunk")
         if action_chunk is None:
@@ -94,6 +103,7 @@ class LeRobotVLAHttpClient:
                 "timestamp": time.time(),
                 "step_idx": self._trace_step_idx,
                 "robot_type": robot_type,
+                "task": task_name,
                 "front_rgb_shape": list(rgb.shape),
                 "observation_state": state.tolist(),
                 "chunk_size": int(action_chunk.shape[0]),
@@ -103,11 +113,18 @@ class LeRobotVLAHttpClient:
         self._trace_step_idx += 1
         return action_chunk
 
-    def infer(self, front_rgb: np.ndarray, observation_state: np.ndarray, robot_type: str) -> np.ndarray:
+    def infer(
+        self,
+        front_rgb: np.ndarray,
+        observation_state: np.ndarray,
+        robot_type: str,
+        task: str | None = None,
+    ) -> np.ndarray:
         action_chunk = self.infer_chunk(
             front_rgb=front_rgb,
             observation_state=observation_state,
             robot_type=robot_type,
+            task=task,
         )
         return action_chunk[0]
 

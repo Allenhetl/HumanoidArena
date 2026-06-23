@@ -17,6 +17,50 @@ CONDA_BASE="${CONDA_BASE:-}"
 ISAACLAB_CONDA_ENV_NAME="${ISAACLAB_CONDA_ENV_NAME:-unitree_sim_env}"
 LEROBOT_CONDA_ENV_NAME="${LEROBOT_CONDA_ENV_NAME:-lerobot}"
 
+conda_base_has_required_envs() {
+  local base="$1"
+  [[ -n "${base}" ]] || return 1
+  [[ -x "${base}/envs/${ISAACLAB_CONDA_ENV_NAME}/bin/python" ]] || return 1
+  [[ -x "${base}/envs/${LEROBOT_CONDA_ENV_NAME}/bin/python" ]] || return 1
+}
+
+detect_conda_base() {
+  local candidate=""
+  local -a candidates=()
+
+  if [[ -n "${CONDA_EXE:-}" ]]; then
+    candidate="$(cd "$(dirname "${CONDA_EXE}")/.." 2>/dev/null && pwd || true)"
+    [[ -n "${candidate}" ]] && candidates+=("${candidate}")
+  fi
+  if [[ -n "${CONDA_PREFIX:-}" ]]; then
+    candidate="$(cd "${CONDA_PREFIX}/../.." 2>/dev/null && pwd || true)"
+    [[ -n "${candidate}" ]] && candidates+=("${candidate}")
+  fi
+
+  candidates+=(
+    "/ai/Yichi/0_Systems/miniconda3"
+    "${HOME:-}/miniconda3"
+    "/opt/conda"
+    "/root/miniconda3"
+  )
+
+  local seen=""
+  for candidate in "${candidates[@]}"; do
+    [[ -n "${candidate}" ]] || continue
+    [[ " ${seen} " != *" ${candidate} "* ]] || continue
+    seen="${seen} ${candidate}"
+    if conda_base_has_required_envs "${candidate}"; then
+      printf "%s" "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if [[ -z "${CONDA_BASE}" ]]; then
+  CONDA_BASE="$(detect_conda_base || true)"
+fi
+
 if [[ -z "${ISAACLAB_PYTHON:-}" && -n "${CONDA_BASE}" ]]; then
   ISAACLAB_PYTHON="${CONDA_BASE}/envs/${ISAACLAB_CONDA_ENV_NAME}/bin/python"
 fi
