@@ -79,7 +79,7 @@ class TableFootballSceneCfgWH(InteractiveSceneCfg):
             rot=[1.0, 0.0, 0.0, 0.0],
         ),
         spawn=UsdFileCfg(
-            usd_path=f"{project_root}/assets/football/soccer_ball_physics.usd",
+            usd_path=f"{project_root}/assets/objects/small_warehouse/football_scene/interaction_obj/soccer_ball/soccer_ball_physics.usd",
             scale=(1.0, 1.0, 1.0),  # OBJ in meters -> FIFA ball ~0.22m
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 rigid_body_enabled=True,
@@ -130,7 +130,7 @@ class TableFootballSceneCfgWH(InteractiveSceneCfg):
             rot=[1.0, 0.0, 0.0, 0.0],
         ),
         spawn=UsdFileCfg(
-            usd_path=f"{project_root}/assets/football_net/football_goal_physics.usd",
+            usd_path=f"{project_root}/assets/objects/small_warehouse/football_scene/interaction_obj/football_goal/football_goal_physics.usd",
             scale=(0.01, 0.01, 0.01),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 rigid_body_enabled=True,
@@ -153,7 +153,7 @@ class TableFootballSceneCfgWH(InteractiveSceneCfg):
             rot=[0.0, 0.0, 0.0, 1.0],  # 180° 繞 Z，開口朝中心
         ),
         spawn=UsdFileCfg(
-            usd_path=f"{project_root}/assets/football_net/football_goal_physics.usd",
+            usd_path=f"{project_root}/assets/objects/small_warehouse/football_scene/interaction_obj/football_goal/football_goal_physics.usd",
             scale=(0.01, 0.01, 0.01),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 rigid_body_enabled=True,
