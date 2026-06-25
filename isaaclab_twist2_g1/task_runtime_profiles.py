@@ -20,6 +20,11 @@ OPEN_DOOR_DOOR_ASSET_VARIANT_ENV = "OPEN_DOOR_DOOR_ASSET_VARIANT"
 OPEN_DOOR_DOOR_ASSET_VARIANT_INFERENCE_VALI = "inference_vali"
 OPEN_DOOR_DOOR_ASSET_VARIANT_RECORDED_COMPAT = "recorded_compat"
 
+VISION_NAVI_TASK = "Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody"
+VISION_NAVI_ROOM_ASSET_VARIANT_ENV = "VISION_NAVI_ROOM_ASSET_VARIANT"
+VISION_NAVI_ROOM_ASSET_VARIANT_VALIDATION = "validation"
+VISION_NAVI_ROOM_ASSET_VARIANT_RECORDED_COMPAT = "recorded_compat"
+
 OPEN_DOOR_TASK_PROFILES: dict[str, dict[str, str]] = {
     TASK_RUNTIME_PROFILE_INFERENCE: {
         "OPEN_DOOR_LATCH_DISABLE": "0",
@@ -33,9 +38,31 @@ OPEN_DOOR_TASK_PROFILES: dict[str, dict[str, str]] = {
     },
 }
 
+# Vision-navigation uses two room USDs for different data contracts:
+# - validation: optimized inference/validation scene, intended for current model evaluation and future data collection.
+# - recorded_compat: original digital-twin scene used by released recordings; keep replay/rerecord on this
+#   asset because small geometry differences can make existing demonstrations fail to replay.
+VISION_NAVI_TASK_PROFILES: dict[str, dict[str, str]] = {
+    TASK_RUNTIME_PROFILE_INFERENCE: {
+        VISION_NAVI_ROOM_ASSET_VARIANT_ENV: VISION_NAVI_ROOM_ASSET_VARIANT_VALIDATION,
+    },
+    TASK_RUNTIME_PROFILE_REPLAY_COMPAT: {
+        VISION_NAVI_ROOM_ASSET_VARIANT_ENV: VISION_NAVI_ROOM_ASSET_VARIANT_RECORDED_COMPAT,
+    },
+}
+
 TASK_RUNTIME_RULES: dict[str, dict[str, Mapping[str, Mapping[str, str]] | Mapping[str, str]]] = {
     OPEN_DOOR_TASK: {
         "profiles": OPEN_DOOR_TASK_PROFILES,
+        "default_profile_by_context": {
+            RUNTIME_CONTEXT_LIVE_INFERENCE: TASK_RUNTIME_PROFILE_INFERENCE,
+            RUNTIME_CONTEXT_DIRECT_REPLAY: TASK_RUNTIME_PROFILE_REPLAY_COMPAT,
+            RUNTIME_CONTEXT_INFERENCE_REPLAY: TASK_RUNTIME_PROFILE_REPLAY_COMPAT,
+            RUNTIME_CONTEXT_RERECORD: TASK_RUNTIME_PROFILE_REPLAY_COMPAT,
+        },
+    },
+    VISION_NAVI_TASK: {
+        "profiles": VISION_NAVI_TASK_PROFILES,
         "default_profile_by_context": {
             RUNTIME_CONTEXT_LIVE_INFERENCE: TASK_RUNTIME_PROFILE_INFERENCE,
             RUNTIME_CONTEXT_DIRECT_REPLAY: TASK_RUNTIME_PROFILE_REPLAY_COMPAT,
@@ -53,6 +80,17 @@ OPEN_DOOR_DOOR_ASSET_RELATIVE_PATHS = {
     OPEN_DOOR_DOOR_ASSET_VARIANT_RECORDED_COMPAT: (
         "assets/objects/small_warehouse/small_warehouse_opendoor/interaction_obj/"
         "door001/model_door001.usd"
+    ),
+}
+
+VISION_NAVI_ROOM_ASSET_RELATIVE_PATHS = {
+    VISION_NAVI_ROOM_ASSET_VARIANT_VALIDATION: (
+        "assets/objects/small_warehouse/small_warehouse_vision_navigation/"
+        "small_warehouse_digital_twin_validation.usd"
+    ),
+    VISION_NAVI_ROOM_ASSET_VARIANT_RECORDED_COMPAT: (
+        "assets/objects/small_warehouse/small_warehouse_vision_navigation/"
+        "small_warehouse_digital_twin.usd"
     ),
 }
 
@@ -172,3 +210,25 @@ def resolve_open_door_door_usd_path(
 ) -> str:
     resolved_variant = resolve_open_door_door_asset_variant(variant)
     return str(Path(project_root) / OPEN_DOOR_DOOR_ASSET_RELATIVE_PATHS[resolved_variant])
+
+def resolve_vision_navi_room_asset_variant(
+    variant: str | None = None,
+) -> str:
+    normalized = str(
+        variant
+        or os.environ.get(VISION_NAVI_ROOM_ASSET_VARIANT_ENV, VISION_NAVI_ROOM_ASSET_VARIANT_RECORDED_COMPAT)
+    ).strip().lower()
+    if normalized not in VISION_NAVI_ROOM_ASSET_RELATIVE_PATHS:
+        supported = ", ".join(sorted(VISION_NAVI_ROOM_ASSET_RELATIVE_PATHS))
+        raise ValueError(
+            f"Unsupported {VISION_NAVI_ROOM_ASSET_VARIANT_ENV}={normalized!r}; supported variants: {supported}"
+        )
+    return normalized
+
+
+def resolve_vision_navi_room_usd_path(
+    project_root: str | os.PathLike[str],
+    variant: str | None = None,
+) -> str:
+    resolved_variant = resolve_vision_navi_room_asset_variant(variant)
+    return str(Path(project_root) / VISION_NAVI_ROOM_ASSET_RELATIVE_PATHS[resolved_variant])

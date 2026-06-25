@@ -5,6 +5,7 @@ from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 from isaaclab.utils import configclass
+from task_runtime_profiles import resolve_vision_navi_room_usd_path
 from tasks.common_config import CameraBaseCfg
 
 
@@ -18,14 +19,10 @@ TARGET_ASSET_SCALE = (0.01, 0.01, 0.01)
 # OBSTACLE_02_ASSET_SCALE = (0.02,0.02,0.05)
 OBSTACLE_01_ASSET_SCALE = (1.0,1.0,1.0)
 OBSTACLE_02_ASSET_SCALE = (1.0,1.0,1.0)
-ROOM_USD_PATH = (
-    f"{project_root}/assets/objects/small_warehouse/"
-    "small_warehouse_vision_navigation/small_warehouse_digital_twin_validation.usd"
-)
-# ROOM_USD_PATH = (
-#     f"{project_root}/assets/objects/small_warehouse/"
-#     "small_warehouse_vision_navigation/small_warehouse_digital_twin_validation.usd"
-# )
+# Runtime profile selects the room asset variant:
+# - live inference/validation uses the optimized validation USD to reduce scene load.
+# - replay/rerecord uses the original digital-twin USD so released recordings stay geometrically compatible.
+ROOM_USD_PATH = resolve_vision_navi_room_usd_path(project_root)
 TARGET_USD_PATH = (
     f"{project_root}/assets/objects/small_warehouse/small_warehouse_vision_navigation/"
     "interaction_obj/wetfloorsign.usd"
