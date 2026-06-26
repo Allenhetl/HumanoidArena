@@ -2,6 +2,19 @@
 
 `isaaclab_twist2_g1/` 是当前仓库里连接 Isaac Lab 仿真、Pico 遥操作、录制与 replay 的主目录。
 
+## 环境部署
+
+新机器部署时请先阅读：
+
+- [docs/ENVIRONMENT_SETUP.md](docs/ENVIRONMENT_SETUP.md)
+
+当前推荐使用两个 conda 环境：
+
+- `unitree_sim_env`：Isaac Sim / Isaac Lab 仿真、replay、rerecord、eval worker。
+- `lerobot`：LeRobot 训练与 VLA HTTP policy server。
+
+Isaac Sim 5.0 是当前推荐主线；Isaac Sim 4.5 文档保留为历史兼容参考。
+
 ## 目录说明
 
 - `action_provider/`

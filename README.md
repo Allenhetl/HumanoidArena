@@ -36,10 +36,15 @@
 
 ## 安装
 
-运行前请先完成以下两个组件的安装：
+新机器部署建议先阅读项目级环境说明：
+
+- [环境部署说明](./isaaclab_twist2_g1/docs/ENVIRONMENT_SETUP.md)
+
+运行前请先完成以下组件的安装：
 
 | 组件      | 安装文档 |
 | --------- | -------- |
+| Conda / Isaac Sim / Isaac Lab / LeRobot 环境 | [环境部署说明](./isaaclab_twist2_g1/docs/ENVIRONMENT_SETUP.md) |
 | IsaacLab 仿真桥接 | [isaaclab_twist2_g1/README.md](./isaaclab_twist2_g1/README.md) |
 | TWIST2    | [TWIST2/README.md](./TWIST2/README.md) |
 
