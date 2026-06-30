@@ -10,27 +10,28 @@ cd "${SCRIPT_DIR}" || exit 1
 # ------------------------------------------------------------------
 PYTHON_BIN="${PYTHON_BIN:-${ISAACLAB_PYTHON}}"
 REPLAY_FILE="${REPLAY_FILE:-}"
-REPLAY_MODE="direct_replay"   # inference_replay | direct_replay
-REPLAY_LOOP=0                    # 1 | 0
+REPLAY_MODE="${REPLAY_MODE:-direct_replay}"   # inference_replay | direct_replay
+REPLAY_LOOP="${REPLAY_LOOP:-0}"               # 1 | 0
 TASK_NAME="${TASK_NAME:-}"       # 留空则从 replay 文件读取
 ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-}"
 
-RUN_DEVICE="cpu"
-ROBOT_TYPE="g129"
-ROBOT_COLLIDER_MODE="box"        # box | fourpoints
-ENABLE_CAMERAS=1
-ENABLE_WRIST_CAMERAS=0
-ENABLE_DEX3_DDS=1
-HEADLESS=0
+RUN_DEVICE="${RUN_DEVICE:-cpu}"
+ROBOT_TYPE="${ROBOT_TYPE:-g129}"
+ROBOT_COLLIDER_MODE="${ROBOT_COLLIDER_MODE:-box}"        # box | fourpoints
+ENABLE_CAMERAS="${ENABLE_CAMERAS:-1}"
+ENABLE_WRIST_CAMERAS="${ENABLE_WRIST_CAMERAS:-0}"
+ENABLE_DEX3_DDS="${ENABLE_DEX3_DDS:-1}"
+HEADLESS="${HEADLESS:-0}"
+EXIT_WHEN_REPLAY_COMPLETE="${EXIT_WHEN_REPLAY_COMPLETE:-0}"
 SONIC_ENCODER_PATH="${SONIC_ENCODER_PATH:-${SONIC_POLICY_ROOT}/model_encoder.onnx}"
 SONIC_DECODER_PATH="${SONIC_DECODER_PATH:-${SONIC_POLICY_ROOT}/model_decoder.onnx}"
-IMAGE_TRANSPORT="zmq"
-IMAGE_ZMQ_PORT="5555"
-LEFT_WRIST_CAMERA_PORT="5557"
-RIGHT_WRIST_CAMERA_PORT="5558"
-IMAGE_FPS="30"
-LOG_DIR="${SCRIPT_DIR}/logs/sonic_replay"
-SEED="42"
+IMAGE_TRANSPORT="${IMAGE_TRANSPORT:-zmq}"
+IMAGE_ZMQ_PORT="${IMAGE_ZMQ_PORT:-5555}"
+LEFT_WRIST_CAMERA_PORT="${LEFT_WRIST_CAMERA_PORT:-5557}"
+RIGHT_WRIST_CAMERA_PORT="${RIGHT_WRIST_CAMERA_PORT:-5558}"
+IMAGE_FPS="${IMAGE_FPS:-30}"
+LOG_DIR="${LOG_DIR:-${SCRIPT_DIR}/logs/sonic_replay}"
+SEED="${SEED:-42}"
 
 export PROJECT_ROOT="${SCRIPT_DIR}"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
@@ -179,6 +180,9 @@ if [ "${HEADLESS}" = "1" ]; then
 fi
 if [ "${REPLAY_LOOP}" = "1" ]; then
   cmd+=(--replay_loop)
+fi
+if [ "${EXIT_WHEN_REPLAY_COMPLETE}" = "1" ]; then
+  cmd+=(--exit_when_replay_complete)
 fi
 
 {

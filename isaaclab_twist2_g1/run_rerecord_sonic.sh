@@ -7,26 +7,26 @@ cd "${SCRIPT_DIR}" || exit 1
 
 PYTHON_BIN="${PYTHON_BIN:-${ISAACLAB_PYTHON}}"
 REPLAY_FILE="${REPLAY_FILE:-}"
-REPLAY_MODE="direct_replay"
-REPLAY_LOOP=0
+REPLAY_MODE="${REPLAY_MODE:-direct_replay}"
+REPLAY_LOOP="${REPLAY_LOOP:-0}"
 TASK_NAME="${TASK_NAME:-}"
-ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/livingroom_sitsofa_sonic.yaml}"
-RUN_DEVICE="cpu"
-ROBOT_TYPE="g129"
-ROBOT_COLLIDER_MODE="box"
-ENABLE_CAMERAS=1
-ENABLE_WRIST_CAMERAS=1
-ENABLE_DEX3_DDS=1
-HEADLESS=1
+ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-}"
+RUN_DEVICE="${RUN_DEVICE:-cpu}"
+ROBOT_TYPE="${ROBOT_TYPE:-g129}"
+ROBOT_COLLIDER_MODE="${ROBOT_COLLIDER_MODE:-box}"
+ENABLE_CAMERAS="${ENABLE_CAMERAS:-1}"
+ENABLE_WRIST_CAMERAS="${ENABLE_WRIST_CAMERAS:-1}"
+ENABLE_DEX3_DDS="${ENABLE_DEX3_DDS:-1}"
+HEADLESS="${HEADLESS:-1}"
 SONIC_ENCODER_PATH="${SONIC_ENCODER_PATH:-${SONIC_POLICY_ROOT}/model_encoder.onnx}"
 SONIC_DECODER_PATH="${SONIC_DECODER_PATH:-${SONIC_POLICY_ROOT}/model_decoder.onnx}"
-IMAGE_TRANSPORT="zmq"
-IMAGE_ZMQ_PORT="5555"
-LEFT_WRIST_CAMERA_PORT="5557"
-RIGHT_WRIST_CAMERA_PORT="5558"
-IMAGE_FPS="30"
-SEED="42"
-RECORDING_SAVE_DIR="${SCRIPT_DIR}/recording4pic/sofa/"
+IMAGE_TRANSPORT="${IMAGE_TRANSPORT:-zmq}"
+IMAGE_ZMQ_PORT="${IMAGE_ZMQ_PORT:-5555}"
+LEFT_WRIST_CAMERA_PORT="${LEFT_WRIST_CAMERA_PORT:-5557}"
+RIGHT_WRIST_CAMERA_PORT="${RIGHT_WRIST_CAMERA_PORT:-5558}"
+IMAGE_FPS="${IMAGE_FPS:-30}"
+SEED="${SEED:-42}"
+RECORDING_SAVE_DIR="${RECORDING_SAVE_DIR:-${SCRIPT_DIR}/recording4pic/sonic_rerecord/}"
 
 export PROJECT_ROOT="${SCRIPT_DIR}"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
@@ -90,6 +90,43 @@ PY
 )"
 fi
 
+resolve_sonic_env_config_yaml() {
+  case "$1" in
+    Isaac-Move-Open-Door-G129-Dex3-Wholebody)
+      printf '%s\n' "tasks/common_env_config/opendoor_sonic.yaml"
+      ;;
+    Isaac-Move-PickPlace-Box-G129-Dex3-Wholedoby)
+      printf '%s\n' "tasks/common_env_config/pickplace_box_sonic.yaml"
+      ;;
+    Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody)
+      printf '%s\n' "tasks/common_env_config/doubledesk_sonic.yaml"
+      ;;
+    Isaac-Move-Football-Single-G129-Dex3-Wholebody)
+      printf '%s\n' "tasks/common_env_config/football_single_sonic.yaml"
+      ;;
+    Isaac-Move-Sit-Sofa-G129-Dex3-Wholebody)
+      printf '%s\n' "tasks/common_env_config/livingroom_sitsofa_sonic.yaml"
+      ;;
+    Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody)
+      printf '%s\n' "tasks/common_env_config/boxing_bag_sonic.yaml"
+      ;;
+    Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody)
+      printf '%s\n' "tasks/common_env_config/small_warehouse_vision_navigation_sonic.yaml"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+if [ -z "${ENV_CONFIG_YAML}" ]; then
+  if ! ENV_CONFIG_YAML="$(resolve_sonic_env_config_yaml "${TASK_NAME}")"; then
+    echo "Error: cannot infer SONIC env config for task: ${TASK_NAME}"
+    echo "Set ENV_CONFIG_YAML explicitly."
+    exit 1
+  fi
+fi
+
 if [ "${ROBOT_COLLIDER_MODE}" = "fourpoints" ]; then
   export ROBOT_USD_OVERRIDE="${SCRIPT_DIR}/assets/robots/g1-29dof_wholebody_dex3/temp/g1_29dof_with_dex3_rev_1_0_fourpoints.usd"
 else
@@ -101,6 +138,7 @@ echo "[robot_usd] path=${ROBOT_USD_OVERRIDE}"
 echo "[sonic rerecord] file=${REPLAY_FILE}"
 echo "[sonic rerecord] mode=${REPLAY_MODE}"
 echo "[sonic rerecord] task=${TASK_NAME}"
+echo "[sonic rerecord] env_config_yaml=${ENV_CONFIG_YAML}"
 echo "[sonic rerecord] recording_save_dir=${RECORDING_SAVE_DIR}"
 
 cmd=(
