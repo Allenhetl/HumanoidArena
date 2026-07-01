@@ -60,3 +60,7 @@ isaaclab_twist2_g1/tools/apply_task_asset_migration.py
 isaaclab_twist2_g1/tools/fix_task_asset_migration_residuals.py
 isaaclab_twist2_g1/tools/scan_task_asset_dependencies.py
 lerobot/scripts/open_aoe_training/
+
+# Local agent/session guidance
+AGENTS.md
+MEMORY.md
