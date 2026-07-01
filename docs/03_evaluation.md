@@ -17,10 +17,12 @@ RESULTS_TAG_PREFIX
 
 Typical `TEST_MODE` values include:
 
-```text
-base_test
-semantic
-```
+| Mode | Meaning |
+| --- | --- |
+| `base_test` | <small><span style="color: #666;">Matches teleoperation data conditions: object randomization range, asset textures, and lighting stay consistent with the demonstration setup.</span></small> |
+| `semantic` | <small><span style="color: #666;">Applies semantic changes around task-relevant objects, such as texture/material replacement or semantically similar distractors in the task area.</span></small> |
+| `vision` | <small><span style="color: #666;">Randomizes lighting conditions relative to the original teleoperation data.</span></small> |
+| `execution` | <small><span style="color: #666;">Expands the randomization range for task-relevant assets beyond the range used during teleoperation.</span></small> |
 
 Typical `EVAL_BACKEND` values include:
 
