@@ -12,6 +12,10 @@ SMALL_MODEL_ROOT="${SMALL_MODEL_ROOT:-${MODEL_ROOT_BASE}/small}"
 export RESUME_LATEST=0
 SELECTED_EVAL_BACKEND="${EVAL_BACKEND:-${BATCH_TEST_BACKEND:-all}}"
 export NUM_WORKERS="${NUM_WORKERS:-2}"
+export VLA_MAX_ROOT_DELTA_DEG="${VLA_MAX_ROOT_DELTA_DEG:-0}"
+if [[ "${VLA_MAX_ROOT_DELTA_DEG}" != "0" && "${VLA_MAX_ROOT_DELTA_DEG}" != "0.0" ]]; then
+  echo "[batch_1_test] VLA_MAX_ROOT_DELTA_DEG=${VLA_MAX_ROOT_DELTA_DEG}"
+fi
 TEST_MODE="${TEST_MODE:-base_test}"
 export TEST_MODE
 export RESULTS_TAG_PREFIX="${RESULTS_TAG_PREFIX:-${BATCH_RESULTS_PREFIX:-${1:-}}}"
@@ -55,12 +59,11 @@ run_batch() {
   run_batch_backend sonic "${model_root}" "${script_path}"
   run_batch_backend twist2 "${model_root}" "${script_path}"
 }
-  
 
-# run_batch "${SMALL_MODEL_ROOT}/HSI_open_door" "${SCRIPT_DIR}/batch_test_open_door.sh"
-run_batch "${SMALL_MODEL_ROOT}/HOI_pp_box" "${SCRIPT_DIR}/batch_test_pp_box.sh"
-run_batch "${SMALL_MODEL_ROOT}/HSI_boxing" "${SCRIPT_DIR}/batch_test_boxing.sh"
-run_batch "${SMALL_MODEL_ROOT}/HOI_football" "${SCRIPT_DIR}/batch_test_football.sh"
-run_batch "${SMALL_MODEL_ROOT}/HOI_double_desk" "${SCRIPT_DIR}/batch_test_doubledesk.sh"
-run_batch "${SMALL_MODEL_ROOT}/HSI_sit_sofa" "${SCRIPT_DIR}/batch_test_sit_sofa.sh"
-run_batch "${SMALL_MODEL_ROOT}/HSI_vision_navi" "${SCRIPT_DIR}/batch_test_vision_navi.sh"
+run_batch "${SMALL_MODEL_ROOT}/HSI_open_door" "${SCRIPT_DIR}/task/batch_test_open_door.sh"
+run_batch "${SMALL_MODEL_ROOT}/HOI_pp_box" "${SCRIPT_DIR}/task/batch_test_pp_box.sh"
+run_batch "${SMALL_MODEL_ROOT}/HSI_boxing" "${SCRIPT_DIR}/task/batch_test_boxing.sh"
+run_batch "${SMALL_MODEL_ROOT}/HOI_football" "${SCRIPT_DIR}/task/batch_test_football.sh"
+run_batch "${SMALL_MODEL_ROOT}/HOI_double_desk" "${SCRIPT_DIR}/task/batch_test_doubledesk.sh"
+run_batch "${SMALL_MODEL_ROOT}/HSI_sit_sofa" "${SCRIPT_DIR}/task/batch_test_sit_sofa.sh"
+run_batch "${SMALL_MODEL_ROOT}/HSI_vision_navi" "${SCRIPT_DIR}/task/batch_test_vision_navi.sh"

@@ -6,7 +6,7 @@ HumanoidArena is a humanoid manipulation and whole-body control benchmark built 
   <a href="https://humanoidarena.github.io/">Project Page</a> |
   <a href="https://arxiv.org/abs/2606.17833">arXiv</a> |
   <a href="https://huggingface.co/datasets/HumanoidArena">HF Dataset</a> |
-  <a href="https://huggingface.co/HumanoidArena">HF Models</a>
+  <a href="https://huggingface.co/WilliamWang16/HumanoidArena_models">HF Models</a>
 </p>
 
 <p align="center">
@@ -36,8 +36,8 @@ HumanoidArena focuses on full-body humanoid interaction tasks with reproducible 
 | --- | --- |
 | Project page | https://humanoidarena.github.io/ |
 | Paper | https://arxiv.org/abs/2606.17833 |
-| LeRobot dataset | https://huggingface.co/datasets/HumanoidArena |
-| Model checkpoints | https://huggingface.co/HumanoidArena |
+| LeRobot dataset | coming soon |
+| Model checkpoints | https://huggingface.co/WilliamWang16/HumanoidArena_models |
 
 Update the placeholder project, paper, dataset, and model URLs before tagging the public release if the final links differ.
 
@@ -105,7 +105,7 @@ The git repository should contain source code, small examples, and required ligh
 | Artifact | Status | Location |
 | --- | --- | --- |
 | LeRobot dataset | Released | https://huggingface.co/datasets/HumanoidArena |
-| Model checkpoints | Released | https://huggingface.co/HumanoidArena |
+| Model checkpoints | Released | https://huggingface.co/WilliamWang16/HumanoidArena_models |
 | Raw data | Planned | To be announced |
 | Multicam data | Planned | To be announced |
 
@@ -151,11 +151,11 @@ bash isaaclab_twist2_g1/script/eval_scripts/twist2/run_vla_eval.sh
 Batch evaluation entrypoints include:
 
 ```text
-isaaclab_twist2_g1/batch_1_test_v31_sonic.sh
-isaaclab_twist2_g1/batch_1_test_v31_twist2.sh
-isaaclab_twist2_g1/batch_1_test_v31_merage.sh
-isaaclab_twist2_g1/batch_pi05_v31_sonic.sh
-isaaclab_twist2_g1/batch_pi05_v31_twist2.sh
+isaaclab_twist2_g1/batch_test_scripts/batch_1_test_v31_sonic.sh
+isaaclab_twist2_g1/batch_test_scripts/batch_1_test_v31_twist2.sh
+isaaclab_twist2_g1/batch_test_scripts/batch_1_test_v31_merage.sh
+isaaclab_twist2_g1/batch_test_scripts/batch_pi05_v31_sonic.sh
+isaaclab_twist2_g1/batch_test_scripts/batch_pi05_v31_twist2.sh
 ```
 
 See [Evaluation](docs/03_evaluation.md) for vision execution, semantic evaluation, and batch launch examples.
@@ -165,11 +165,11 @@ See [Evaluation](docs/03_evaluation.md) for vision execution, semantic evaluatio
 If you use HumanoidArena in your research, please cite:
 
 ```bibtex
-@inproceedings{HumanoidArena,
-  title = {HumanoidArena: Benchmarking Egocentric Hierarchical Whole-body Learning},
-  author = {Taowen Wang and Zikang Xie and Bin Yang and et al.},
-  booktitle = {arXiv},
-  year = {2026}
+@article{wang2026humanoidarena,
+  title={HumanoidArena: Benchmarking Egocentric Hierarchical Whole-body Learning},
+  author={Wang, Taowen and Xie, Zikang and Yang, Bin and others},
+  journal={arXiv preprint arXiv:2606.17833},
+  year={2026}
 }
 ```
 

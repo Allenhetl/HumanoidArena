@@ -117,7 +117,7 @@ MODEL_ROOT_BASE="/path/to/humanoidarena_checkpoints" \
 MODEL_GLOB="*" \
 NUM_WORKERS=2 \
 RESULTS_TAG_PREFIX=vision_exec \
-bash isaaclab_twist2_g1/batch_1_test_v31_sonic.sh
+bash isaaclab_twist2_g1/batch_test_scripts/batch_1_test_v31_sonic.sh
 ```
 
 TWIST2:
@@ -129,7 +129,7 @@ MODEL_ROOT_BASE="/path/to/humanoidarena_checkpoints" \
 MODEL_GLOB="*" \
 NUM_WORKERS=2 \
 RESULTS_TAG_PREFIX=vision_exec \
-bash isaaclab_twist2_g1/batch_1_test_v31_twist2.sh
+bash isaaclab_twist2_g1/batch_test_scripts/batch_1_test_v31_twist2.sh
 ```
 
 ## 5. Semantic Evaluation
@@ -145,7 +145,7 @@ MODEL_ROOT="/path/to/pi0.5_sonic_checkpoint" \
 MODEL_GLOB="*" \
 NUM_WORKERS=2 \
 RESULTS_TAG_PREFIX=pi05_semantic \
-bash isaaclab_twist2_g1/pi05_batch_test_doubledesk.sh
+bash isaaclab_twist2_g1/batch_test_scripts/task/pi05_batch_test_doubledesk.sh
 ```
 
 Open-door example:
@@ -157,7 +157,7 @@ MODEL_ROOT="/path/to/pi0.5_sonic_opendoor_checkpoint" \
 MODEL_GLOB="*" \
 NUM_WORKERS=2 \
 RESULTS_TAG_PREFIX=pi05_semantic \
-bash isaaclab_twist2_g1/pi05_batch_test_open_door.sh
+bash isaaclab_twist2_g1/batch_test_scripts/task/pi05_batch_test_open_door.sh
 ```
 
 ## 6. Batch Evaluation
@@ -165,11 +165,11 @@ bash isaaclab_twist2_g1/pi05_batch_test_open_door.sh
 Primary maintained batch entrypoints live under `isaaclab_twist2_g1/`:
 
 ```text
-batch_1_test_v31_sonic.sh
-batch_1_test_v31_twist2.sh
-batch_1_test_v31_merage.sh
-batch_pi05_v31_sonic.sh
-batch_pi05_v31_twist2.sh
+batch_test_scripts/batch_1_test_v31_sonic.sh
+batch_test_scripts/batch_1_test_v31_twist2.sh
+batch_test_scripts/batch_1_test_v31_merage.sh
+batch_test_scripts/batch_pi05_v31_sonic.sh
+batch_test_scripts/batch_pi05_v31_twist2.sh
 ```
 
 Use these maintained entrypoints as launch templates and pass the downloaded checkpoint root through `MODEL_ROOT_BASE`. Override `SMALL_MODEL_ROOT`, `MERGE_MODEL_ROOT`, or `PI05_MODEL_ROOT` only when using a custom layout.
@@ -182,7 +182,7 @@ TEST_MODE=semantic \
 EVAL_BACKEND=sonic \
 MODEL_GLOB="*" \
 NUM_WORKERS=2 \
-bash isaaclab_twist2_g1/batch_pi05_v31_sonic.sh
+bash isaaclab_twist2_g1/batch_test_scripts/batch_pi05_v31_sonic.sh
 ```
 
 ## 7. Results

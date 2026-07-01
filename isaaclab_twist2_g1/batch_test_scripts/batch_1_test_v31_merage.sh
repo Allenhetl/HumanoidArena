@@ -56,11 +56,11 @@ run_batch() {
   run_batch_backend twist2 "${model_root}" "${script_path}"
 }
 
-run_batch "${MERGE_MODEL_ROOT}" "${SCRIPT_DIR}/batch_test_open_door.sh"
-# run_batch "${MERGE_MODEL_ROOT}" "${SCRIPT_DIR}/batch_test_pp_box.sh"
-# run_batch "${MERGE_MODEL_ROOT}" "${SCRIPT_DIR}/batch_test_boxing.sh"
-# run_batch "${MERGE_MODEL_ROOT}" "${SCRIPT_DIR}/batch_test_football.sh"
-# run_batch "${MERGE_MODEL_ROOT}" "${SCRIPT_DIR}/batch_test_doubledesk.sh"
-# run_batch "${MERGE_MODEL_ROOT}" "${SCRIPT_DIR}/batch_test_sit_sofa.sh"
-# run_batch "${MERGE_MODEL_ROOT}" "${SCRIPT_DIR}/batch_test_vision_navi.sh"
+run_batch "${MERGE_MODEL_ROOT}" "${SCRIPT_DIR}/task/batch_test_open_door.sh"
+# run_batch "${MERGE_MODEL_ROOT}" "${SCRIPT_DIR}/task/batch_test_pp_box.sh"
+# run_batch "${MERGE_MODEL_ROOT}" "${SCRIPT_DIR}/task/batch_test_boxing.sh"
+# run_batch "${MERGE_MODEL_ROOT}" "${SCRIPT_DIR}/task/batch_test_football.sh"
+# run_batch "${MERGE_MODEL_ROOT}" "${SCRIPT_DIR}/task/batch_test_doubledesk.sh"
+# run_batch "${MERGE_MODEL_ROOT}" "${SCRIPT_DIR}/task/batch_test_sit_sofa.sh"
+# run_batch "${MERGE_MODEL_ROOT}" "${SCRIPT_DIR}/task/batch_test_vision_navi.sh"
 

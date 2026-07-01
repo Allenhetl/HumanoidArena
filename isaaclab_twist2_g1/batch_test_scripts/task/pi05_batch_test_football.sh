@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ISAACLAB_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+
 BATCH_START_TS="$(date +%s)"
 BATCH_START_HUMAN="$(date '+%F %T %Z')"
 
 TEST_MODE="${TEST_MODE:-base_test}"
-CONFIG_STEM="vision_navi"
+CONFIG_STEM="football_single"
 TEST_CONFIG_DIR="tasks/common_test_config/$TEST_MODE"
 SONIC_CONFIG="$TEST_CONFIG_DIR/$CONFIG_STEM""_sonic_test.yaml"
 TWIST2_CONFIG="$TEST_CONFIG_DIR/$CONFIG_STEM""_twist2_test.yaml"
@@ -59,12 +62,16 @@ trap 'print_batch_summary "$?"' EXIT
 
 echo "[batch_test] started_at=${BATCH_START_HUMAN}"
 
-export RESUME_LATEST="${RESUME_LATEST:-0}"
+RESUME_LATEST=0
+export RESUME_LATEST
 
-# Change this path for each batch run, or override MODEL_ROOT from the shell.
-BATCH_MODEL_ROOT="/ai/Yichi/taowen/ckpts/0424_new/HSI_vision_navi"
-# BATCH_MODEL_ROOT="/ai/Yichi/taowen/ckpts/test/football_supply"
-export MODEL_ROOT="${MODEL_ROOT:-${BATCH_MODEL_ROOT}}"
+if [[ -z "${MODEL_ROOT:-}" ]]; then
+  echo "[batch_test] MODEL_ROOT is required. Pass a task-specific checkpoint directory from the top-level batch wrapper." >&2
+  exit 2
+fi
+export MODEL_ROOT
 
-ENV_CONFIG_YAML="${SONIC_CONFIG}"   run_task sonic script/eval_scripts/sonic_pi05/HSI_vision_navi_run_vla_eval_parallel.sh
-ENV_CONFIG_YAML="${TWIST2_CONFIG}"  run_task twist2 script/eval_scripts/twist2_pi05/HSI_vision_navi_run_vla_eval_parallel.sh
+ENV_CONFIG_YAML="${SONIC_CONFIG}"   run_task sonic "${ISAACLAB_ROOT}/script/eval_scripts/sonic_pi05/HOI_football_run_vla_eval_parallel.sh"
+ENV_CONFIG_YAML="${TWIST2_CONFIG}"  run_task twist2 "${ISAACLAB_ROOT}/script/eval_scripts/twist2_pi05/HOI_football_run_vla_eval_parallel.sh"
+# run_task sonic "${ISAACLAB_ROOT}/script/eval_scripts/sonic/HOI_double_desk_run_vla_eval_parallel.sh"
+# run_task twist2 "${ISAACLAB_ROOT}/script/eval_scripts/twist2/HOI_double_desk_run_vla_eval_parallel.sh"
