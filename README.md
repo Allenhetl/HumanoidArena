@@ -1,139 +1,157 @@
-<div align="center">
-  <h1>HumanoidArena 遥操作与 Replay 指南</h1>
-  <p>TWIST2 / SONIC / Isaac Lab G1 全身遥操作、录制与 replay</p>
-  <p><i>Taowen Wang</i></p>
-</div>
+# HumanoidArena
 
----
+HumanoidArena is a humanoid manipulation and whole-body control benchmark built around teleoperation, replay, simulation evaluation, and LeRobot-compatible policy training. The repository provides the TWIST2 and SONIC control pipelines, Isaac Lab environments, data conversion utilities, and evaluation scripts used by the project.
 
-## 目录
+<p align="center">
+  <a href="https://humanoidarena.github.io/">Project Page</a> |
+  <a href="https://arxiv.org/abs/XXXX.XXXXX">arXiv</a> |
+  <a href="https://huggingface.co/datasets/HumanoidArena">HF Dataset</a> |
+  <a href="https://huggingface.co/HumanoidArena">HF Models</a>
+</p>
 
-- [概述](#概述)
-- [安装](#安装)
-- [使用流程](#使用流程)
-  - [Step 1：打开 XRobotToolkit](#step-1打开-xrobottoolkit)
-  - [Step 2：运行 teleop 或 Pico server](#step-2运行-teleop-或-pico-server)
-  - [Step 3：运行 Isaac Lab](#step-3运行-isaac-lab)
-  - [Step 4：运行 replay](#step-4运行-replay)
+<p align="center">
+  <img src="xrobotoolkit.png" alt="HumanoidArena system overview" width="80%">
+</p>
 
----
+## Overview
 
-## 概述
+HumanoidArena focuses on full-body humanoid interaction tasks with reproducible data collection and policy evaluation. The current release includes:
 
-本文档介绍当前仓库里两条主要链路：
+- TWIST2 and SONIC teleoperation entrypoints.
+- Isaac Lab environments for live control, replay, rerecording, and VLA evaluation.
+- NPZ recording and multicam rerecording pipelines.
+- LeRobot-compatible data and model release links.
+- Batch evaluation scripts for vision execution and semantic tests.
 
-- `TWIST2 + IsaacLab`
-- `SONIC + IsaacLab`
+## Release Plan
 
-| 步骤 | 组件                    | 作用                          |
-| ---- | ----------------------- | ----------------------------- |
-| 1    | XRobotToolkit（Linux）  | 接收头显姿态数据并串流        |
-| 2    | TWIST2 / SONIC 上游输入 | 姿态解算，通过 Redis 发布动作 |
-| 3    | IsaacLab `run_*.sh`     | 仿真接收动作并驱动机器人      |
-| 4    | IsaacLab `run_replay_*.sh` | 从录制 `.npz` 做 replay   |
+- [x] LeRobot data released
+- [x] Models released
+- [ ] Raw data release
+- [ ] Multicam data release
+- [ ] Full benchmark suite release
+- [ ] Project page update with final videos and task gallery
+- [ ] arXiv paper link update
 
----
+## Quick Links
 
-## 安装
+| Resource | Link |
+| --- | --- |
+| Project page | https://humanoidarena.github.io/ |
+| Paper | https://arxiv.org/abs/XXXX.XXXXX |
+| LeRobot dataset | https://huggingface.co/datasets/HumanoidArena |
+| Model checkpoints | https://huggingface.co/HumanoidArena |
 
-新机器部署建议先阅读项目级环境说明：
+Update the placeholder project, paper, dataset, and model URLs before tagging the public release if the final links differ.
 
-- [环境部署说明](./isaaclab_twist2_g1/docs/ENVIRONMENT_SETUP.md)
+## Documentation
 
-运行前请先完成以下组件的安装：
+Start with the release-facing guides:
 
-| 组件      | 安装文档 |
-| --------- | -------- |
-| Conda / Isaac Sim / Isaac Lab / LeRobot 环境 | [环境部署说明](./isaaclab_twist2_g1/docs/ENVIRONMENT_SETUP.md) |
-| IsaacLab 仿真桥接 | [isaaclab_twist2_g1/README.md](./isaaclab_twist2_g1/README.md) |
-| TWIST2    | [TWIST2/README.md](./TWIST2/README.md) |
+- [Environment setup](docs/04_environment_setup.md)
+- [Teleoperation and recording](docs/01_teleoperation.md)
+- [Data pipeline](docs/02_data_pipeline.md)
+- [Evaluation](docs/03_evaluation.md)
 
----
+Additional implementation references:
 
-## 使用流程
+- [IsaacLab command quickstart](isaaclab_twist2_g1/docs/COMMAND_QUICKSTART.md)
+- [TWIST2 data format](isaaclab_twist2_g1/docs/TWIST2_DATA_FORMAT.md)
+- [SONIC data format](isaaclab_twist2_g1/docs/SONIC_DATA_FORMAT.md)
+- [Environment setup details](isaaclab_twist2_g1/docs/ENVIRONMENT_SETUP.md)
 
-常用命令已经单独整理到：
+## Repository Layout
 
-- [isaaclab_twist2_g1/docs/COMMAND_QUICKSTART.md](./isaaclab_twist2_g1/docs/COMMAND_QUICKSTART.md)
+```text
+TWIST2/                 TWIST2 control, assets, checkpoints, and robot-side utilities
+isaaclab_twist2_g1/     Isaac Lab tasks, replay, rerecording, and evaluation entrypoints
+lerobot/                LeRobot fork/integration for training and policy serving
+docs/                   Release-facing documentation and evaluation examples
+```
 
-### Step 1：打开 XRobotToolkit
+## Getting Started
 
-在 **Linux 机器**上启动 XRobotToolkit，用于接收 PICO 头显的姿态数据。
+Set up the simulation and LeRobot environments first:
 
-![XRobotToolkit](xrobotoolkit.png)
+```bash
+bash isaaclab_twist2_g1/tools/setup_humanoidarena_envs.sh --dry-run
+```
 
-> 确认头显已连接并在界面中显示正常后，进入下一步。
+After reviewing the generated commands, follow [Environment setup](docs/04_environment_setup.md) for the full installation path.
 
----
-
-### Step 2：运行 teleop 或 Pico server
-
-如果走 `TWIST2`，进入 `TWIST2` 目录，启动遥操作脚本：
+For live teleoperation and recording:
 
 ```bash
 cd TWIST2
 bash teleop.sh
 ```
 
-脚本会自动激活 `gmr` conda 环境，并运行 `xrobot_teleop_to_robot_w_hand.py`。
-
-如果走 `SONIC`，通常需要先启动 `isaaclab_twist2_g1/pico_server/` 下对应的 Pico server。
-
-#### 调整人体高度
-
-在运行前，根据实际情况修改 `teleop.sh` 中的身高参数：
+Then launch the simulator-side backend from the repository root:
 
 ```bash
-actual_human_height=1.79   # 单位：米，根据实际身高调整
+bash isaaclab_twist2_g1/run_twist2.sh
+# or
+bash isaaclab_twist2_g1/run_sonic.sh
 ```
 
-> **注意**：由于 PICO 对高度估计存在误差，建议将该值设置为**略小于**实际身高。
-
-启动后终端会以 1Hz 打印帧率，确认数据正常流动后进入下一步。
-
----
-
-### Step 3：运行 Isaac Lab
-
-常用 live / 录制命令见：
-
-- [isaaclab_twist2_g1/docs/COMMAND_QUICKSTART.md#1-遥操作录制](./isaaclab_twist2_g1/docs/COMMAND_QUICKSTART.md#1-遥操作录制)
-
-在 `isaaclab_twist2_g1` 根目录下启动仿真：
-
-```bash
-bash run_twist2.sh
-# 或
-bash run_sonic.sh
-```
-
-脚本顶部参数区可直接修改：
-
-- 任务名
-- 机器人 USD / 碰撞模式
-- 录制目录
-- 图传地址
-- replay 文件路径
-
-更完整的入口说明见：
-
-- [isaaclab_twist2_g1/README.md](./isaaclab_twist2_g1/README.md)
-
-### Step 4：运行 replay
-
-常用 replay / rerecord / LeRobot 评测命令见：
-
-- [isaaclab_twist2_g1/docs/COMMAND_QUICKSTART.md#2-replay](./isaaclab_twist2_g1/docs/COMMAND_QUICKSTART.md#2-replay)
-- [isaaclab_twist2_g1/docs/COMMAND_QUICKSTART.md#3-rerecord](./isaaclab_twist2_g1/docs/COMMAND_QUICKSTART.md#3-rerecord)
-- [isaaclab_twist2_g1/docs/COMMAND_QUICKSTART.md#4-lerobot--vla-评测](./isaaclab_twist2_g1/docs/COMMAND_QUICKSTART.md#4-lerobot--vla-评测)
+For replay:
 
 ```bash
 bash isaaclab_twist2_g1/run_replay_twist2.sh
-# 或
 bash isaaclab_twist2_g1/run_replay_sonic.sh
 ```
 
-对应数据格式说明：
+## Data and Models
 
-- [TWIST2_DATA_FORMAT.md](./isaaclab_twist2_g1/docs/TWIST2_DATA_FORMAT.md)
-- [SONIC_DATA_FORMAT.md](./isaaclab_twist2_g1/docs/SONIC_DATA_FORMAT.md)
+The git repository should contain source code, small examples, and required lightweight runtime assets. Large data and model artifacts are released separately:
+
+| Artifact | Status | Location |
+| --- | --- | --- |
+| LeRobot dataset | Released | https://huggingface.co/datasets/HumanoidArena |
+| Model checkpoints | Released | https://huggingface.co/HumanoidArena |
+| Raw data | Planned | To be announced |
+| Multicam data | Planned | To be announced |
+
+The TWIST2 ONNX checkpoints required by the current runtime are kept in:
+
+```text
+TWIST2/assets/ckpts/twist2_1017_20k.onnx
+TWIST2/assets/ckpts/twist2_1017_25k.onnx
+```
+
+## Evaluation
+
+Single-task VLA evaluation:
+
+```bash
+bash isaaclab_twist2_g1/script/eval_scripts/sonic/run_vla_eval.sh
+bash isaaclab_twist2_g1/script/eval_scripts/twist2/run_vla_eval.sh
+```
+
+Batch evaluation entrypoints include:
+
+```text
+isaaclab_twist2_g1/batch_1_test_v31_sonic.sh
+isaaclab_twist2_g1/batch_1_test_v31_twist2.sh
+isaaclab_twist2_g1/batch_pi05_v31_sonic.sh
+isaaclab_twist2_g1/batch_pi05_v31_twist2.sh
+```
+
+See [Evaluation](docs/03_evaluation.md) for vision execution, semantic evaluation, and batch launch examples.
+
+## Citation
+
+If you use HumanoidArena in your research, please cite:
+
+```bibtex
+@article{humanoidarena2026,
+  title   = {HumanoidArena: A Benchmark for Whole-Body Humanoid Teleoperation, Learning, and Evaluation},
+  author  = {Wang, Taowen and Contributors},
+  journal = {arXiv preprint arXiv:XXXX.XXXXX},
+  year    = {2026}
+}
+```
+
+## License
+
+See the repository license files and third-party dependency licenses before redistribution. Some assets, simulator dependencies, and model artifacts may have separate license terms.
