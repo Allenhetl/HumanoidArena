@@ -1,90 +1,37 @@
 # IsaacLab TWIST2 G1
 
-`isaaclab_twist2_g1/` 是当前仓库里连接 Isaac Lab 仿真、Pico 遥操作、录制与 replay 的主目录。
+`isaaclab_twist2_g1/` contains the Isaac Lab environments, teleoperation/replay entrypoints, rerecording utilities, and evaluation scripts used by HumanoidArena.
 
-## 环境部署
+## Start Here
 
-新机器部署时请先阅读：
+- [Environment setup](../docs/04_environment_setup.md)
+- [Teleoperation and recording](../docs/01_teleoperation.md)
+- [Data processing](../docs/02_data_pipeline.md)
+- [Evaluation](../docs/03_evaluation.md)
 
-- [docs/ENVIRONMENT_SETUP.md](docs/ENVIRONMENT_SETUP.md)
+## Main Directories
 
-当前推荐使用两个 conda 环境：
+- `action_provider/`: TWIST2 and SONIC control, recording, and replay logic.
+- `tasks/`: Isaac Lab task definitions and environment configuration.
+- `pico_server/`: Pico bridge and Redis/ZMQ data publishing.
+- `image_server/`: camera streaming helpers.
+- `tools/data_tools/`: rerecording and LeRobot conversion tools.
+- `script/eval_scripts/`: single-run and batch evaluation launch scripts.
 
-- `unitree_sim_env`：Isaac Sim / Isaac Lab 仿真、replay、rerecord、eval worker。
-- `lerobot`：LeRobot 训练与 VLA HTTP policy server。
+## Common Entrypoints
 
-Isaac Sim 5.0 是当前推荐主线；Isaac Sim 4.5 文档保留为历史兼容参考。
+- `run_twist2.sh`: launch TWIST2 teleoperation/recording.
+- `run_sonic.sh`: launch SONIC teleoperation/recording.
+- `run_replay_twist2.sh`: replay TWIST2 recordings.
+- `run_replay_sonic.sh`: replay SONIC recordings.
+- `run_rerecord.sh`: run rerecording jobs.
+- `run_sonic_teleop_server.sh` / `run_twist2_teleop_server.sh`: teleoperation server launchers.
 
-## 目录说明
+Most scripts keep their task, checkpoint, and path parameters near the top of the file. Update those values for your local environment before launching.
 
-- `action_provider/`
-  `TWIST2` / `SONIC` 控制、录制、replay 的核心逻辑。
-- `tasks/`
-  Isaac Lab 任务定义与场景配置。
-- `pico_server/`
-  Pico 侧桥接与 Redis/ZMQ 数据发布。
-- `image_server/`
-  图像输出与串流。
-- `recording_data/`
-  默认录制输出目录。
-- `logs/`
-  replay 或运行日志。
+## Format And Protocol References
 
-## 常用脚本
-
-所有启动参数都直接写在脚本顶部，按需手改。
-
-更完整的命令速查见：
-
-- [docs/COMMAND_QUICKSTART.md](docs/COMMAND_QUICKSTART.md)
-
-### Live
-
-- [run_twist2.sh](run_twist2.sh)
-  启动 `TWIST2` live 遥操作录制。
-- [run_sonic.sh](run_sonic.sh)
-  启动 `SONIC` live 遥操作录制。
-
-### Replay
-
-- [run_replay_twist2.sh](run_replay_twist2.sh)
-  启动 `TWIST2` replay。
-- [run_replay_sonic.sh](run_replay_sonic.sh)
-  启动 `SONIC` replay。
-
-### Rerecord / VLA Eval
-
-- [run_rerecord.sh](run_rerecord.sh)
-  并行触发 `TWIST2` / `SONIC` rerecord。
-- [docs/COMMAND_QUICKSTART.md#4-lerobot--vla-评测](docs/COMMAND_QUICKSTART.md#4-lerobot--vla-评测)
-  批量评测、LeRobot / VLA 常用命令入口。
-
-## Replay 模式
-
-两条链都统一到了 `sim_main.py` 的 replay 入口：
-
-- `direct_replay`
-  直接执行录制文件里保存的目标动作。
-- `inference_replay`
-  使用录制文件中的模型输入或观测，再跑一次推理。
-
-`TWIST2` 的脚本里显示为 `direct / inference`，内部会归一化成统一 replay 模式。
-
-## 文档索引
-
-- [REPLAY_DEBUG_SUMMARY.md](REPLAY_DEBUG_SUMMARY.md)
-  当前 replay 问题、经验和修复总结。
-- [SCENE_RANDOMIZATION_SEED_RULES.md](docs/SCENE_RANDOMIZATION_SEED_RULES.md)
-  场景随机化、录制和 replay 必须共用单一 `episode_object_seed` 的约束说明。
-- [TWIST2_DATA_FORMAT.md](docs/TWIST2_DATA_FORMAT.md)
-  `TWIST2` 录制 `.npz` 数据格式说明。
-- [SONIC_DATA_FORMAT.md](docs/SONIC_DATA_FORMAT.md)
-  `SONIC` 录制 `.npz` 数据格式说明。
-- [COMMAND_QUICKSTART.md](docs/COMMAND_QUICKSTART.md)
-  常用运行命令速查。
-
-## 备注
-
-- 当前推荐直接修改各 `run_*.sh` 文件顶部参数，不再额外走共享 YAML/配置脚本。
-- `TWIST2` 与 `SONIC` 都已经加入输入 ready barrier，避免启动或 reset 前的 Redis 数据污染录制首段。
-- 带随机场景初始化的任务只允许一颗场景主 seed。不要再为 obstacle layout 或局部 scene 初始化额外维护第二颗 seed。
+- [Scene randomization seed rules](docs/SCENE_RANDOMIZATION_SEED_RULES.md)
+- [TWIST2 raw NPZ format](docs/TWIST2_DATA_FORMAT.md)
+- [SONIC raw NPZ format](docs/SONIC_DATA_FORMAT.md)
+- [LeRobot V3.1 dataset protocol](docs/UNITREE_G1_GMT_REFPOSE_V3_1_DATA_PROTOCOL.md)

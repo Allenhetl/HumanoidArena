@@ -28,8 +28,12 @@ LEROBOT_VERIFY_SSL=0
 TLS_CERT_FILE=""
 TLS_KEY_FILE=""
 
-REPEATS_PER_SEED=1
-SEEDS=($(seq 0 99))
+REPEATS_PER_SEED="${REPEATS_PER_SEED:-1}"
+if [[ -n "${EVAL_SEEDS:-}" ]]; then
+  read -r -a SEEDS <<< "${EVAL_SEEDS}"
+else
+  SEEDS=($(seq 0 99))
+fi
 echo "${SEEDS[@]}"
 
 load_task_name_from_yaml() {
@@ -57,11 +61,21 @@ PY
 TASK_NAME="${TASK_NAME:-$(load_task_name_from_yaml "${ENV_CONFIG_YAML}")}"
 
 
-MODEL_PATHS=(
-  "${LEROBOT_ROOT}/outputs/train/diffusion_twist2_0401/checkpoints/last/pretrained_model"
-)
+MODEL_PATH="${MODEL_PATH:-${MODEL_ROOT:-${1:-}}}"
+if [[ -z "${MODEL_PATH}" ]]; then
+  echo "[run_vla_eval] MODEL_PATH is required. Pass /path/to/checkpoint/pretrained_model or a checkpoint directory containing pretrained_model." >&2
+  exit 2
+fi
+if [[ -d "${MODEL_PATH}/pretrained_model" ]]; then
+  MODEL_PATH="${MODEL_PATH}/pretrained_model"
+fi
+if [[ ! -d "${MODEL_PATH}" ]]; then
+  echo "[run_vla_eval] MODEL_PATH does not exist: ${MODEL_PATH}" >&2
+  exit 2
+fi
+MODEL_PATHS=("${MODEL_PATH}")
 
-RESULTS_DIR="${SCRIPT_DIR}/eval_results/act_rand_trained_0410_64_40_$(date +%Y%m%d_%H%M%S)"
+RESULTS_DIR="${RESULTS_DIR:-${SCRIPT_DIR}/eval_results/single_$(date +%Y%m%d_%H%M%S)}"
 
 ARGS=(
   --task "${TASK_NAME}"

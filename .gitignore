@@ -54,8 +54,6 @@ replay_debug_logs/
 *.range_ports.bak
 *.port_scan.bak
 asset_migration_backups/
-isaaclab_twist2_g1/docs/ASSET_MIGRATION_SCAN.md
-isaaclab_twist2_g1/docs/asset_migration_manifest.json
 isaaclab_twist2_g1/tools/apply_task_asset_migration.py
 isaaclab_twist2_g1/tools/fix_task_asset_migration_residuals.py
 isaaclab_twist2_g1/tools/scan_task_asset_dependencies.py

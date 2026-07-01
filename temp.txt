@@ -1,2 +1,0 @@
-python ./tools/visualize_recording.py /home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/former/Isaac-Move-Football-G129-Dex3-Wholebody_1773326197574686.npz --fps 10
-former/Isaac-Move-Football-G129-Dex3-Wholebody_1773326197574686.npz

@@ -7,7 +7,6 @@ This guide covers the live teleoperation and recording workflow for HumanoidAren
 Complete the environment setup first:
 
 - [Environment setup](04_environment_setup.md)
-- [IsaacLab command quickstart](../isaaclab_twist2_g1/docs/COMMAND_QUICKSTART.md)
 - [TWIST2 teleoperation notes](../TWIST2/doc/TELEOP.md)
 
 Before recording, check that these services and devices are available:
@@ -22,7 +21,6 @@ Before recording, check that these services and devices are available:
 
 Start XRobotToolkit on the Linux machine that receives headset pose data. Confirm that the headset pose is updating before launching any robot or simulator process.
 
-![XRobotToolkit](../xrobotoolkit.png)
 
 ## 2. TWIST2 Teleoperation
 
@@ -110,9 +108,8 @@ If the robot does not move, verify the upstream teleoperation terminal first, th
 - The task and robot type match the recorded or live control profile.
 - Required assets and ONNX policy files exist at the paths printed by the script.
 
-More backend-specific details are in:
+Reference formats:
 
-- [SONIC data flow analysis](../isaaclab_twist2_g1/docs/SONIC_DATA_FLOW_ANALYSIS.md)
-- [SONIC troubleshooting checklist](../isaaclab_twist2_g1/docs/SONIC_TROUBLESHOOTING_CHECKLIST.md)
-- [TWIST2 data format](../isaaclab_twist2_g1/docs/TWIST2_DATA_FORMAT.md)
-- [SONIC data format](../isaaclab_twist2_g1/docs/SONIC_DATA_FORMAT.md)
+- [TWIST2 raw NPZ format](../isaaclab_twist2_g1/docs/TWIST2_DATA_FORMAT.md)
+- [SONIC raw NPZ format](../isaaclab_twist2_g1/docs/SONIC_DATA_FORMAT.md)
+- [Scene randomization seed rules](../isaaclab_twist2_g1/docs/SCENE_RANDOMIZATION_SEED_RULES.md)

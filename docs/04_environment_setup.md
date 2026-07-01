@@ -1,6 +1,6 @@
 # Environment Setup
 
-This guide is the release-facing setup index for HumanoidArena. The detailed deployment document remains available at [isaaclab_twist2_g1/docs/ENVIRONMENT_SETUP.md](../isaaclab_twist2_g1/docs/ENVIRONMENT_SETUP.md).
+This guide is the release-facing setup index for HumanoidArena.
 
 ## 1. System Requirements
 

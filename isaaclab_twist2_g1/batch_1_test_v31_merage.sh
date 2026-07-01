@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MODEL_ROOT_BASE="${MODEL_ROOT_BASE:-}"
+if [[ -z "${MODEL_ROOT_BASE}" ]]; then
+  echo "[batch_1_test] MODEL_ROOT_BASE is required. Download the released checkpoints and set MODEL_ROOT_BASE=/path/to/humanoidarena_checkpoints" >&2
+  exit 2
+fi
+MERGE_MODEL_ROOT="${MERGE_MODEL_ROOT:-${MODEL_ROOT_BASE}/small_merge}"
+
 export RESUME_LATEST=1
 SELECTED_EVAL_BACKEND="${EVAL_BACKEND:-${BATCH_TEST_BACKEND:-all}}"
 export NUM_WORKERS="${NUM_WORKERS:-2}"
@@ -48,11 +56,11 @@ run_batch() {
   run_batch_backend twist2 "${model_root}" "${script_path}"
 }
 
-run_batch "/ai/Yichi/taowen/ckpts/0529/small_merge" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_open_door.sh
-# run_batch "/ai/Yichi/taowen/ckpts/0529/small_merge" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_pp_box.sh
-# run_batch "/ai/Yichi/taowen/ckpts/0529/small_merge" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_boxing.sh
-# run_batch "/ai/Yichi/taowen/ckpts/0529/small_merge" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_football.sh
-# run_batch "/ai/Yichi/taowen/ckpts/0529/small_merge" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_doubledesk.sh
-# run_batch "/ai/Yichi/taowen/ckpts/0529/small_merge" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_sit_sofa.sh
-# run_batch "/ai/Yichi/taowen/ckpts/0529/small_merge" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_vision_navi.sh
+run_batch "${MERGE_MODEL_ROOT}" "${SCRIPT_DIR}/batch_test_open_door.sh"
+# run_batch "${MERGE_MODEL_ROOT}" "${SCRIPT_DIR}/batch_test_pp_box.sh"
+# run_batch "${MERGE_MODEL_ROOT}" "${SCRIPT_DIR}/batch_test_boxing.sh"
+# run_batch "${MERGE_MODEL_ROOT}" "${SCRIPT_DIR}/batch_test_football.sh"
+# run_batch "${MERGE_MODEL_ROOT}" "${SCRIPT_DIR}/batch_test_doubledesk.sh"
+# run_batch "${MERGE_MODEL_ROOT}" "${SCRIPT_DIR}/batch_test_sit_sofa.sh"
+# run_batch "${MERGE_MODEL_ROOT}" "${SCRIPT_DIR}/batch_test_vision_navi.sh"
 

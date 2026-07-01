@@ -80,4 +80,4 @@ overrides:
 - replay 必须优先使用录制文件中的 `episode_object_seed` 重建场景
 
 详细约束见：
-- [docs/SCENE_RANDOMIZATION_SEED_RULES.md](/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/docs/SCENE_RANDOMIZATION_SEED_RULES.md)
+- [docs/SCENE_RANDOMIZATION_SEED_RULES.md](../../docs/SCENE_RANDOMIZATION_SEED_RULES.md)

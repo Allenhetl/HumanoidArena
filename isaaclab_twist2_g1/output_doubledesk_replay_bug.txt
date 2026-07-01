@@ -1,6 +1,0 @@
-[robot_usd] mode=box
-[robot_usd] path=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2.usd
-[twist2 replay] file=/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_doubledesk/twist2_v2/tw/Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody_1776259135999954.npz
-[twist2 replay] mode=direct
-[twist2 replay] task=Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody
-[twist2 replay] env_config=tasks/common_env_config/football_single_twist2.yaml

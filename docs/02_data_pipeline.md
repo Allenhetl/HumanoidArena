@@ -20,7 +20,7 @@ Reference documents:
 
 - [TWIST2 data format](../isaaclab_twist2_g1/docs/TWIST2_DATA_FORMAT.md)
 - [SONIC data format](../isaaclab_twist2_g1/docs/SONIC_DATA_FORMAT.md)
-- [Canonical G1 action](../isaaclab_twist2_g1/docs/CANONICAL_G1_ACTION.md)
+- [LeRobot V3.1 format](../isaaclab_twist2_g1/docs/UNITREE_G1_GMT_REFPOSE_V3_1_DATA_PROTOCOL.md)
 
 For a quick local inspection:
 

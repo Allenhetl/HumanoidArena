@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MODEL_ROOT_BASE="${MODEL_ROOT_BASE:-}"
+if [[ -z "${MODEL_ROOT_BASE}" ]]; then
+  echo "[batch_1_test] MODEL_ROOT_BASE is required. Download the released checkpoints and set MODEL_ROOT_BASE=/path/to/humanoidarena_checkpoints" >&2
+  exit 2
+fi
+SMALL_MODEL_ROOT="${SMALL_MODEL_ROOT:-${MODEL_ROOT_BASE}/small}"
+
 export RESUME_LATEST=0
 SELECTED_EVAL_BACKEND="${EVAL_BACKEND:-${BATCH_TEST_BACKEND:-all}}"
 export NUM_WORKERS="${NUM_WORKERS:-2}"
@@ -49,10 +57,10 @@ run_batch() {
 }
   
 
-# run_batch "/ai/Yichi/taowen/ckpts/0529/small/HSI_open_door" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_open_door.sh
-run_batch "/ai/Yichi/taowen/ckpts/0529/small/HOI_pp_box" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_pp_box.sh
-run_batch "/ai/Yichi/taowen/ckpts/0529/small/HSI_boxing" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_boxing.sh
-run_batch "/ai/Yichi/taowen/ckpts/0529/small/HOI_football" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_football.sh
-run_batch "/ai/Yichi/taowen/ckpts/0529/small/HOI_double_desk" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_doubledesk.sh
-run_batch "/ai/Yichi/taowen/ckpts/0529/small/HSI_sit_sofa" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_sit_sofa.sh
-run_batch "/ai/Yichi/taowen/ckpts/0529/small/HSI_vision_navi" /ai/Yichi/taowen/HumanoidArena/isaaclab_twist2_g1/batch_test_vision_navi.sh
+# run_batch "${SMALL_MODEL_ROOT}/HSI_open_door" "${SCRIPT_DIR}/batch_test_open_door.sh"
+run_batch "${SMALL_MODEL_ROOT}/HOI_pp_box" "${SCRIPT_DIR}/batch_test_pp_box.sh"
+run_batch "${SMALL_MODEL_ROOT}/HSI_boxing" "${SCRIPT_DIR}/batch_test_boxing.sh"
+run_batch "${SMALL_MODEL_ROOT}/HOI_football" "${SCRIPT_DIR}/batch_test_football.sh"
+run_batch "${SMALL_MODEL_ROOT}/HOI_double_desk" "${SCRIPT_DIR}/batch_test_doubledesk.sh"
+run_batch "${SMALL_MODEL_ROOT}/HSI_sit_sofa" "${SCRIPT_DIR}/batch_test_sit_sofa.sh"
+run_batch "${SMALL_MODEL_ROOT}/HSI_vision_navi" "${SCRIPT_DIR}/batch_test_vision_navi.sh"

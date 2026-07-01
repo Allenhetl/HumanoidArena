@@ -4,13 +4,13 @@ HumanoidArena is a humanoid manipulation and whole-body control benchmark built 
 
 <p align="center">
   <a href="https://humanoidarena.github.io/">Project Page</a> |
-  <a href="https://arxiv.org/abs/XXXX.XXXXX">arXiv</a> |
+  <a href="https://arxiv.org/abs/2606.17833">arXiv</a> |
   <a href="https://huggingface.co/datasets/HumanoidArena">HF Dataset</a> |
   <a href="https://huggingface.co/HumanoidArena">HF Models</a>
 </p>
 
 <p align="center">
-  <img src="xrobotoolkit.png" alt="HumanoidArena system overview" width="80%">
+  <img src="img/paper-main-figure.svg" alt="HumanoidArena system overview" width="90%">
 </p>
 
 ## Overview
@@ -29,16 +29,13 @@ HumanoidArena focuses on full-body humanoid interaction tasks with reproducible 
 - [x] Models released
 - [ ] Raw data release
 - [ ] Multicam data release
-- [ ] Full benchmark suite release
-- [ ] Project page update with final videos and task gallery
-- [ ] arXiv paper link update
 
 ## Quick Links
 
 | Resource | Link |
 | --- | --- |
 | Project page | https://humanoidarena.github.io/ |
-| Paper | https://arxiv.org/abs/XXXX.XXXXX |
+| Paper | https://arxiv.org/abs/2606.17833 |
 | LeRobot dataset | https://huggingface.co/datasets/HumanoidArena |
 | Model checkpoints | https://huggingface.co/HumanoidArena |
 
@@ -55,10 +52,10 @@ Start with the release-facing guides:
 
 Additional implementation references:
 
-- [IsaacLab command quickstart](isaaclab_twist2_g1/docs/COMMAND_QUICKSTART.md)
-- [TWIST2 data format](isaaclab_twist2_g1/docs/TWIST2_DATA_FORMAT.md)
-- [SONIC data format](isaaclab_twist2_g1/docs/SONIC_DATA_FORMAT.md)
-- [Environment setup details](isaaclab_twist2_g1/docs/ENVIRONMENT_SETUP.md)
+- [TWIST2 raw NPZ format](isaaclab_twist2_g1/docs/TWIST2_DATA_FORMAT.md)
+- [SONIC raw NPZ format](isaaclab_twist2_g1/docs/SONIC_DATA_FORMAT.md)
+- [LeRobot V3.1 format](isaaclab_twist2_g1/docs/UNITREE_G1_GMT_REFPOSE_V3_1_DATA_PROTOCOL.md)
+- [Scene randomization seed rules](isaaclab_twist2_g1/docs/SCENE_RANDOMIZATION_SEED_RULES.md)
 
 ## Repository Layout
 
@@ -112,7 +109,23 @@ The git repository should contain source code, small examples, and required ligh
 | Raw data | Planned | To be announced |
 | Multicam data | Planned | To be announced |
 
-The TWIST2 ONNX checkpoints required by the current runtime are kept in:
+Download released model checkpoints from the Hugging Face model repository into any local artifact directory and keep the published folder layout:
+
+```bash
+huggingface-cli download HumanoidArena/<model-repo> \
+  --local-dir /path/to/humanoidarena_checkpoints
+```
+
+Batch evaluation scripts read that directory through `MODEL_ROOT_BASE`:
+
+```text
+/path/to/humanoidarena_checkpoints/
+  small/
+  small_merge/
+  pi/
+```
+
+The TWIST2 ONNX checkpoints required by the current runtime are kept in git:
 
 ```text
 TWIST2/assets/ckpts/twist2_1017_20k.onnx
@@ -121,18 +134,26 @@ TWIST2/assets/ckpts/twist2_1017_25k.onnx
 
 ## Evaluation
 
-Single-task VLA evaluation:
+Single-checkpoint VLA evaluation:
 
 ```bash
+MODEL_PATH=/path/to/checkpoint/pretrained_model \
+EVAL_SEEDS="0 1 2" \
 bash isaaclab_twist2_g1/script/eval_scripts/sonic/run_vla_eval.sh
+
+MODEL_PATH=/path/to/checkpoint/pretrained_model \
+EVAL_SEEDS="0 1 2" \
 bash isaaclab_twist2_g1/script/eval_scripts/twist2/run_vla_eval.sh
 ```
+
+`MODEL_PATH` may also point to a checkpoint directory that contains `pretrained_model/`. For PI0.5 checkpoints, use the matching scripts under `script/eval_scripts/sonic_pi05/` or `script/eval_scripts/twist2_pi05/`.
 
 Batch evaluation entrypoints include:
 
 ```text
 isaaclab_twist2_g1/batch_1_test_v31_sonic.sh
 isaaclab_twist2_g1/batch_1_test_v31_twist2.sh
+isaaclab_twist2_g1/batch_1_test_v31_merage.sh
 isaaclab_twist2_g1/batch_pi05_v31_sonic.sh
 isaaclab_twist2_g1/batch_pi05_v31_twist2.sh
 ```
@@ -144,14 +165,26 @@ See [Evaluation](docs/03_evaluation.md) for vision execution, semantic evaluatio
 If you use HumanoidArena in your research, please cite:
 
 ```bibtex
-@article{humanoidarena2026,
-  title   = {HumanoidArena: A Benchmark for Whole-Body Humanoid Teleoperation, Learning, and Evaluation},
-  author  = {Wang, Taowen and Contributors},
-  journal = {arXiv preprint arXiv:XXXX.XXXXX},
-  year    = {2026}
+@inproceedings{HumanoidArena,
+  title = {HumanoidArena: Benchmarking Egocentric Hierarchical Whole-body Learning},
+  author = {Taowen Wang and Zikang Xie and Bin Yang and et al.},
+  booktitle = {arXiv},
+  year = {2026}
 }
 ```
 
+## Acknowledgements
+
+HumanoidArena builds on and interoperates with the following open-source projects and datasets:
+
+| Project | Role in HumanoidArena | Upstream | License / terms |
+| --- | --- | --- | --- |
+| TWIST2 | Whole-body teleoperation and motion/control pipeline | https://github.com/YanjieZe/TWIST | MIT |
+| SONIC / GR00T Whole-Body Control | SONIC controller, policy artifacts, and deployment workflow | https://github.com/NVlabs/GR00T-WholeBodyControl | Source: Apache-2.0; model weights: NVIDIA Open Model License |
+| LeRobot | Dataset format, training, and VLA policy serving integration | https://github.com/huggingface/lerobot | Apache-2.0 |
+| Unitree Sim IsaacLab | Isaac Lab simulator foundation and Unitree task patterns | https://github.com/unitreerobotics/unitree_sim_isaaclab | Apache-2.0 |
+| ArtVIP | Articulated-object assets and digital-twin dataset reference | https://huggingface.co/datasets/X-Humanoid/ArtVIP | Apache-2.0 |
+
 ## License
 
-See the repository license files and third-party dependency licenses before redistribution. Some assets, simulator dependencies, and model artifacts may have separate license terms.
+HumanoidArena includes code derived from or integrated with the projects above. Please review this repository's license files, upstream project licenses, and model/data artifact terms before redistribution or commercial use. Third-party simulator dependencies, robot assets, datasets, and model weights may be governed by separate terms.
