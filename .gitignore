@@ -21,3 +21,42 @@
 /external/
 GMR
 .omx/
+
+# Release hygiene: local editor and agent state
+.DS_Store
+.idea/
+.vscode/
+.claude/
+.codex
+.codex-artifacts/
+.understand-anything/
+# Python/build/test cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+# Runtime outputs and local experiment artifacts
+logs/
+outputs/
+results/
+eval_results/
+wandb/
+runs/
+checkpoints/
+recording_data/
+recording_debug_logs/
+replay_debug_logs/
+# Local backups and migration scratch space
+*.bak
+*.bak_*
+*.range_ports.bak
+*.port_scan.bak
+asset_migration_backups/
+isaaclab_twist2_g1/docs/ASSET_MIGRATION_SCAN.md
+isaaclab_twist2_g1/docs/asset_migration_manifest.json
+isaaclab_twist2_g1/tools/apply_task_asset_migration.py
+isaaclab_twist2_g1/tools/fix_task_asset_migration_residuals.py
+isaaclab_twist2_g1/tools/scan_task_asset_dependencies.py
+lerobot/scripts/open_aoe_training/
