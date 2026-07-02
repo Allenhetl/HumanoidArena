@@ -47,7 +47,7 @@ parser.add_argument(
 )
 parser.add_argument("--action_source", type=str, default="dds",
                    choices=["dds", "file", "trajectory", "policy", "replay",
-                            "twist2_wholebody", "sonic_wholebody", "openpi"],
+                            "twist2_wholebody", "sonic_wholebody"],
                    help="Action source")
 parser.add_argument(
     "--input_source",
@@ -108,11 +108,9 @@ parser.add_argument("--sonic_encoder_path", type=str, default="",
 parser.add_argument("--sonic_decoder_path", type=str, default="",
                     help="Path to GEAR-SONIC decoder ONNX model")
 
-# OpenPI-specific arguments (legacy provider only)
-parser.add_argument("--openpi_checkpoint", type=str, default="",
-                    help="Path to OpenPI checkpoint directory")
+# VLA-specific arguments
 parser.add_argument("--language_instruction", type=str, default="",
-                    help="Language instruction for OpenPI/VLA")
+                    help="Language instruction for VLA")
 parser.add_argument("--lerobot_policy_path", type=str, default="",
                     help="Path to a LeRobot pretrained_model directory")
 parser.add_argument("--lerobot_policy_device", type=str, default="",
@@ -131,13 +129,13 @@ parser.add_argument("--smplx_model_path", type=str,
 parser.add_argument("--human_height", type=float, default=1.75,
                     help="Human height in meters for GMR scaling")
 parser.add_argument("--twist2_model_path", type=str, default="",
-                    help="TWIST2 policy used downstream of VLA/OpenPI. Defaults to --model_path when empty.")
-parser.add_argument("--video_save_dir", type=str, default="./videos/openpi",
-                    help="Directory to save VLA/OpenPI videos")
+                    help="TWIST2 policy used downstream of VLA. Defaults to --model_path when empty.")
+parser.add_argument("--video_save_dir", type=str, default="./videos/vla",
+                    help="Directory to save VLA videos")
 parser.add_argument("--video_fps", type=int, default=30,
-                    help="Video frame rate for VLA/OpenPI recording")
+                    help="Video frame rate for VLA recording")
 parser.add_argument("--enable_smpl_vis", action="store_true", default=True,
-                    help="Enable SMPL visualization for VLA/OpenPI video recording")
+                    help="Enable SMPL visualization for VLA video recording")
 
 
 parser.add_argument("--robot_type", type=str, default="unitree_g1_rotlocal_v3", help="robot type")
@@ -351,8 +349,6 @@ def _normalize_control_routing(args_cli):
         args_cli.gmt_backend = args_cli.gmt_backend or "sonic"
     elif args_cli.action_source == "twist2_wholebody":
         args_cli.input_source = args_cli.input_source or "pico_twist2"
-        args_cli.gmt_backend = args_cli.gmt_backend or "twist2"
-    elif args_cli.action_source == "openpi":
         args_cli.gmt_backend = args_cli.gmt_backend or "twist2"
     elif args_cli.action_source == "replay":
         args_cli.input_source = args_cli.input_source or "replay"
@@ -864,14 +860,7 @@ def main():
             raise ValueError("--lerobot_server_url or --lerobot_policy_path is required when using input_source=vla")
         if float(args_cli.human_height) <= 0.0:
             raise ValueError("--human_height must be positive when using input_source=vla")
-        print("VLA runtime schema: local_delta_isaac_time_v2, observation.state=64D, action=40D root-local delta output")
-    if args_cli.action_source == "openpi":
-        if not args_cli.openpi_checkpoint:
-            raise ValueError("--openpi_checkpoint is required when using action_source=openpi")
-        if not args_cli.language_instruction:
-            raise ValueError("--language_instruction is required when using action_source=openpi")
-        if not args_cli.twist2_model_path:
-            args_cli.twist2_model_path = args_cli.model_path
+        print("VLA runtime schema: unitree_g1_gmt_refpose_v3_1, observation.state=64D, action=40D ref-pose local output")
     print("=" * 60)
 
     # parse environment configuration
@@ -1055,7 +1044,7 @@ def main():
 
     # create simplified control configuration
     try:
-        wholebody_sources = {"twist2_wholebody", "sonic_wholebody", "openpi"}
+        wholebody_sources = {"twist2_wholebody", "sonic_wholebody"}
         if args_cli.action_source == "sonic_wholebody":
             use_wholebody = True
             physics_dt = getattr(env, "physics_dt", None) or env_cfg.sim.dt

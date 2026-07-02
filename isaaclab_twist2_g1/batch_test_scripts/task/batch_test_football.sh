@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ISAACLAB_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+ISAACLAB_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 BATCH_START_TS="$(date +%s)"
 BATCH_START_HUMAN="$(date '+%F %T %Z')"
@@ -73,5 +73,3 @@ export MODEL_ROOT
 
 ENV_CONFIG_YAML="${SONIC_CONFIG}"   run_task sonic "${ISAACLAB_ROOT}/script/eval_scripts/sonic/HOI_football_run_vla_eval_parallel.sh"
 ENV_CONFIG_YAML="${TWIST2_CONFIG}"  run_task twist2 "${ISAACLAB_ROOT}/script/eval_scripts/twist2/HOI_football_run_vla_eval_parallel.sh"
-# run_task sonic "${ISAACLAB_ROOT}/script/eval_scripts/sonic/HOI_double_desk_run_vla_eval_parallel.sh"
-# run_task twist2 "${ISAACLAB_ROOT}/script/eval_scripts/twist2/HOI_double_desk_run_vla_eval_parallel.sh"

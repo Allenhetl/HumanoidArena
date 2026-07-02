@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ISAACLAB_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+ISAACLAB_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 BATCH_START_TS="$(date +%s)"
 BATCH_START_HUMAN="$(date '+%F %T %Z')"
