@@ -246,7 +246,7 @@ class MoveFootballG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
             stage = omni.usd.get_context().get_stage()
             create_simple_debug_lines(
                 stage,
-                line_color=(32.0 / 255.0, 32.0 / 255.0, 32.0 / 255.0),
+                line_color=(1.0, 1.0, 1.0),
                 draw_goal_reference_lines=True,
                 goal_centers=GOAL_REFERENCE_LINE_ABSOLUTE_CENTERS,
                 goal_relative_offsets=GOAL_REFERENCE_LINE_RELATIVE_OFFSETS,

@@ -31,7 +31,7 @@ def apply_grass_pbr_to_ground(
 
     Args:
         prim_path: 地面 prim 路徑，預設 /World/GroundPlane
-        textures_dir: 貼圖目錄，預設使用 PROJECT_ROOT/assets/materials/grass_turf
+        textures_dir: 貼圖目錄，預設使用 PROJECT_ROOT/assets/objects/materials/grass_turf
         uv_scale: UV 重複倍率 (scale_u, scale_v)，越大貼圖越細密。預設 (25, 25) 使草地比例相對於機器人合理
 
     Returns:
@@ -49,7 +49,7 @@ def apply_grass_pbr_to_ground(
         project_root = os.environ.get("PROJECT_ROOT")
         if not project_root:
             project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        textures_dir = str(Path(project_root) / "assets" / "materials" / "grass_turf")
+        textures_dir = str(Path(project_root) / "assets" / "objects" / "materials" / "grass_turf")
 
     # 支援 AITextured 命名 (*__Png_albedo.png) 及舊版 grass_albedo.png
     albedo_path = _find_texture(
@@ -57,7 +57,7 @@ def apply_grass_pbr_to_ground(
         ["*__Png_albedo.png", "*_albedo.png", "grass_albedo.png"],
     )
     if not albedo_path:
-        print(f"[grass_ground_material] ⚠️ Albedo 貼圖未找到，請參考 assets/materials/grass_turf/README.md")
+        print(f"[grass_ground_material] ⚠️ Albedo 貼圖未找到，請參考 assets/objects/materials/grass_turf/README.md")
         return False
 
     # 確保使用絕對路徑（Omniverse 需絕對路徑解析貼圖）

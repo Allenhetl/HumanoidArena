@@ -10,7 +10,7 @@ test_defaults:
   episode_seed_formula: sha256(task_name|group_seed|repeat_idx)_positive_int32
 
 overrides:
-  scene.room_walls.spawn.usd_path: "${PROJECT_ROOT}/assets/objects/small_warehouse/small_warehouse_sitsofa/small_warehouse_digital_twin_sitsofa_semantic.usd"
+  scene.room_walls.spawn.usd_path: "${PROJECT_ROOT}/assets/objects/small_warehouse/small_warehouse_sitsofa/small_warehouse_digital_twin_sitsofa_semantic_validation.usd"
   wait_for_textures: false
   sim:
     dt: 0.005
