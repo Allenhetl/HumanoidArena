@@ -57,7 +57,7 @@ run_batch() {
 }
   
 
-# run_batch "${SMALL_MODEL_ROOT}/HSI_open_door" "${SCRIPT_DIR}/task/batch_test_open_door.sh"
+run_batch "${SMALL_MODEL_ROOT}/HSI_open_door" "${SCRIPT_DIR}/task/batch_test_open_door.sh"
 run_batch "${SMALL_MODEL_ROOT}/HOI_pp_box" "${SCRIPT_DIR}/task/batch_test_pp_box.sh"
 run_batch "${SMALL_MODEL_ROOT}/HSI_boxing" "${SCRIPT_DIR}/task/batch_test_boxing.sh"
 run_batch "${SMALL_MODEL_ROOT}/HOI_football" "${SCRIPT_DIR}/task/batch_test_football.sh"
