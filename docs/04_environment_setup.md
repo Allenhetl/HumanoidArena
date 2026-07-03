@@ -11,7 +11,7 @@ Recommended platform:
 - Miniconda or Anaconda.
 - Git LFS.
 - Network access to GitHub and Hugging Face.
-- HumanoidArena asset package restored under `isaaclab_twist2_g1/assets`.
+- HumanoidArena asset package restored under `isaaclab_twist2_g1/assets` with `objects/` and `robots/` present.
 
 The current simulation stack targets Isaac Sim 5.0.0 and Isaac Lab `release/2.2.0`.
 
@@ -80,7 +80,32 @@ cd /path/to/HumanoidArena
 pip install -r isaaclab_twist2_g1/requirements.txt
 ```
 
-## 5. SONIC Policy Artifacts
+## 5. Download Simulation Assets
+
+Download the release asset package from Google Drive:
+
+```text
+https://drive.google.com/file/d/1TCa_aVRmFrZs_l4wlxkqanNebvDtChNk/view?usp=sharing
+```
+
+The recommended release zip layout has `objects/` and `robots/` at the archive root. Restore it into the Isaac Lab asset directory:
+
+```bash
+cd /path/to/HumanoidArena/isaaclab_twist2_g1
+mkdir -p assets
+unzip /path/to/humanoidarena_assets_isaaclab_twist2_g1_<date>.zip -d assets
+```
+
+After extraction, verify the expected runtime paths:
+
+```bash
+test -d /path/to/HumanoidArena/isaaclab_twist2_g1/assets/objects
+test -d /path/to/HumanoidArena/isaaclab_twist2_g1/assets/robots
+```
+
+If the downloaded archive already contains a top-level `assets/` directory, unzip it from `/path/to/HumanoidArena/isaaclab_twist2_g1` instead so the final paths still resolve to `isaaclab_twist2_g1/assets/objects` and `isaaclab_twist2_g1/assets/robots`.
+
+## 6. SONIC Policy Artifacts
 
 SONIC uses release artifacts from Hugging Face:
 
@@ -98,7 +123,7 @@ Maintained scripts resolve this directory through `SONIC_POLICY_ROOT`, defaultin
 /path/to/HumanoidArena/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release
 ```
 
-## 6. Install LeRobot Environment
+## 7. Install LeRobot Environment
 
 ```bash
 conda create -n lerobot python=3.12
@@ -114,7 +139,7 @@ For base ACT/Diffusion work, the base editable install may be enough:
 pip install -e .
 ```
 
-## 7. Smoke Tests
+## 8. Smoke Tests
 
 Simulation import:
 
@@ -141,7 +166,7 @@ ls TWIST2/assets/ckpts/twist2_1017_20k.onnx \
    TWIST2/assets/ckpts/twist2_1017_25k.onnx
 ```
 
-## 8. Next Steps
+## 9. Next Steps
 
 After setup, continue with:
 

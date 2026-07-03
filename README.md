@@ -5,8 +5,9 @@ HumanoidArena is a humanoid manipulation and whole-body control benchmark built 
 <p align="center">
   <a href="https://humanoidarena.github.io/">Project Page</a> |
   <a href="https://arxiv.org/abs/2606.17833">arXiv</a> |
-  <a href="https://huggingface.co/datasets/HumanoidArena">HF Dataset</a> |
-  <a href="https://huggingface.co/WilliamWang16/HumanoidArena_models">HF Models</a>
+  <a href="https://huggingface.co/datasets/WilliamWang16/HumanoidArena_dataset_v3_1">HF Dataset</a> |
+  <a href="https://huggingface.co/WilliamWang16/HumanoidArena_models">HF Models</a> |
+  <a href="https://drive.google.com/file/d/1TCa_aVRmFrZs_l4wlxkqanNebvDtChNk/view?usp=sharing">Assets</a>
 </p>
 
 <p align="center">
@@ -36,10 +37,9 @@ HumanoidArena focuses on full-body humanoid interaction tasks with reproducible 
 | --- | --- |
 | Project page | https://humanoidarena.github.io/ |
 | Paper | https://arxiv.org/abs/2606.17833 |
-| LeRobot dataset | coming soon |
+| LeRobot dataset | https://huggingface.co/datasets/WilliamWang16/HumanoidArena_dataset_v3_1 |
 | Model checkpoints | https://huggingface.co/WilliamWang16/HumanoidArena_models |
-
-Update the placeholder project, paper, dataset, and model URLs before tagging the public release if the final links differ.
+| Simulation assets | https://drive.google.com/file/d/1TCa_aVRmFrZs_l4wlxkqanNebvDtChNk/view?usp=sharing |
 
 ## Documentation
 
@@ -104,8 +104,9 @@ The git repository should contain source code, small examples, and required ligh
 
 | Artifact | Status | Location |
 | --- | --- | --- |
-| LeRobot dataset | Released | https://huggingface.co/datasets/HumanoidArena |
+| LeRobot dataset | Released | https://huggingface.co/datasets/WilliamWang16/HumanoidArena_dataset_v3_1 |
 | Model checkpoints | Released | https://huggingface.co/WilliamWang16/HumanoidArena_models |
+| Simulation assets | Released | https://drive.google.com/file/d/1TCa_aVRmFrZs_l4wlxkqanNebvDtChNk/view?usp=sharing |
 | Raw data | Planned | To be announced |
 | Multicam data | Planned | To be announced |
 
@@ -124,6 +125,16 @@ Batch evaluation scripts read that directory through `MODEL_ROOT_BASE`:
   small_merge/
   pi/
 ```
+
+Download the simulation asset package separately from the release asset link and restore it under the Isaac Lab package:
+
+```text
+isaaclab_twist2_g1/assets/
+  objects/
+  robots/
+```
+
+The asset package is intentionally distributed outside git and released through the simulation assets link above.
 
 The TWIST2 ONNX checkpoints required by the current runtime are kept in git:
 
