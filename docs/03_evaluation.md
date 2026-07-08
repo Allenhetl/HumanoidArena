@@ -103,6 +103,8 @@ isaaclab_twist2_g1/script/eval_scripts/twist2_pi05/
 
 For SONIC policies trained to output encoder latents, set `SONIC_VLA_ACTION_FORMAT=latent64` and use the normal live VLA path with `--gmt_backend sonic`. The runtime accepts a 64-D latent action, or a 66-D action with left/right hand binary commands appended.
 
+This interface is experimental and intended for testing latent-output VLA policies. It has not yet been validated for exact replay equivalence with direct replay.
+
 HTTP inference servers may return `latent64`, `latent64_chunk`, `encoder_latent`, or `encoder_latent_chunk`:
 
 ```bash

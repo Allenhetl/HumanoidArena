@@ -175,6 +175,8 @@ See [Evaluation](docs/03_evaluation.md) for vision execution, semantic evaluatio
 
 The SONIC VLA runtime also supports policies that output SONIC encoder latents instead of the default 40-D semantic VLA command. This is intended for users who train a VLA directly on `encoder_latent` from SONIC raw recordings.
 
+This interface is experimental and intended for testing latent-output VLA policies. It has not yet been validated for exact replay equivalence with direct replay.
+
 Set `SONIC_VLA_ACTION_FORMAT=latent64` when launching a live VLA evaluation with `--gmt_backend sonic` and `--input_source vla`. The policy may return either a 64-D latent action, or a 66-D action where the final two values are left/right hand binary commands. For HTTP inference servers, accepted response keys are `latent64`, `latent64_chunk`, `encoder_latent`, or `encoder_latent_chunk`.
 
 ```bash
