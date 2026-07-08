@@ -99,6 +99,26 @@ isaaclab_twist2_g1/script/eval_scripts/sonic_pi05/
 isaaclab_twist2_g1/script/eval_scripts/twist2_pi05/
 ```
 
+### SONIC latent VLA policies
+
+For SONIC policies trained to output encoder latents, set `SONIC_VLA_ACTION_FORMAT=latent64` and use the normal live VLA path with `--gmt_backend sonic`. The runtime accepts a 64-D latent action, or a 66-D action with left/right hand binary commands appended.
+
+HTTP inference servers may return `latent64`, `latent64_chunk`, `encoder_latent`, or `encoder_latent_chunk`:
+
+```bash
+SONIC_VLA_ACTION_FORMAT=latent64 \
+python isaaclab_twist2_g1/sim_main.py \
+  --input_source vla \
+  --gmt_backend sonic \
+  --lerobot_server_url http://127.0.0.1:18080 \
+  --sonic_decoder_path /path/to/sonic_decoder.onnx \
+  --task Isaac-Move-Open-Door-G129-Dex3-Wholebody \
+  --robot_type g129 \
+  --enable_cameras
+```
+
+Keep `SONIC_VLA_ACTION_FORMAT` unset, or set it to `semantic_v3`, for the default 40-D semantic VLA action interface.
+
 ## 4. Vision Execution Evaluation
 
 Vision execution uses the same simulator-side evaluation workers, with model paths and camera settings configured in the selected shell script. Before launching, check:

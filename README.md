@@ -171,6 +171,25 @@ isaaclab_twist2_g1/batch_test_scripts/batch_pi05_v31_twist2.sh
 
 See [Evaluation](docs/03_evaluation.md) for vision execution, semantic evaluation, and batch launch examples.
 
+### SONIC latent VLA inference
+
+The SONIC VLA runtime also supports policies that output SONIC encoder latents instead of the default 40-D semantic VLA command. This is intended for users who train a VLA directly on `encoder_latent` from SONIC raw recordings.
+
+Set `SONIC_VLA_ACTION_FORMAT=latent64` when launching a live VLA evaluation with `--gmt_backend sonic` and `--input_source vla`. The policy may return either a 64-D latent action, or a 66-D action where the final two values are left/right hand binary commands. For HTTP inference servers, accepted response keys are `latent64`, `latent64_chunk`, `encoder_latent`, or `encoder_latent_chunk`.
+
+```bash
+SONIC_VLA_ACTION_FORMAT=latent64 \
+python isaaclab_twist2_g1/sim_main.py \
+  --input_source vla \
+  --gmt_backend sonic \
+  --lerobot_server_url http://127.0.0.1:18080 \
+  --sonic_decoder_path /path/to/sonic_decoder.onnx \
+  --task Isaac-Move-Open-Door-G129-Dex3-Wholebody \
+  --robot_type g129
+```
+
+This is a live inference interface for latent-output VLA policies. Replay remains limited to the maintained replay modes documented in [Data Pipeline](docs/02_data_pipeline.md).
+
 ## Citation
 
 If you use HumanoidArena in your research, please cite:

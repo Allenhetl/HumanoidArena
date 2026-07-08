@@ -116,6 +116,8 @@ _HEADER_SIZE = 1280
 project_root = os.environ.get("PROJECT_ROOT")
 
 SONIC_VLA_ACTION_DIM = VLA_ROBOT_CURRENT_LOCAL_V3_ACTION_DIM
+SONIC_VLA_LATENT64_ACTION_DIM = 64
+SONIC_VLA_LATENT64_WITH_HAND_ACTION_DIM = 66
 SONIC_VLA_STATE_DIM = VLA_ROBOT_CURRENT_LOCAL_V3_STATE_DIM
 SONIC_HAND_POSE_ROBOT_NAME = "unitree_g1_with_hands"
 
@@ -1512,6 +1514,20 @@ class SonicActionProvider(ActionProvider):
         self._gmt_backend = getattr(args_cli, "gmt_backend", "") or ""
         self._use_lerobot_vla = self._input_source == "vla"
         self._sonic_joint29_mode = self._gmt_backend == "sonic_joint29" or self._use_lerobot_vla
+        self._vla_action_format = str(
+            getattr(args_cli, "sonic_vla_action_format", os.environ.get("SONIC_VLA_ACTION_FORMAT", "semantic_v3"))
+            or "semantic_v3"
+        ).strip().lower()
+        if self._vla_action_format in {"semantic", "semantic40", "semantic_v3", "joint29_v3"}:
+            self._vla_action_format = "semantic_v3"
+        elif self._vla_action_format in {"latent", "latent64", "sonic_latent64", "decoder_latent64"}:
+            self._vla_action_format = "latent64"
+        else:
+            raise ValueError(
+                f"[SonicActionProvider] Unsupported SONIC_VLA_ACTION_FORMAT={self._vla_action_format!r}; "
+                "expected semantic_v3 or latent64"
+            )
+        self._use_vla_latent64 = self._use_lerobot_vla and self._vla_action_format == "latent64"
         self._lerobot_server_url = getattr(args_cli, "lerobot_server_url", "") or ""
         self._lerobot_server_timeout = float(getattr(args_cli, "lerobot_server_timeout", 5.0))
         self._lerobot_server_verify_ssl = bool(getattr(args_cli, "lerobot_server_verify_ssl", False))
@@ -2236,10 +2252,16 @@ class SonicActionProvider(ActionProvider):
                 f"[SonicActionProvider] VLA v3.1 policy must use observation.state shape {(SONIC_VLA_STATE_DIM,)}, "
                 f"got {state_shape}"
             )
-        if action_shape and action_shape != (SONIC_VLA_ACTION_DIM,):
+        expected_action_shapes = (
+            {(SONIC_VLA_LATENT64_ACTION_DIM,), (SONIC_VLA_LATENT64_WITH_HAND_ACTION_DIM,)}
+            if self._use_vla_latent64
+            else {(SONIC_VLA_ACTION_DIM,)}
+        )
+        if action_shape and action_shape not in expected_action_shapes:
+            expected = ", ".join(str(shape) for shape in sorted(expected_action_shapes))
             raise ValueError(
-                f"[SonicActionProvider] VLA v3.1 policy must use action shape {(SONIC_VLA_ACTION_DIM,)}, "
-                f"got {action_shape}"
+                f"[SonicActionProvider] VLA policy action shape mismatch for "
+                f"SONIC_VLA_ACTION_FORMAT={self._vla_action_format}: expected {expected}, got {action_shape}"
             )
         policy_cls = get_policy_class(config.type)
 
@@ -2264,7 +2286,8 @@ class SonicActionProvider(ActionProvider):
 
         print(
             f"[SonicActionProvider] LeRobot VLA enabled: "
-            f"path={lerobot_policy_path} type={config.type} device={self._lerobot_device}"
+            f"path={lerobot_policy_path} type={config.type} device={self._lerobot_device} "
+            f"action_format={self._vla_action_format}"
         )
 
     def _get_front_camera_rgb_for_vla(self) -> np.ndarray:
@@ -2356,22 +2379,45 @@ class SonicActionProvider(ActionProvider):
         action_chunk = np.asarray(action_chunk, dtype=np.float32)
         if action_chunk.ndim == 1:
             action_chunk = action_chunk.reshape(1, -1)
-        if action_chunk.ndim != 2 or action_chunk.shape[1] != SONIC_VLA_ACTION_DIM:
+        expected_dims = (
+            {SONIC_VLA_LATENT64_ACTION_DIM, SONIC_VLA_LATENT64_WITH_HAND_ACTION_DIM}
+            if self._use_vla_latent64
+            else {SONIC_VLA_ACTION_DIM}
+        )
+        if action_chunk.ndim != 2 or action_chunk.shape[1] not in expected_dims:
+            expected = "/".join(str(dim) for dim in sorted(expected_dims))
             raise ValueError(
-                f"[SonicActionProvider] Expected canonical VLA action chunk shape [N, {SONIC_VLA_ACTION_DIM}], got {action_chunk.shape}"
+                f"[SonicActionProvider] Expected VLA action chunk shape [N, {expected}] for "
+                f"SONIC_VLA_ACTION_FORMAT={self._vla_action_format}, got {action_chunk.shape}"
             )
         return action_chunk
 
-    def _pop_lerobot_semantic_action(self) -> np.ndarray:
+    def _pop_lerobot_action(self) -> np.ndarray:
         if not self._lerobot_action_chunk_queue:
             for action in self._fetch_lerobot_action_chunk():
                 self._lerobot_action_chunk_queue.append(np.asarray(action, dtype=np.float32).copy())
-        action = np.asarray(self._lerobot_action_chunk_queue.popleft(), dtype=np.float32).reshape(-1)
+        return np.asarray(self._lerobot_action_chunk_queue.popleft(), dtype=np.float32).reshape(-1)
+
+    def _pop_lerobot_semantic_action(self) -> np.ndarray:
+        action = self._pop_lerobot_action()
         if action.shape != (SONIC_VLA_ACTION_DIM,):
             raise ValueError(
                 f"[SonicActionProvider] Expected canonical VLA action dim {SONIC_VLA_ACTION_DIM}, got {action.shape}"
             )
         return action
+
+    def _pop_lerobot_latent64_action(self) -> tuple[np.ndarray, np.ndarray | None]:
+        action = self._pop_lerobot_action()
+        if action.shape == (SONIC_VLA_LATENT64_ACTION_DIM,):
+            return action.astype(np.float32, copy=True), None
+        if action.shape == (SONIC_VLA_LATENT64_WITH_HAND_ACTION_DIM,):
+            latent = action[:SONIC_VLA_LATENT64_ACTION_DIM].astype(np.float32, copy=True)
+            hand_binary = action[SONIC_VLA_LATENT64_ACTION_DIM:].astype(np.float32, copy=True)
+            return latent, hand_binary
+        raise ValueError(
+            f"[SonicActionProvider] Expected latent64 VLA action dim "
+            f"{SONIC_VLA_LATENT64_ACTION_DIM} or {SONIC_VLA_LATENT64_WITH_HAND_ACTION_DIM}, got {action.shape}"
+        )
 
     def _should_refresh_lerobot_visuals_next_step(self) -> bool:
         return (not self._use_lerobot_vla) or (len(self._lerobot_action_chunk_queue) == 0)
@@ -2483,7 +2529,88 @@ class SonicActionProvider(ActionProvider):
         right_closed = bool(runtime_frame.hand_binary[1] >= self._lerobot_hand_binary_threshold)
         self._apply_hand_binary_targets(left_closed=left_closed, right_closed=right_closed)
 
+    def _build_live_decoder_obs_with_latent(self, latent64: np.ndarray) -> np.ndarray:
+        latent = np.asarray(latent64, dtype=np.float32).reshape(1, -1)
+        if latent.shape != (1, SONIC_VLA_LATENT64_ACTION_DIM):
+            raise ValueError(f"[SonicActionProvider] expected latent64 shape (1, 64), got {latent.shape}")
+        robot = self.env.scene["robot"].data
+        joint_pos_sonic = robot.joint_pos[0, self._sonic_idx].cpu().numpy().astype(np.float32)
+        joint_vel_sonic = robot.joint_vel[0, self._sonic_idx].cpu().numpy().astype(np.float32)
+        joint_pos_delta = joint_pos_sonic - self._sonic_default_np
+
+        self._robot_joint_pos_hist = np.roll(self._robot_joint_pos_hist, -1, axis=0)
+        self._robot_joint_pos_hist[-1] = joint_pos_delta
+        self._robot_joint_vel_hist = np.roll(self._robot_joint_vel_hist, -1, axis=0)
+        self._robot_joint_vel_hist[-1] = joint_vel_sonic
+
+        ang_vel = robot.root_ang_vel_b[0].cpu().numpy().astype(np.float32)
+        base_quat_wxyz = robot.root_state_w[0, 3:7].cpu().numpy().astype(np.float32)
+        proj_grav = gravity_dir_from_base_quat_wxyz(base_quat_wxyz)
+
+        self._ang_vel_hist = np.roll(self._ang_vel_hist, -1, axis=0)
+        self._ang_vel_hist[-1] = ang_vel
+        self._grav_dir_hist = np.roll(self._grav_dir_hist, -1, axis=0)
+        self._grav_dir_hist[-1] = proj_grav
+
+        dec_obs = np.concatenate([
+            latent.reshape(-1),
+            self._ang_vel_hist.flatten(),
+            self._robot_joint_pos_hist.flatten(),
+            self._robot_joint_vel_hist.flatten(),
+            self._last_action_hist.flatten(),
+            self._grav_dir_hist.flatten(),
+        ])[np.newaxis].astype(np.float32)
+        self._latent = latent
+        self._latest_decoder_obs = dec_obs[0].astype(np.float32, copy=True)
+        return dec_obs
+
+    def _decode_sonic_latent64_live(self, latent64: np.ndarray) -> np.ndarray:
+        if self._decoder is None:
+            raise RuntimeError("[SonicActionProvider] Decoder missing during live latent64 VLA inference")
+        dec_obs = self._build_live_decoder_obs_with_latent(latent64)
+        t_dec0 = time.perf_counter()
+        action_sonic = self._decoder.run(None, {self._decoder.get_inputs()[0].name: dec_obs})[0]
+        t_dec1 = time.perf_counter()
+        raw_sonic_unclipped = action_sonic.flatten()[:29].astype(np.float32, copy=False)
+        self._latest_decoder_raw_action = raw_sonic_unclipped.astype(np.float32, copy=True)
+        self._last_action_hist = np.roll(self._last_action_hist, -1, axis=0)
+        self._last_action_hist[-1] = raw_sonic_unclipped
+        target_sonic = raw_sonic_unclipped * G1_ACTION_SCALE_ISAACLAB + self._sonic_default_np
+        self._latest_decoder_target = target_sonic.astype(np.float32, copy=True)
+
+        dec_ms = (t_dec1 - t_dec0) * 1000.0
+        self._perf_encoder_ms.append(0.0)
+        self._perf_decoder_ms.append(dec_ms)
+        if len(self._perf_encoder_ms) > self._perf_buffer_size:
+            self._perf_encoder_ms.pop(0)
+        if len(self._perf_decoder_ms) > self._perf_buffer_size:
+            self._perf_decoder_ms.pop(0)
+        if self._sonic_debug and (self._frame_count <= 3 or self._frame_count % self._sonic_log_every == 0):
+            print(
+                "[SONIC][VLA_LATENT64] "
+                f"decoder_ms={dec_ms:.2f} "
+                f"latent_range=[{float(np.min(latent64)):0.4f},{float(np.max(latent64)):0.4f}] "
+                f"raw_range=[{float(np.min(raw_sonic_unclipped)):0.4f},{float(np.max(raw_sonic_unclipped)):0.4f}]"
+            )
+        return target_sonic.astype(np.float32)
+
+    def _run_gear_sonic_latent64_from_vla(self) -> np.ndarray:
+        latent64, hand_binary = self._pop_lerobot_latent64_action()
+        self._latest_vla_action = (
+            np.concatenate([latent64, hand_binary]).astype(np.float32)
+            if hand_binary is not None
+            else latent64.astype(np.float32, copy=True)
+        )
+        if hand_binary is not None:
+            self._apply_hand_binary_targets(
+                left_closed=bool(hand_binary[0] >= self._lerobot_hand_binary_threshold),
+                right_closed=bool(hand_binary[1] >= self._lerobot_hand_binary_threshold),
+            )
+        return self._decode_sonic_latent64_live(latent64)
+
     def _run_gear_sonic_from_vla(self) -> np.ndarray:
+        if self._use_vla_latent64:
+            return self._run_gear_sonic_latent64_from_vla()
         action = self._infer_lerobot_semantic_action()
         self._apply_lerobot_semantic_action(action)
         return self._run_gear_sonic()

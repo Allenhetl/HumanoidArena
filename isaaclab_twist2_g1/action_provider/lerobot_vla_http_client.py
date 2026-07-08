@@ -91,7 +91,21 @@ class LeRobotVLAHttpClient:
         response = self._post_json("/infer", payload)
         action_chunk = response.get("action_chunk")
         if action_chunk is None:
-            action_chunk = [response["action"]]
+            action_chunk = response.get("latent64_chunk")
+        if action_chunk is None:
+            action_chunk = response.get("encoder_latent_chunk")
+        if action_chunk is None:
+            if "action" in response:
+                action_chunk = [response["action"]]
+            elif "latent64" in response:
+                action_chunk = [response["latent64"]]
+            elif "encoder_latent" in response:
+                action_chunk = [response["encoder_latent"]]
+            else:
+                raise RuntimeError(
+                    "Expected one of action_chunk/action/latent64_chunk/latent64/"
+                    "encoder_latent_chunk/encoder_latent in server response"
+                )
         action_chunk = np.asarray(action_chunk, dtype=np.float32)
         if action_chunk.ndim == 1:
             action_chunk = action_chunk.reshape(1, -1)

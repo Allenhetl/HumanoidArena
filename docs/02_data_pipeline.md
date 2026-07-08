@@ -39,6 +39,8 @@ PY
 
 Use replay to validate a recorded `.npz` without creating a new dataset.
 
+Replay and video capture are best run on a workstation with a working Isaac Sim rendering interface. Headless execution is not recommended for release validation, especially when cameras or video recording are enabled.
+
 TWIST2:
 
 ```bash
@@ -78,6 +80,8 @@ inference_replay
 ## 4. Rerecord
 
 Use rerecord to regenerate observations, cameras, or normalized outputs from existing recordings.
+
+Rerecord depends on simulator rendering and camera capture. Run it on a machine with a visual/rendering-capable Isaac Sim setup; headless containers may stall or skip camera outputs depending on the deployment.
 
 Unified wrapper:
 

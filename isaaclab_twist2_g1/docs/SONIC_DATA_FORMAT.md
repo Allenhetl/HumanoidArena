@@ -119,6 +119,8 @@ Encoder-side fields:
 - `encoder_robot_joint_vel_hist`
 - `encoder_latent`: `(T, 64)`
 
+`encoder_latent` is the SONIC encoder output for each recorded frame. It can be used to train latent-output VLA policies for the live `SONIC_VLA_ACTION_FORMAT=latent64` inference interface.
+
 Decoder-side fields:
 
 - `decoder_obs`: `(T, 994)`
