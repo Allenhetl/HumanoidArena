@@ -1,0 +1,9 @@
+name: real_scene_lab_twist2
+description: TWIST2 env config for Isaac-Move-Real-Scene-Lab-G129-Dex3-Wholebody.
+task_name: Isaac-Move-Real-Scene-Lab-G129-Dex3-Wholebody
+backend: twist2
+
+overrides:
+  sim:
+    dt: 0.001
+  decimation: 20

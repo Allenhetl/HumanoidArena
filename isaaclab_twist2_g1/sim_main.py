@@ -107,6 +107,8 @@ parser.add_argument("--sonic_encoder_path", type=str, default="",
                     help="Path to GEAR-SONIC encoder ONNX model")
 parser.add_argument("--sonic_decoder_path", type=str, default="",
                     help="Path to GEAR-SONIC decoder ONNX model")
+parser.add_argument("--sonic_input_timeout_s", type=float, default=0.25,
+                    help="Seconds without a fresh SONIC pose frame before holding the default standing pose; 0 disables the guard")
 
 # VLA-specific arguments
 parser.add_argument("--language_instruction", type=str, default="",
