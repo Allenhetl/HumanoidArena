@@ -5,8 +5,8 @@ HumanoidArena is a humanoid manipulation and whole-body control benchmark built 
 <p align="center">
   <a href="https://humanoidarena.github.io/">Project Page</a> |
   <a href="https://arxiv.org/abs/2606.17833">arXiv</a> |
-  <a href="https://huggingface.co/datasets/WilliamWang16/HumanoidArena_dataset_v3_1">HF Dataset</a> |
-  <a href="https://huggingface.co/WilliamWang16/HumanoidArena_models">HF Models</a> |
+  <a href="https://www.modelscope.cn/datasets/Twang2026/HumanoidArenaV3.1">HF Dataset</a> |
+  <a href="https://www.modelscope.cn/models/Twang2026/HumanoidArena_models">HF Models</a> |
   <a href="https://drive.google.com/file/d/1TCa_aVRmFrZs_l4wlxkqanNebvDtChNk/view?usp=sharing">Assets</a>
 </p>
 
@@ -28,7 +28,7 @@ HumanoidArena focuses on full-body humanoid interaction tasks with reproducible 
 
 - [x] LeRobot data released
 - [x] Models released
-- [ ] Raw data release
+- [x] Raw data release
 - [ ] Multicam data release
 
 ## Quick Links
@@ -37,8 +37,9 @@ HumanoidArena focuses on full-body humanoid interaction tasks with reproducible 
 | --- | --- |
 | Project page | https://humanoidarena.github.io/ |
 | Paper | https://arxiv.org/abs/2606.17833 |
-| LeRobot dataset | https://huggingface.co/datasets/WilliamWang16/HumanoidArena_dataset_v3_1 |
-| Model checkpoints | https://huggingface.co/WilliamWang16/HumanoidArena_models |
+| LeRobot dataset | https://www.modelscope.cn/datasets/Twang2026/HumanoidArenaV3.1 |
+| Raw data | https://www.modelscope.cn/datasets/Twang2026/HumanoidArena_raw |
+| Model checkpoints | https://www.modelscope.cn/models/Twang2026/HumanoidArena_models |
 | Simulation assets | https://drive.google.com/file/d/1TCa_aVRmFrZs_l4wlxkqanNebvDtChNk/view?usp=sharing |
 
 ## Documentation
@@ -104,10 +105,10 @@ The git repository should contain source code, small examples, and required ligh
 
 | Artifact | Status | Location |
 | --- | --- | --- |
-| LeRobot dataset | Released | https://huggingface.co/datasets/WilliamWang16/HumanoidArena_dataset_v3_1 |
-| Model checkpoints | Released | https://huggingface.co/WilliamWang16/HumanoidArena_models |
+| LeRobot dataset | Released | https://www.modelscope.cn/datasets/Twang2026/HumanoidArenaV3.1 |
+| Model checkpoints | Released | https://www.modelscope.cn/models/Twang2026/HumanoidArena_models |
 | Simulation assets | Released | https://drive.google.com/file/d/1TCa_aVRmFrZs_l4wlxkqanNebvDtChNk/view?usp=sharing |
-| Raw data | Planned | To be announced |
+| Raw data | Released | https://www.modelscope.cn/datasets/Twang2026/HumanoidArena_raw |
 | Multicam data | Planned | To be announced |
 
 Download released model checkpoints from the Hugging Face model repository into any local artifact directory and keep the published folder layout:
@@ -204,6 +205,10 @@ If you use HumanoidArena in your research, please cite:
   year={2026}
 }
 ```
+
+## Contact
+
+To join the community group, add either WeChat account: **xiezhikang2003** or **Chanw15**.
 
 ## Acknowledgements
 
