@@ -10,10 +10,11 @@ from tasks.common_config import CameraBaseCfg
 
 project_root = os.environ.get('PROJECT_ROOT')
 
-ROOM_USD_PATH = (
+DEFAULT_ROOM_USD_PATH = (
     f'{project_root}/assets/objects/real_scene/'
-    'small_warehouse_digital_twin_office.usdz'
+    'small_warehouse_digital_twin_office_fixed_gauss_xneg90_ccm1.usda'
 )
+ROOM_USD_PATH = os.environ.get('REAL_SCENE_ROOM_USD', DEFAULT_ROOM_USD_PATH)
 
 
 @configclass
@@ -29,21 +30,29 @@ class RealSceneLabSceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    light = AssetBaseCfg(
-        prim_path='/World/light',
+    ambient_light = AssetBaseCfg(
+        prim_path='/World/ambient_light',
+        spawn=sim_utils.DomeLightCfg(
+            color=(0.8, 0.8, 0.8),
+            intensity=1200.0,
+        ),
+    )
+
+    robot_key_light = AssetBaseCfg(
+        prim_path='/World/robot_key_light',
         init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(3.0, 3.0, 2.5),
+            pos=(1.5, 4.0, 1.4),
         ),
         spawn=sim_utils.SphereLightCfg(
-            color=(1.0, 0.95, 0.85),
-            intensity=8000.0,
-            radius=0.3,
+            color=(1.0, 0.96, 0.9),
+            intensity=10000.0,
+            radius=1.0,
         ),
     )
 
     world_camera = CameraBaseCfg.get_world_camera_config(
-        pos_offset=(3.0, -2.0, 2.5),
-        rot_offset=(0.5, 0.3, 0.4, 0.7),
+        pos_offset=(1.5, 2.85, 1.25),
+        rot_offset=(0.85749, 0.51450, 0.0, 0.0),
         focal_length=12,
         horizontal_aperture=27,
         convention='opengl',
