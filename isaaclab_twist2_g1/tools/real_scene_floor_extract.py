@@ -184,6 +184,77 @@ def save_overlay(connected, reachable, residual_grid, title, path, extent, start
     plt.close(fig)
 
 
+def save_reachability_comparison(before, after, blocked, title, path, extent, start_xy):
+    img = np.zeros((*before.shape, 4), dtype=np.float32)
+    img[before] = (0.2, 0.55, 0.95, 0.55)
+    img[after] = (0.05, 0.85, 0.25, 0.85)
+    img[before & ~after] = (0.95, 0.15, 0.05, 0.90)
+    img[blocked] = (0.95, 0.05, 0.75, 0.55)
+
+    fig, ax = plt.subplots(figsize=(9, 8), dpi=160)
+    ax.imshow(img, origin="lower", extent=extent, interpolation="nearest")
+    ax.scatter([start_xy[0]], [start_xy[1]], c="cyan", s=45, marker="x", label="start")
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel("X (m)")
+    ax.set_ylabel("Y (m)")
+    ax.set_title(title)
+    ax.legend(loc="upper right")
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+
+
+def grid_project_faces(centroid, face_mask, x0, y0, nx, ny, grid):
+    out = np.zeros((ny, nx), dtype=bool)
+    ix = np.floor((centroid[face_mask, 0] - x0) / grid).astype(np.int64)
+    iy = np.floor((centroid[face_mask, 1] - y0) / grid).astype(np.int64)
+    ok = (ix >= 0) & (ix < nx) & (iy >= 0) & (iy < ny)
+    out[iy[ok], ix[ok]] = True
+    return out
+
+
+def grid_count_faces(centroid, face_mask, x0, y0, nx, ny, grid):
+    out = np.zeros((ny, nx), dtype=np.int32)
+    ix = np.floor((centroid[face_mask, 0] - x0) / grid).astype(np.int64)
+    iy = np.floor((centroid[face_mask, 1] - y0) / grid).astype(np.int64)
+    ok = (ix >= 0) & (ix < nx) & (iy >= 0) & (iy < ny)
+    np.add.at(out, (iy[ok], ix[ok]), 1)
+    return out
+
+
+def dilate_disk(mask, radius_m, grid):
+    cells = max(0, int(round(radius_m / grid)))
+    if cells <= 0:
+        return mask.copy()
+    yy, xx = np.ogrid[-cells : cells + 1, -cells : cells + 1]
+    disk = (xx * xx + yy * yy) <= cells * cells
+    return ndimage.binary_dilation(mask, structure=disk)
+
+
+def constrained_close(valid_floor, blocked, close_radius_m, grid, max_fill_area_m2):
+    close_cells = max(0, int(round(close_radius_m / grid)))
+    if close_cells <= 0:
+        raw_close = valid_floor.copy()
+    else:
+        yy, xx = np.ogrid[-close_cells : close_cells + 1, -close_cells : close_cells + 1]
+        disk = (xx * xx + yy * yy) <= close_cells * close_cells
+        raw_close = ndimage.binary_closing(valid_floor, structure=disk)
+
+    fill_candidate = raw_close & ~valid_floor & ~blocked
+    labels, n_labels = ndimage.label(fill_candidate)
+    allowed_fill = np.zeros_like(valid_floor, dtype=bool)
+    rejected_fill = np.zeros_like(valid_floor, dtype=bool)
+    for label in range(1, n_labels + 1):
+        comp = labels == label
+        area_m2 = float(comp.sum() * grid * grid)
+        if area_m2 <= max_fill_area_m2:
+            allowed_fill |= comp
+        else:
+            rejected_fill |= comp
+    blocked_fill = raw_close & ~valid_floor & blocked
+    return valid_floor | allowed_fill, raw_close, allowed_fill, rejected_fill, blocked_fill
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--asset", type=Path, required=True)
@@ -198,6 +269,14 @@ def main():
     parser.add_argument("--step_height", type=float, default=0.05)
     parser.add_argument("--robot_clearance_radius", type=float, default=0.30)
     parser.add_argument("--morph_close_radius", type=float, default=0.10)
+    parser.add_argument("--max_fill_area", type=float, default=0.25)
+    parser.add_argument("--body_clearance_radius", type=float, default=0.35)
+    parser.add_argument("--overhead_min_z", type=float, default=0.20)
+    parser.add_argument("--overhead_max_z", type=float, default=1.60)
+    parser.add_argument("--table_min_z", type=float, default=0.40)
+    parser.add_argument("--table_max_z", type=float, default=1.40)
+    parser.add_argument("--overhead_mode", choices=("table_only", "dense", "all"), default="table_only")
+    parser.add_argument("--overhead_dense_count", type=int, default=6)
     parser.add_argument("--bbox_margin", type=float, default=0.25)
     parser.add_argument("--seed_layer", choices=("lowest", "dominant"), default="lowest")
     args = parser.parse_args()
@@ -271,13 +350,32 @@ def main():
         residual_grid[cy, cx] = rr if np.isnan(residual_grid[cy, cx]) else min(residual_grid[cy, cx], rr)
         height_grid[cy, cx] = zz if np.isnan(height_grid[cy, cx]) else 0.5 * (height_grid[cy, cx] + zz)
 
-    close_cells = max(0, int(round(args.morph_close_radius / args.grid)))
-    if close_cells > 0:
-        yy, xx = np.ogrid[-close_cells : close_cells + 1, -close_cells : close_cells + 1]
-        disk = (xx * xx + yy * yy) <= close_cells * close_cells
-        connect_floor = ndimage.binary_closing(valid_floor, structure=disk)
+    dz_above_floor = centroid[:, 2] - centroid_plane_z
+    overhead_face = valid & (dz_above_floor >= args.overhead_min_z) & (dz_above_floor <= args.overhead_max_z)
+    table_face = horizontal & (dz_above_floor >= args.table_min_z) & (dz_above_floor <= args.table_max_z)
+    overhead_seed = grid_project_faces(centroid, overhead_face, x0, y0, nx, ny, args.grid)
+    overhead_count = grid_count_faces(centroid, overhead_face, x0, y0, nx, ny, args.grid)
+    table_seed = grid_project_faces(centroid, table_face, x0, y0, nx, ny, args.grid)
+    low_table_projection = dilate_disk(table_seed, args.body_clearance_radius, args.grid)
+    if args.overhead_mode == "all":
+        overhead_blocked = dilate_disk(overhead_seed | table_seed, args.body_clearance_radius, args.grid)
+    elif args.overhead_mode == "dense":
+        overhead_blocked = dilate_disk((overhead_count >= args.overhead_dense_count) | table_seed, args.body_clearance_radius, args.grid)
     else:
-        connect_floor = valid_floor.copy()
+        overhead_blocked = low_table_projection.copy()
+
+    constrained_floor, raw_closed_floor, allowed_fill, rejected_fill, blocked_fill = constrained_close(
+        valid_floor,
+        overhead_blocked,
+        args.morph_close_radius,
+        args.grid,
+        args.max_fill_area,
+    )
+    # Keep the original morphology-based closure for floor connectivity. The
+    # overhead/table projection is applied before reachable-space extraction,
+    # so table-underfloor holes can help bridge sparse reconstruction gaps but
+    # cannot become robot-reachable free space.
+    connect_floor = raw_closed_floor
 
     start_seed = nearest_true_seed(connect_floor, xy_grid, start_xy, max_dist=0.75)
     connected = flood(connect_floor, start_seed)
@@ -295,8 +393,14 @@ def main():
             hole_candidates |= comp
             hole_areas.append(area_m2)
 
-    clearance = ndimage.distance_transform_edt(connected) * args.grid
-    reachable_seed_mask = connected & (clearance >= args.robot_clearance_radius)
+    clearance_before_overhead = ndimage.distance_transform_edt(connected) * args.grid
+    reachable_seed_mask_before_overhead = connected & (clearance_before_overhead >= args.robot_clearance_radius)
+    reachable_seed_before_overhead = nearest_true_seed(reachable_seed_mask_before_overhead, xy_grid, start_xy, max_dist=1.0)
+    reachable_before_overhead = flood(reachable_seed_mask_before_overhead, reachable_seed_before_overhead)
+
+    free_floor = connected & ~overhead_blocked
+    clearance = ndimage.distance_transform_edt(free_floor) * args.grid
+    reachable_seed_mask = free_floor & (clearance >= args.robot_clearance_radius)
     reachable_seed = nearest_true_seed(reachable_seed_mask, xy_grid, start_xy, max_dist=1.0)
     reachable = flood(reachable_seed_mask, reachable_seed)
 
@@ -317,6 +421,19 @@ def main():
     save_mask(hole_candidates.astype(float), "Small hole candidates inside connected floor", args.out_dir / "floor_hole_candidate_map.png", extent, start_xy)
     save_heat(clearance, "Distance to floor boundary / obstacle proxy", args.out_dir / "distance_to_obstacle_map.png", extent, start_xy, "m", cmap="viridis", vmin=0, vmax=1.0)
     save_mask(reachable.astype(float), "G1 reachable floor mask after clearance erosion", args.out_dir / "g1_reachable_mask.png", extent, start_xy)
+    save_mask(overhead_blocked.astype(float), "Overhead/body clearance blocked projection", args.out_dir / "overhead_blocked_projection.png", extent, start_xy, cmap="Reds")
+    save_mask(low_table_projection.astype(float), "Low horizontal table/ceiling projection", args.out_dir / "low_table_projection.png", extent, start_xy, cmap="Purples")
+    save_mask(allowed_fill.astype(float), "Allowed constrained fill cells", args.out_dir / "hole_fill_allowed.png", extent, start_xy, cmap="Greens")
+    save_mask((blocked_fill | rejected_fill).astype(float), "Blocked/rejected close-fill cells", args.out_dir / "hole_fill_blocked_or_rejected.png", extent, start_xy, cmap="Oranges")
+    save_reachability_comparison(
+        reachable_before_overhead,
+        reachable,
+        overhead_blocked,
+        "Reachability before/after overhead clearance: blue=before, green=after, red=removed, magenta=blocked",
+        args.out_dir / "reachable_before_after_overhead.png",
+        extent,
+        start_xy,
+    )
     save_overlay(
         connected,
         reachable,
@@ -335,6 +452,18 @@ def main():
         reachable=reachable,
         valid_floor=valid_floor,
         connect_floor=connect_floor,
+        raw_closed_floor=raw_closed_floor,
+        allowed_fill=allowed_fill,
+        rejected_fill=rejected_fill,
+        blocked_fill=blocked_fill,
+        overhead_blocked=overhead_blocked,
+        overhead_seed=overhead_seed,
+        overhead_count=overhead_count,
+        low_table_projection=low_table_projection,
+        table_seed=table_seed,
+        free_floor=free_floor,
+        reachable_before_overhead=reachable_before_overhead,
+        clearance_before_overhead=clearance_before_overhead,
         residual_grid=residual_grid,
         height_grid=height_grid,
         clearance=clearance,
@@ -363,6 +492,14 @@ def main():
             "plane_dist_m": args.plane_dist,
             "robot_clearance_radius_m": args.robot_clearance_radius,
             "morph_close_radius_m": args.morph_close_radius,
+            "max_fill_area_m2": args.max_fill_area,
+            "body_clearance_radius_m": args.body_clearance_radius,
+            "overhead_min_z_m": args.overhead_min_z,
+            "overhead_max_z_m": args.overhead_max_z,
+            "table_min_z_m": args.table_min_z,
+            "table_max_z_m": args.table_max_z,
+            "overhead_mode": args.overhead_mode,
+            "overhead_dense_count": args.overhead_dense_count,
         },
         "seed": {
             "seed_faces": int(seed_faces.sum()),
@@ -388,6 +525,12 @@ def main():
         "floor_region": {
             "grid_shape": [int(ny), int(nx)],
             "all_floor_cells": int(valid_floor.sum()),
+            "raw_closed_floor_cells": int(raw_closed_floor.sum()),
+            "allowed_fill_cells": int(allowed_fill.sum()),
+            "blocked_fill_cells": int(blocked_fill.sum()),
+            "rejected_fill_cells": int(rejected_fill.sum()),
+            "overhead_blocked_cells": int(overhead_blocked.sum()),
+            "low_table_projection_cells": int(low_table_projection.sum()),
             "connect_floor_cells_after_closing": int(connect_floor.sum()),
             "connected_floor_cells": int(connected.sum()),
             "connected_area_m2": float(connected.sum() * args.grid * args.grid),
@@ -401,9 +544,12 @@ def main():
         },
         "reachable": {
             "clearance_radius_m": float(args.robot_clearance_radius),
+            "reachable_before_overhead_cells": int(reachable_before_overhead.sum()),
+            "reachable_before_overhead_area_m2": float(reachable_before_overhead.sum() * args.grid * args.grid),
             "reachable_cells": int(reachable.sum()),
             "reachable_area_m2": float(reachable.sum() * args.grid * args.grid),
             "start_seed_cell": list(start_seed) if start_seed else None,
+            "reachable_seed_before_overhead_cell": list(reachable_seed_before_overhead) if reachable_seed_before_overhead else None,
             "reachable_seed_cell": list(reachable_seed) if reachable_seed else None,
         },
         "outputs": [
@@ -413,6 +559,11 @@ def main():
             "floor_hole_candidate_map.png",
             "distance_to_obstacle_map.png",
             "g1_reachable_mask.png",
+            "overhead_blocked_projection.png",
+            "low_table_projection.png",
+            "hole_fill_allowed.png",
+            "hole_fill_blocked_or_rejected.png",
+            "reachable_before_after_overhead.png",
             "floor_reachable_overlay.png",
             "floor_masks.npz",
             "floor_extract_report.json",
