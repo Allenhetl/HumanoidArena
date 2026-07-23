@@ -6,6 +6,7 @@ from datetime import datetime
 
 import torch
 
+import isaaclab.sim as sim_utils
 import isaaclab.envs.mdp as base_mdp
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
@@ -13,8 +14,9 @@ from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.utils import configclass
-from isaaclab.assets import ArticulationCfg
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.sensors import ContactSensorCfg
+from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 
 from . import mdp
 
@@ -49,6 +51,187 @@ GOAL_REFERENCE_LINE_COLOR = (1.0, 1.0, 1.0)
 class FootballTableSceneCfg(TableFootballSceneCfgWH):
     """Football table scene with G1 29DOF Dex3 wholebody robot."""
 
+    # Optional real-scene background for football-in-real-scene evaluation.
+    # The path can be overridden by YAML at scene.room.spawn.usd_path.
+    room = AssetBaseCfg(
+        prim_path="/World/envs/env_.*/Room",
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(0.0, 0.0, 0.0),
+            rot=(1.0, 0.0, 0.0, 0.0),
+        ),
+        spawn=UsdFileCfg(
+            usd_path=f"{os.environ.get('PROJECT_ROOT')}/assets/objects/real_scene/ipark_t2_505_20260721_gauss_ccm1.usda",
+        ),
+    )
+
+    # Optional near-field key light for real-scene mesh visibility. Gaussian backgrounds
+    # are visually bright but do not provide useful lighting for robot/object USD meshes.
+    robot_key_light = AssetBaseCfg(
+        prim_path="/World/robot_key_light",
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(-3.239, -4.425, 1.4),
+            rot=(1.0, 0.0, 0.0, 0.0),
+        ),
+        spawn=sim_utils.SphereLightCfg(
+            color=(1.0, 0.96, 0.9),
+            intensity=10000.0,
+            radius=1.0,
+        ),
+    )
+
+    # BEGIN AUTO_TUBE_LIGHTS_V2
+    # Final ipark football real-scene lighting: 12 broad SphereLight keylights at
+    # positions computed by the auto tube-light layout planner. The planner still
+    # uses floor-mask/oriented-room logic to select good overhead positions, but
+    # SphereLight gives better robot/hand visibility than thin CylinderLight tubes.
+    # Source: analysis_outputs/ipark_light_layout_v2/ipark_auto_tube_light_layout_v2.json
+    # Selection: nearest robot/ball seeds + farthest-point sampling over accepted positions.
+    auto_tube_light_00 = AssetBaseCfg(
+        prim_path="/World/auto_tube_light_00",
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(3.097, -4.838, 1.866),
+            rot=(0.707107, -0.679724, -0.194873, 0.000000),
+        ),
+        spawn=sim_utils.SphereLightCfg(
+            color=(1.0, 0.96, 0.9),
+            intensity=6000.0,
+            radius=1.0,
+        ),
+    )
+    auto_tube_light_01 = AssetBaseCfg(
+        prim_path="/World/auto_tube_light_01",
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(0.799, -2.579, 1.866),
+            rot=(0.707107, -0.679724, -0.194873, 0.000000),
+        ),
+        spawn=sim_utils.SphereLightCfg(
+            color=(1.0, 0.96, 0.9),
+            intensity=6000.0,
+            radius=1.0,
+        ),
+    )
+    auto_tube_light_02 = AssetBaseCfg(
+        prim_path="/World/auto_tube_light_02",
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(-0.748, 2.814, 1.866),
+            rot=(0.707107, -0.679724, -0.194873, 0.000000),
+        ),
+        spawn=sim_utils.SphereLightCfg(
+            color=(1.0, 0.96, 0.9),
+            intensity=6000.0,
+            radius=1.0,
+        ),
+    )
+    auto_tube_light_03 = AssetBaseCfg(
+        prim_path="/World/auto_tube_light_03",
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(0.046, -5.713, 1.866),
+            rot=(0.707107, -0.679724, -0.194873, 0.000000),
+        ),
+        spawn=sim_utils.SphereLightCfg(
+            color=(1.0, 0.96, 0.9),
+            intensity=6000.0,
+            radius=1.0,
+        ),
+    )
+    auto_tube_light_04 = AssetBaseCfg(
+        prim_path="/World/auto_tube_light_04",
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(-3.025, -0.757, 1.866),
+            rot=(0.707107, -0.679724, -0.194873, 0.000000),
+        ),
+        spawn=sim_utils.SphereLightCfg(
+            color=(1.0, 0.96, 0.9),
+            intensity=6000.0,
+            radius=1.0,
+        ),
+    )
+    auto_tube_light_05 = AssetBaseCfg(
+        prim_path="/World/auto_tube_light_05",
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(-0.706, -8.847, 1.866),
+            rot=(0.707107, -0.679724, -0.194873, 0.000000),
+        ),
+        spawn=sim_utils.SphereLightCfg(
+            color=(1.0, 0.96, 0.9),
+            intensity=6000.0,
+            radius=1.0,
+        ),
+    )
+    auto_tube_light_06 = AssetBaseCfg(
+        prim_path="/World/auto_tube_light_06",
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(-5.324, 1.502, 1.866),
+            rot=(0.707107, -0.679724, -0.194873, 0.000000),
+        ),
+        spawn=sim_utils.SphereLightCfg(
+            color=(1.0, 0.96, 0.9),
+            intensity=6000.0,
+            radius=1.0,
+        ),
+    )
+    auto_tube_light_07 = AssetBaseCfg(
+        prim_path="/World/auto_tube_light_07",
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(-3.778, -3.891, 1.866),
+            rot=(0.707107, -0.679724, -0.194873, 0.000000),
+        ),
+        spawn=sim_utils.SphereLightCfg(
+            color=(1.0, 0.96, 0.9),
+            intensity=6000.0,
+            radius=1.0,
+        ),
+    )
+    auto_tube_light_08 = AssetBaseCfg(
+        prim_path="/World/auto_tube_light_08",
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(-3.757, -9.722, 1.866),
+            rot=(0.707107, -0.679724, -0.194873, 0.000000),
+        ),
+        spawn=sim_utils.SphereLightCfg(
+            color=(1.0, 0.96, 0.9),
+            intensity=6000.0,
+            radius=1.0,
+        ),
+    )
+    auto_tube_light_09 = AssetBaseCfg(
+        prim_path="/World/auto_tube_light_09",
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(-4.509, -12.856, 1.866),
+            rot=(0.707107, -0.679724, -0.194873, 0.000000),
+        ),
+        spawn=sim_utils.SphereLightCfg(
+            color=(1.0, 0.96, 0.9),
+            intensity=6000.0,
+            radius=1.0,
+        ),
+    )
+    auto_tube_light_10 = AssetBaseCfg(
+        prim_path="/World/auto_tube_light_10",
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(-8.375, 0.627, 1.866),
+            rot=(0.707107, -0.679724, -0.194873, 0.000000),
+        ),
+        spawn=sim_utils.SphereLightCfg(
+            color=(1.0, 0.96, 0.9),
+            intensity=6000.0,
+            radius=1.0,
+        ),
+    )
+    auto_tube_light_11 = AssetBaseCfg(
+        prim_path="/World/auto_tube_light_11",
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(-7.581, -7.900, 1.866),
+            rot=(0.707107, -0.679724, -0.194873, 0.000000),
+        ),
+        spawn=sim_utils.SphereLightCfg(
+            color=(1.0, 0.96, 0.9),
+            intensity=6000.0,
+            radius=1.0,
+        ),
+    )
+    # END AUTO_TUBE_LIGHTS_V2
+
     robot: ArticulationCfg = G1RobotPresets.g1_29dof_dex3_wholebody(
         init_pos=(ROBOT_INIT_X, ROBOT_INIT_Y-2, ROBOT_INIT_Z),
         init_rot=(0.7071, 0.0, 0.0, 0.7071),  # 向左旋轉 90° (繞 Z 軸)
@@ -67,6 +250,8 @@ class FootballTableSceneCfg(TableFootballSceneCfgWH):
     )
 
     front_camera = CameraPresets.g1_front_camera()
+    # front_camera = CameraPresets.g1_front_camera()
+    # world_camera = CameraPresets.g1_world_camera()
 
 
 ##
@@ -228,7 +413,6 @@ class MoveFootballG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
         try:
             from tools.football_physics_material import apply_football_physics_material
             from tools.grass_ground_material import apply_grass_pbr_to_ground
-            from tools.semantic_basketball import ensure_semantic_basketballs
             import omni.usd
             from tools.pitch_lines import DEFAULT_LINE_WIDTH, create_simple_debug_lines
 
@@ -244,15 +428,10 @@ class MoveFootballG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
             except Exception as exc:
                 print(f"[football_physics] skipped: {exc}")
 
-            try:
-                ensure_semantic_basketballs()
-            except Exception as exc:
-                print(f"[semantic_basketball] setup skipped: {exc}")
-
             stage = omni.usd.get_context().get_stage()
             create_simple_debug_lines(
                 stage,
-                line_color=(1.0, 1.0, 1.0),
+                line_color=(32.0 / 255.0, 32.0 / 255.0, 32.0 / 255.0),
                 draw_goal_reference_lines=True,
                 goal_centers=GOAL_REFERENCE_LINE_ABSOLUTE_CENTERS,
                 goal_relative_offsets=GOAL_REFERENCE_LINE_RELATIVE_OFFSETS,
@@ -279,11 +458,5 @@ class MoveFootballG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
                 uv_scale=(15.0, 15.0),
             )
             print(f"[grass_ground_material] after reset apply result: {grass_ok_post}")
-            try:
-                from tools.semantic_basketball import ensure_semantic_basketballs
-
-                ensure_semantic_basketballs()
-            except Exception as exc:
-                print(f"[semantic_basketball] reset skipped: {exc}")
         except Exception as exc:
             print(f"[football_runtime] post-reset grass skipped: {exc}")

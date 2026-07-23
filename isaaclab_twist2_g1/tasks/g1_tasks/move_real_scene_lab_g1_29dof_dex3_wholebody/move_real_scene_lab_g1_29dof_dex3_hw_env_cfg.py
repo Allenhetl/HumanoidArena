@@ -1,3 +1,5 @@
+import os
+
 import torch
 
 import isaaclab.envs.mdp as base_mdp
@@ -13,17 +15,21 @@ from isaaclab.utils import configclass
 from . import mdp
 from tasks.common_config import CameraPresets, G1RobotPresets
 from tasks.common_event.event_manager import SimpleEvent, SimpleEventManager
-from tasks.common_scene.base_scene_real_scene_lab import RealSceneLabSceneCfg
-
-ROBOT_INIT_POS = (1.5, 4.0, -0.28)
-ROBOT_INIT_ROT = (1.0, 0.0, 0.0, 0.0)
+from tasks.common_scene.base_scene_real_scene_lab import (
+    RealSceneLabSceneCfg,
+    _resolve_robot_init_pos,
+    _resolve_robot_init_rot,
+)
 
 
 @configclass
 class RealSceneLabTaskSceneCfg(RealSceneLabSceneCfg):
+    # Construct robot with the resolved init pose (env-var fallback).
+    # YAML overrides applied *after* parse_env_cfg can still patch
+    # scene.robot.init_state.pos / .rot before gym.make -> env.reset().
     robot: ArticulationCfg = G1RobotPresets.g1_29dof_dex3_wholebody(
-        init_pos=ROBOT_INIT_POS,
-        init_rot=ROBOT_INIT_ROT,
+        init_pos=_resolve_robot_init_pos(),
+        init_rot=_resolve_robot_init_rot(),
     )
 
     contact_forces = ContactSensorCfg(
@@ -97,17 +103,20 @@ class MoveRealSceneLabG129Dex3WholebodyEnvCfg(ManagerBasedRLEnvCfg):
         self.episode_length_s = 20.0
 
         self.sim.dt = 0.005
-        self.scene.contact_forces.update_period = self.sim.dt
+        ref_dt = self.sim.dt
+        self.scene.contact_forces.update_period = ref_dt
         self.sim.render_interval = self.decimation
         self.sim.physx.enable_enhanced_determinism = True
         self.sim.physx.bounce_threshold_velocity = 0.01
-        self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 1024 * 1024 * 4
+        path = 1024 * 1024 * 4
+        self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = path
         self.sim.physx.gpu_total_aggregate_pairs_capacity = 16 * 1024
         self.sim.physx.friction_correlation_distance = 0.00625
 
         self.sim.physics_material.static_friction = 1.0
         self.sim.physics_material.dynamic_friction = 1.0
         self.sim.physics_material.friction_combine_mode = "max"
+        room_init_pos = getattr(self.scene, 'room', None)
         self.sim.physics_material.restitution_combine_mode = "max"
 
         self.event_manager = SimpleEventManager()

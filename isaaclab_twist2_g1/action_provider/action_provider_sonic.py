@@ -2131,7 +2131,8 @@ class SonicActionProvider(ActionProvider):
         raise ValueError(f"[SonicActionProvider] Unsupported replay_mode: {replay_mode}")
 
     def _resolve_ort_device_id(self) -> int | None:
-        device_name = str(getattr(self, "device", "") or "").strip().lower()
+        # SONIC_ONNX_DEVICE lets us run ONNX encoder/decoder on CPU even when Isaac/Torch stays on cuda:0.
+        device_name = str(os.environ.get("SONIC_ONNX_DEVICE", "") or getattr(self, "device", "") or "").strip().lower()
         if not device_name or device_name == "cpu":
             return None
         if device_name == "cuda":

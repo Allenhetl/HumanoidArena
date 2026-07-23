@@ -75,7 +75,7 @@ def inject_static_joint29(provider, robot, joint_ref, body_pos_ref, body_quat_re
         "timestamp_monotonic": np.array([time.monotonic()], dtype=np.float64),
         "heading_increment": np.array([0.0], dtype=np.float32),
     }
-    provider._apply_pose_data(data, "redis_joint29")
+    provider._apply_pose_data(data, "lerobot_vla_joint29_v3")
 
 
 def main():
@@ -90,6 +90,10 @@ def main():
     parser.add_argument("--capture_camera", type=str, default="front_camera")
     parser.add_argument("--save_reference_npz", type=str, default="")
     parser.add_argument("--load_reference_npz", type=str, default="")
+    parser.add_argument("--env_config_yaml", type=str, default="",
+                        help="Path to env config YAML (e.g. real_scene_ipark_sonic.yaml)")
+    parser.add_argument("--settle_steps", type=int, default=0,
+                        help="Number of zero-action physics steps to run before inference, to let robot settle on mesh")
     from isaaclab.app import AppLauncher
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
@@ -117,6 +121,14 @@ def main():
 
     env_cfg = parse_env_cfg(TASK_NAME, device=device, num_envs=1)
     env_cfg.env_name = TASK_NAME
+    if args.env_config_yaml:
+        from tasks.common_env_config.loader import apply_env_config_yaml
+        apply_env_config_yaml(
+            env_cfg,
+            args.env_config_yaml,
+            task_name=TASK_NAME,
+            route_name="sonic",
+        )
     env = gym.make(TASK_NAME, cfg=env_cfg).unwrapped
     init_fn = getattr(env_cfg, "initialize_task_scene", None)
     if callable(init_fn):
@@ -126,9 +138,61 @@ def main():
     env.reset()
     robot = env.scene["robot"]
     flush("[provider_static] reset OK")
+    # Debug: print initial robot state right after reset
+    _root_state = robot.data.root_state_w[0].detach().cpu().numpy()
+    _joint_pos = robot.data.joint_pos[0].detach().cpu().numpy()
+    _joint_vel = robot.data.joint_vel[0].detach().cpu().numpy()
+    _root_ang_vel_b = robot.data.root_ang_vel_b[0].detach().cpu().numpy()
+    flush(
+        "[provider_static] post-reset: root_pos={:.4f},{:.4f},{:.4f} root_quat={:.4f},{:.4f},{:.4f},{:.4f}"
+        " root_lin_vel={:.4f},{:.4f},{:.4f} root_ang_vel_b={:.4f},{:.4f},{:.4f}"
+        " joint_vel_range=[{:.4f},{:.4f}]".format(
+            _root_state[0], _root_state[1], _root_state[2],
+            _root_state[3], _root_state[4], _root_state[5], _root_state[6],
+            _root_state[7], _root_state[8], _root_state[9],
+            _root_ang_vel_b[0], _root_ang_vel_b[1], _root_ang_vel_b[2],
+            float(_joint_vel.min()), float(_joint_vel.max()),
+        )
+    )
+    # Settle: run physics steps with zero action to let robot stabilize on the mesh
+    _settle_steps = getattr(args, "settle_steps", 0)
+    if _settle_steps > 0:
+        flush(f"[provider_static] settling for {_settle_steps} steps...")
+        import torch as _torch
+        _act_dim = env.action_manager.total_action_dim if hasattr(env.action_manager, 'total_action_dim') else 29
+        _zero_action = _torch.zeros((1, _act_dim), device=env.device)
+        for _si in range(_settle_steps):
+            env.step(_zero_action)
+        _root_state2 = robot.data.root_state_w[0].detach().cpu().numpy()
+        _joint_vel2 = robot.data.joint_vel[0].detach().cpu().numpy()
+        _root_ang_vel_b2 = robot.data.root_ang_vel_b[0].detach().cpu().numpy()
+        flush(
+            "[provider_static] post-settle: root_pos={:.4f},{:.4f},{:.4f} root_quat={:.4f},{:.4f},{:.4f},{:.4f}"
+            " root_ang_vel_b={:.4f},{:.4f},{:.4f} joint_vel_range=[{:.4f},{:.4f}]".format(
+                _root_state2[0], _root_state2[1], _root_state2[2],
+                _root_state2[3], _root_state2[4], _root_state2[5], _root_state2[6],
+                _root_ang_vel_b2[0], _root_ang_vel_b2[1], _root_ang_vel_b2[2],
+                float(_joint_vel2.min()), float(_joint_vel2.max()),
+            )
+        )
 
     provider = SonicActionProvider(env, make_provider_args(args))
     provider.on_env_reset()
+    # Debug: print sonic_idx and joint_pos at sonic_idx
+    _sonic_idx_np = provider._sonic_idx.cpu().numpy()
+    _joint_pos_sonic = robot.data.joint_pos[0, provider._sonic_idx].detach().cpu().numpy()
+    _joint_pos_full = robot.data.joint_pos[0].detach().cpu().numpy()
+    _motion_hist_sum = float(np.abs(provider._motion_joint_pos_hist).sum())
+    flush(
+        "[provider_static] sonic_idx={} joint_pos_sonic_range=[{:.4f},{:.4f}] joint_pos_full_range=[{:.4f},{:.4f}]"
+        " motion_hist_sum={:.4f} motion_hist_range=[{:.4f},{:.4f}]".format(
+            _sonic_idx_np.tolist()[:5],
+            float(_joint_pos_sonic.min()), float(_joint_pos_sonic.max()),
+            float(_joint_pos_full.min()), float(_joint_pos_full.max()),
+            _motion_hist_sum,
+            float(provider._motion_joint_pos_hist.min()), float(provider._motion_joint_pos_hist.max()),
+        )
+    )
     if args.load_reference_npz:
         ref = np.load(args.load_reference_npz)
         joint_ref = ref["joint_ref"].astype(np.float32)
@@ -163,6 +227,13 @@ def main():
         inject_static_joint29(provider, robot.data, joint_ref, body_pos_ref, body_quat_ref, frame_idx)
 
     provider._fetch_redis_pose = _inject_fetch
+
+    # Pre-inject one frame so that _apply_pose_data initializes heading alignment
+    # using the actual reference quaternion (which matches the robot init rotation)
+    # instead of the default identity quaternion that _prime_default_reference_heading_align
+    # would otherwise use before the first _fetch_redis_pose call.
+    inject_static_joint29(provider, robot.data, joint_ref, body_pos_ref, body_quat_ref, 0)
+    fetch_counter["frame"] = 1
 
     video_path = Path(args.video_output)
     video_path.parent.mkdir(parents=True, exist_ok=True)
