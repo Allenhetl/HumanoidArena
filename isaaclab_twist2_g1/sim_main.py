@@ -47,20 +47,20 @@ parser.add_argument(
 )
 parser.add_argument("--action_source", type=str, default="dds",
                    choices=["dds", "file", "trajectory", "policy", "replay",
-                            "twist2_wholebody", "sonic_wholebody"],
+                            "twist2_wholebody", "sonic_wholebody", "mimic_lite_wholebody"],
                    help="Action source")
 parser.add_argument(
     "--input_source",
     type=str,
     default="",
-    choices=["", "pico_twist2", "pico_sonic", "vla", "replay"],
+    choices=["", "pico_twist2", "pico_sonic", "pico_mimic_lite", "vla", "replay"],
     help="Optional high-level input source alias",
 )
 parser.add_argument(
     "--gmt_backend",
     type=str,
     default="",
-    choices=["", "twist2", "sonic", "sonic_joint29"],
+    choices=["", "twist2", "sonic", "sonic_joint29", "mimic_lite"],
     help="Optional GMT backend alias",
 )
 parser.add_argument(
@@ -137,6 +137,17 @@ parser.add_argument("--video_fps", type=int, default=30,
 parser.add_argument("--enable_smpl_vis", action="store_true", default=True,
                     help="Enable SMPL visualization for VLA video recording")
 
+
+
+# MimicLite-specific arguments
+parser.add_argument("--mimic_lite_onnx_path", type=str, default="",
+                    help="Path to exported MimicLite ONNX policy")
+parser.add_argument("--mimic_lite_yaml_path", type=str, default="",
+                    help="Path to exported MimicLite deploy YAML")
+parser.add_argument("--mimic_lite_redis_host", type=str, default="localhost",
+                    help="Redis host for MimicLite GMR reference input")
+parser.add_argument("--mimic_lite_redis_port", type=int, default=6379,
+                    help="Redis port for MimicLite GMR reference input")
 
 parser.add_argument("--robot_type", type=str, default="unitree_g1_rotlocal_v3", help="robot type")
 parser.add_argument("--enable_dex1_dds", action="store_true", help="enable gripper DDS")
@@ -255,6 +266,13 @@ parser.add_argument(
 )
 parser.add_argument("--left_wrist_camera_port", type=int, default=5557, help="ZMQ port for left wrist camera streaming")
 parser.add_argument("--right_wrist_camera_port", type=int, default=5558, help="ZMQ port for right wrist camera streaming")
+parser.add_argument(
+    "--viewport_camera",
+    type=str,
+    default="world",
+    choices=["world", "front", "auto"],
+    help="GUI viewport camera preference: world third-person, front robot camera, or auto.",
+)
 
 # add AppLauncher parameters
 AppLauncher.add_app_launcher_args(parser)
@@ -331,11 +349,13 @@ def _normalize_control_routing(args_cli):
             ("pico_twist2", "twist2"): "twist2_wholebody",
             ("pico_sonic", "sonic"): "sonic_wholebody",
             ("pico_twist2", "sonic_joint29"): "sonic_wholebody",
+            ("pico_mimic_lite", "mimic_lite"): "mimic_lite_wholebody",
             ("vla", "twist2"): "twist2_wholebody",
             ("vla", "sonic"): "sonic_wholebody",
             ("replay", "twist2"): "twist2_wholebody",
             ("replay", "sonic"): "sonic_wholebody",
             ("replay", "sonic_joint29"): "sonic_wholebody",
+            ("replay", "mimic_lite"): "mimic_lite_wholebody",
         }
         mapped = route_map.get((args_cli.input_source, args_cli.gmt_backend))
         if mapped is None:
@@ -350,6 +370,9 @@ def _normalize_control_routing(args_cli):
     elif args_cli.action_source == "twist2_wholebody":
         args_cli.input_source = args_cli.input_source or "pico_twist2"
         args_cli.gmt_backend = args_cli.gmt_backend or "twist2"
+    elif args_cli.action_source == "mimic_lite_wholebody":
+        args_cli.input_source = args_cli.input_source or "pico_mimic_lite"
+        args_cli.gmt_backend = args_cli.gmt_backend or "mimic_lite"
     elif args_cli.action_source == "replay":
         args_cli.input_source = args_cli.input_source or "replay"
         if args_cli.gmt_backend == "twist2":
@@ -358,6 +381,8 @@ def _normalize_control_routing(args_cli):
             args_cli.action_source = "sonic_wholebody"
         elif args_cli.gmt_backend == "sonic_joint29":
             args_cli.action_source = "sonic_wholebody"
+        elif args_cli.gmt_backend == "mimic_lite":
+            args_cli.action_source = "mimic_lite_wholebody"
 
 
 def _initialize_task_scene(env, env_cfg, args_cli):
@@ -504,6 +529,8 @@ def _resolve_input_guard_backend(args_cli):
         return "sonic"
     if getattr(args_cli, "gmt_backend", "") == "sonic_joint29":
         return "sonic_joint29"
+    if getattr(args_cli, "gmt_backend", "") == "mimic_lite":
+        return "mimic_lite"
     return None
 
 
@@ -1003,11 +1030,18 @@ def main():
         if not camera_paths:
             print("  ⚠️ No cameras found in stage!")
 
-        # Try to find world camera first (third-person view), then fallback to front_cam
+        # Select the GUI viewport camera. This does not change image streaming cameras.
         world_cam_candidates = [p for p in camera_paths if "PerspectiveCamera" in p or "world_camera" in p.lower()]
         front_cam_candidates = [p for p in camera_paths if "front_cam" in p.lower()]
 
-        if world_cam_candidates:
+        viewport_camera = getattr(args_cli, "viewport_camera", "world")
+        if viewport_camera == "front" and front_cam_candidates:
+            cam_path = front_cam_candidates[0]
+            print(f"\n✅ Found front_cam at: {cam_path}")
+        elif viewport_camera == "front":
+            cam_path = "/World/envs/env_0/Robot/d435_link/front_cam"
+            print(f"\n⚠️ No front_cam found, trying expected path: {cam_path}")
+        elif world_cam_candidates:
             cam_path = world_cam_candidates[0]
             print(f"\n✅ Found world_camera at: {cam_path}")
         elif front_cam_candidates:
@@ -1031,6 +1065,8 @@ def main():
             new_cam = vp.get_active_camera()
             if new_cam == cam_path:
                 print(f"  ✅ Successfully switched viewport to: {cam_path}")
+                for _ in range(3):
+                    simulation_app.update()
             else:
                 print(f"  ❌ Failed to switch! Viewport still at: {new_cam}")
         else:
@@ -1044,7 +1080,7 @@ def main():
 
     # create simplified control configuration
     try:
-        wholebody_sources = {"twist2_wholebody", "sonic_wholebody"}
+        wholebody_sources = {"twist2_wholebody", "sonic_wholebody", "mimic_lite_wholebody"}
         if args_cli.action_source == "sonic_wholebody":
             use_wholebody = True
             physics_dt = getattr(env, "physics_dt", None) or env_cfg.sim.dt
@@ -1275,6 +1311,15 @@ def main():
         loop_count = 0
         last_loop_time = time.time()
         recent_loop_times = []  # for calculating moving average frequency
+        camera_update_fn = None
+        if args_cli.enable_cameras:
+            try:
+                from tasks.common_observations.camera_state import get_camera_image
+
+                camera_update_fn = get_camera_image
+                print("[sim_main] Camera shared-memory refresh enabled in main loop")
+            except Exception as exc:
+                print(f"[sim_main] Camera shared-memory refresh unavailable: {exc}")
 
         # use torch.inference_mode() and handle KeyboardInterrupt
         try:
@@ -1412,6 +1457,12 @@ def main():
                         controller.stop()
                         break
 
+                    if camera_update_fn is not None and loop_count % 3 == 0:
+                        try:
+                            camera_update_fn(env)
+                        except Exception as exc:
+                            if loop_count % 300 == 0:
+                                print(f"[sim_main] Camera shared-memory refresh failed: {exc}")
 
                     if _should_exit_after_replay_complete(action_provider, args_cli):
                         print("[sim_main] Replay reached EOF and requested exit; stopping controller")

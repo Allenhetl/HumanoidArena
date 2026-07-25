@@ -272,6 +272,7 @@ class StateMachine:
         self.left_key_one_was_pressed = False
         self.left_key_two_was_pressed = False
         self.left_axis_click_was_pressed = False
+        self._suppress_left_key_until_release = False
 
         # Recording control state - Start recording immediately on initialization
         self.recording_active = True  # Changed: Start recording immediately
@@ -323,6 +324,7 @@ class StateMachine:
         self.recording_active = True
         self.recording_command = "start"
         self.recording_command_frame_count = 0
+        self._suppress_left_key_until_release = True
         self.hand_left_position = 0.0
         self.hand_right_position = 0.0
         self.velocity_commands[:] = 0.0
@@ -352,6 +354,17 @@ class StateMachine:
         left_key_just_pressed = left_key_current and not self.left_key_one_was_pressed
         left_key_two_just_pressed = left_key_two_current and not self.left_key_two_was_pressed
         left_axis_click_just_pressed = left_axis_click_current and not self.left_axis_click_was_pressed
+
+        # Suppress left key re-trigger after reset_for_ready_epoch until the user
+        # physically releases the left controller key.  Without this, the reset
+        # clears left_key_one_was_pressed to False while the button is still held,
+        # causing an immediate second save_and_reset / discard_and_reset.
+        if getattr(self, "_suppress_left_key_until_release", False):
+            if left_key_current:
+                left_key_just_pressed = False
+                left_key_two_just_pressed = False
+            else:
+                self._suppress_left_key_until_release = False
 
         # Debug: print button states
         if left_key_current or right_key_current:
@@ -1264,6 +1277,10 @@ class XRobotTeleopToRobot:
         # Send timestamp to redis
         t_action = timestamp_ms
         self.redis_pipeline.set("t_action", t_action)
+        self.redis_pipeline.set(
+            "teleop_state_unitree_g1_with_hands",
+            self.state_machine.get_current_state(),
+        )
 
         # execute the pipeline once
         self.redis_pipeline.execute()

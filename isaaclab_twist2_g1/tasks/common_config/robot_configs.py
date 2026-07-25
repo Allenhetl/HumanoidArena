@@ -11,7 +11,7 @@ import os
 from isaaclab.assets import ArticulationCfg
 from isaaclab.utils import configclass
 from robots.unitree import G129_CFG_WITH_DEX1_BASE_FIX, G129_CFG_WITH_DEX3_BASE_FIX, G129_CFG_WITH_INSPIRE_HAND, \
-    G129_CFG_WITH_DEX1_WHOLEBODY, G129_CFG_WITH_DEX3_WHOLEBODY, G129_CFG_WITH_INSPIRE_WHOLEBODY
+    G129_CFG_WITH_DEX1_WHOLEBODY, G129_CFG_WITH_DEX3_WHOLEBODY, G129_CFG_WITH_INSPIRE_WHOLEBODY, G129_CFG_MIMIC_LITE
 from typing import Optional, Dict, Tuple, Literal
 
 
@@ -202,6 +202,11 @@ class G129dofRobotBaseCfg:
         # use the default base configuration
         if base_config is None:
             base_config = G129_CFG_WITH_DEX1_BASE_FIX
+
+        # MimicLite-only: switch to BeyondMimic-aligned PD cfg when explicitly requested.
+        # This keeps SONIC/TWIST2 defaults untouched.
+        if os.environ.get("MIMIC_LITE_ROBOT_CFG", "0") == "1":
+            base_config = G129_CFG_MIMIC_LITE
 
         robot_usd_override = os.environ.get("ROBOT_USD_OVERRIDE")
         if robot_usd_override:

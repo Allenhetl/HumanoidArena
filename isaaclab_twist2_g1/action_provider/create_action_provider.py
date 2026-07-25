@@ -9,6 +9,9 @@ def create_action_provider(env,args):
     elif args.action_source == "sonic_wholebody":
         from action_provider.action_provider_sonic import SonicActionProvider
         return SonicActionProvider(env=env, args_cli=args)
+    elif args.action_source == "mimic_lite_wholebody":
+        from action_provider.action_provider_mimic_lite import MimicLiteActionProvider
+        return MimicLiteActionProvider(env=env, args_cli=args)
     elif args.action_source == "replay":
         if args.gmt_backend == "twist2":
             from action_provider.action_provider_wh_twist2 import TWIST2ActionProvider
@@ -16,6 +19,9 @@ def create_action_provider(env,args):
         elif args.gmt_backend == "sonic":
             from action_provider.action_provider_sonic import SonicActionProvider
             return SonicActionProvider(env=env, args_cli=args)
+        elif args.gmt_backend == "mimic_lite":
+            from action_provider.action_provider_mimic_lite import MimicLiteActionProvider
+            return MimicLiteActionProvider(env=env, args_cli=args)
         from action_provider.action_provider_replay import FileActionProviderReplay
         return FileActionProviderReplay(env=env,args_cli=args)
     else:

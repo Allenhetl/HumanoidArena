@@ -182,6 +182,7 @@ def _resolve_sonic_heading_align_quat(
     data: np.lib.npyio.NpzFile,
     *,
     num_frames: int,
+    ref_quat_keys: tuple[str, ...] = ("human_body_quat_w", "human_raw_body_quat_w"),
 ) -> np.ndarray | None:
     if "anchor_heading_align_quat_wxyz" in data:
         align_quat = np.asarray(data["anchor_heading_align_quat_wxyz"], dtype=np.float32)
@@ -206,17 +207,29 @@ def _resolve_sonic_heading_align_quat(
             align_quat[~use_align.astype(bool)] = identity
         return align_quat.astype(np.float32)
 
-    if "human_body_quat_w" in data and "robot_root_orientation" in data:
-        ref_quat = np.asarray(data["human_body_quat_w"], dtype=np.float32)
+    if "robot_root_orientation" in data:
         base_quat = np.asarray(data["robot_root_orientation"], dtype=np.float32)
-        if ref_quat.shape != (num_frames, 4) or base_quat.shape != (num_frames, 4):
+        if base_quat.shape == (num_frames, 4):
+            ref_quat = None
+            ref_key_used = None
+            for key in ref_quat_keys:
+                if key in data:
+                    candidate = np.asarray(data[key], dtype=np.float32)
+                    if candidate.shape == (num_frames, 4):
+                        ref_quat = candidate
+                        ref_key_used = key
+                        break
+            if ref_quat is not None:
+                yaw_delta = yaw_from_quat_wxyz(base_quat[0]) - yaw_from_quat_wxyz(ref_quat[0])
+                align0 = quat_from_roll_pitch_yaw_wxyz(roll=0.0, pitch=0.0, yaw=yaw_delta)
+                return np.repeat(align0.reshape(1, 4), num_frames, axis=0).astype(np.float32)
             raise ValueError(
-                "Unexpected quaternion shapes for fallback heading align: "
-                f"human_body_quat_w={ref_quat.shape} robot_root_orientation={base_quat.shape}"
+                "Found robot_root_orientation but no reference body quaternion among "
+                f"{ref_quat_keys} with shape ({num_frames}, 4)"
             )
-        yaw_delta = yaw_from_quat_wxyz(base_quat[0]) - yaw_from_quat_wxyz(ref_quat[0])
-        align0 = quat_from_roll_pitch_yaw_wxyz(roll=0.0, pitch=0.0, yaw=yaw_delta)
-        return np.repeat(align0.reshape(1, 4), num_frames, axis=0).astype(np.float32)
+        raise ValueError(
+            f"Unexpected robot_root_orientation shape: {base_quat.shape}, expected {(num_frames, 4)}"
+        )
     return None
 
 
