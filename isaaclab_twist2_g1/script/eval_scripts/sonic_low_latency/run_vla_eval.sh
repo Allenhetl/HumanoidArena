@@ -7,6 +7,11 @@ ISAACLAB_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 source "${ISAACLAB_ROOT}/script/common/runtime_paths.sh"
 export ROBOT_USD_OVERRIDE="${ISAACLAB_ROOT}/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2.usd"
 ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/football_single_sonic.yaml}"
+if [[ "${ENV_CONFIG_YAML}" != /* ]]; then
+  ENV_CONFIG_YAML="${ISAACLAB_ROOT}/${ENV_CONFIG_YAML}"
+fi
+[[ -f "${ENV_CONFIG_YAML}" ]] || { echo "Error: env config not found: ${ENV_CONFIG_YAML}" >&2; exit 2; }
+ENV_CONFIG_YAML="$(cd "$(dirname "${ENV_CONFIG_YAML}")" && printf '%s/%s' "$PWD" "$(basename "${ENV_CONFIG_YAML}")")"
 ISAAC_DEVICE="cpu"
 HEADLESS=1
 MAX_STEPS=1000

@@ -13,6 +13,11 @@ MODEL_ROOT
 MODEL_GLOB
 NUM_WORKERS
 RESULTS_TAG_PREFIX
+EVAL_BACKENDS
+EVAL_TASKS
+RUN_TIMESTAMP
+RESUME_LATEST
+DRY_RUN
 ```
 
 Typical `TEST_MODE` values include:
@@ -29,7 +34,11 @@ Typical `EVAL_BACKEND` values include:
 ```text
 twist2
 sonic
+mimic_lite
+sonic_low_latency
 ```
+
+`sonic_low_latency` is a SONIC execution variant that uses the low-latency encoder observation layout. It is currently supported for evaluation only. MimicLite supports both teleoperation/data collection and evaluation.
 
 ## 2. Checkpoint Layout
 
@@ -83,6 +92,24 @@ EVAL_SEEDS="0 1 2" \
 bash isaaclab_twist2_g1/script/eval_scripts/twist2/run_vla_eval.sh
 ```
 
+MimicLite:
+
+```bash
+MODEL_PATH=/path/to/checkpoint/pretrained_model \
+EVAL_SEEDS="0 1 2" \
+bash isaaclab_twist2_g1/script/eval_scripts/mimic_lite/run_vla_eval.sh
+```
+
+SONIC low-latency:
+
+```bash
+MODEL_PATH=/path/to/checkpoint/pretrained_model \
+EVAL_SEEDS="0 1 2" \
+bash isaaclab_twist2_g1/script/eval_scripts/sonic_low_latency/run_vla_eval.sh
+```
+
+The low-latency runner loads `GR00T-WholeBodyControl/gear_sonic_deploy/policy/low_latency/model_encoder.onnx` and `model_decoder.onnx` by default. Override `SONIC_ENCODER_PATH` and `SONIC_DECODER_PATH` when the artifacts live elsewhere.
+
 `MODEL_PATH` can also be the parent checkpoint directory when it contains a `pretrained_model/` subdirectory. Use `RESULTS_DIR` to override the output directory and `REPEATS_PER_SEED` to repeat each seed. For PI0.5 checkpoints, use `script/eval_scripts/sonic_pi05/run_vla_eval.sh` or `script/eval_scripts/twist2_pi05/run_vla_eval.sh` with the same variables.
 
 Parallel variants:
@@ -90,6 +117,8 @@ Parallel variants:
 ```bash
 bash isaaclab_twist2_g1/script/eval_scripts/sonic/run_vla_eval_parallel.sh
 bash isaaclab_twist2_g1/script/eval_scripts/twist2/run_vla_eval_parallel.sh
+bash isaaclab_twist2_g1/script/eval_scripts/mimic_lite/run_vla_eval_parallel.sh
+bash isaaclab_twist2_g1/script/eval_scripts/sonic_low_latency/run_vla_eval_parallel.sh
 ```
 
 PI0.5 variants are under:
@@ -192,6 +221,8 @@ batch_test_scripts/batch_1_test_v31_twist2.sh
 batch_test_scripts/batch_1_test_v31_merage.sh
 batch_test_scripts/batch_pi05_v31_sonic.sh
 batch_test_scripts/batch_pi05_v31_twist2.sh
+batch_test_scripts/batch_eval_mimic_lite_v3_1.sh
+batch_test_scripts/batch_eval_0529_v3_1.sh
 ```
 
 Use these maintained entrypoints as launch templates and pass the downloaded checkpoint root through `MODEL_ROOT_BASE`. Override `SMALL_MODEL_ROOT`, `MERGE_MODEL_ROOT`, or `PI05_MODEL_ROOT` only when using a custom layout.
@@ -207,6 +238,48 @@ NUM_WORKERS=2 \
 bash isaaclab_twist2_g1/batch_test_scripts/batch_pi05_v31_sonic.sh
 ```
 
+### MimicLite V3.1 campaign
+
+`batch_eval_mimic_lite_v3_1.sh` evaluates the task-specific MimicLite open-door and football checkpoints. Its default backend is `mimic_lite`; set `EVAL_BACKENDS` to run the same campaign across multiple execution backends:
+
+```bash
+OPEN_DOOR_CHECKPOINTS_DIR=/path/to/open_door/checkpoints \
+FOOTBALL_CHECKPOINTS_DIR=/path/to/football/checkpoints \
+EVAL_BACKENDS="mimic_lite sonic_low_latency sonic twist2" \
+EVAL_TASKS="open_door football" \
+NUM_WORKERS=2 \
+bash isaaclab_twist2_g1/batch_test_scripts/batch_eval_mimic_lite_v3_1.sh
+```
+
+Preview the model selection, backend-specific YAML, GMT relation, and output paths without creating result directories:
+
+```bash
+DRY_RUN=1 \
+EVAL_BACKENDS="mimic_lite sonic_low_latency" \
+bash isaaclab_twist2_g1/batch_test_scripts/batch_eval_mimic_lite_v3_1.sh
+```
+
+### 0529 cross-backend campaign
+
+`batch_eval_0529_v3_1.sh` discovers the configured Twist2- and SONIC-trained 0529 policies and evaluates them on one or more backends. SONIC low-latency is the default execution backend:
+
+```bash
+CKPT_ROOT=/path/to/0529_v3-1_infer_ckpts/small \
+EVAL_BACKENDS="sonic_low_latency mimic_lite twist2" \
+NUM_WORKERS=2 \
+bash isaaclab_twist2_g1/batch_test_scripts/batch_eval_0529_v3_1.sh
+```
+
+The campaign manifest records both `training_gmt` and normalized `execution_gmt`. `sonic_low_latency` is normalized to `sonic` when deriving `in_gmt` versus `cross_gmt`, while `execution_backend` retains the low-latency variant name.
+
+### Campaign identity and resume
+
+- Set `RUN_TIMESTAMP` to use an exact shared run ID across all selected backends.
+- Set `RESUME_LATEST=1` without `RUN_TIMESTAMP` to resume the latest campaign only when every selected backend has the same latest run ID.
+- Keep `RESUME_LATEST=0` for a new timestamped campaign.
+- Use `SEEDS_OVERRIDE`, `REPEATS_PER_SEED`, and `MAX_STEPS` to override the base-test defaults.
+- Use `OPEN_DOOR_ENV_CONFIG_YAML` or `FOOTBALL_ENV_CONFIG_YAML` only for deliberate task-specific configuration overrides.
+
 ## 7. Results
 
 Evaluation outputs are local runtime artifacts and should stay out of git:
@@ -216,6 +289,17 @@ isaaclab_twist2_g1/script/eval_scripts/*/eval_results/
 lerobot/results/
 lerobot/outputs/
 ```
+
+Campaign outputs use the backend-first layout:
+
+```text
+isaaclab_twist2_g1/script/eval_scripts/<execution_backend>/eval_results/
+  <campaign_id>__<timestamp>/
+    campaign_manifest.json
+    <task>__<policy_id>__step_<checkpoint>/
+```
+
+Every backend root in a multi-backend run receives the same complete `campaign_manifest.json`. It records all planned stages, model paths, backend-specific test YAMLs, training/execution GMTs, controller resources, seeds, repeats, max steps, Git commit, and per-stage status.
 
 Before reporting benchmark results, keep the following together:
 

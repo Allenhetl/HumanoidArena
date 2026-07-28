@@ -1,6 +1,6 @@
 # HumanoidArena
 
-HumanoidArena is a humanoid manipulation and whole-body control benchmark built around teleoperation, replay, simulation evaluation, and LeRobot-compatible policy training. The repository provides the TWIST2 and SONIC control pipelines, Isaac Lab environments, data conversion utilities, and evaluation scripts used by the project.
+HumanoidArena is a humanoid manipulation and whole-body control benchmark built around teleoperation, replay, simulation evaluation, and LeRobot-compatible policy training. The repository provides TWIST2, SONIC, and MimicLite control pipelines, Isaac Lab environments, data conversion utilities, and evaluation scripts used by the project.
 
 <p align="center">
   <a href="https://humanoidarena.github.io/">Project Page</a> |
@@ -18,11 +18,20 @@ HumanoidArena is a humanoid manipulation and whole-body control benchmark built 
 
 HumanoidArena focuses on full-body humanoid interaction tasks with reproducible data collection and policy evaluation. The current release includes:
 
-- TWIST2 and SONIC teleoperation entrypoints.
+- TWIST2, SONIC, and MimicLite teleoperation entrypoints.
 - Isaac Lab environments for live control, replay, rerecording, and VLA evaluation.
 - NPZ recording and multicam rerecording pipelines.
 - LeRobot-compatible data and model release links.
 - Batch evaluation scripts for vision execution and semantic tests.
+
+Supported workflows currently differ by backend:
+
+| Backend | Teleoperation / data collection | VLA evaluation | Notes |
+| --- | --- | --- | --- |
+| TWIST2 | Supported | Supported | Maintained baseline backend. |
+| SONIC | Supported | Supported | Use the canonical 29-joint publishing route for current V3.1 data collection. |
+| MimicLite | Supported | Supported | Supports live teleoperation recording and in-GMT/cross-GMT evaluation. |
+| SONIC low-latency | Not yet released as a supported collection workflow | Supported | Evaluation-only support for the low-latency SONIC encoder/decoder variant. |
 
 ## Release Plan
 
@@ -77,20 +86,7 @@ bash isaaclab_twist2_g1/tools/setup_humanoidarena_envs.sh --dry-run
 
 After reviewing the generated commands, follow [Environment setup](docs/04_environment_setup.md) for the full installation path.
 
-For live teleoperation and recording:
-
-```bash
-cd TWIST2
-bash teleop.sh
-```
-
-Then launch the simulator-side backend from the repository root:
-
-```bash
-bash isaaclab_twist2_g1/run_twist2.sh
-# or
-bash isaaclab_twist2_g1/run_sonic.sh
-```
+HumanoidArena supports PICO/XRobotToolkit whole-body and hand tracking for TWIST2, SONIC, and MimicLite teleoperation. SONIC low-latency is currently evaluation-only. See [Teleoperation and recording](docs/01_teleoperation.md) for tracker preparation, server/runtime pairings, task configuration, and recording commands. Do not use the legacy `cd TWIST2 && bash teleop.sh` path.
 
 For replay:
 
@@ -156,9 +152,17 @@ bash isaaclab_twist2_g1/script/eval_scripts/sonic/run_vla_eval.sh
 MODEL_PATH=/path/to/checkpoint/pretrained_model \
 EVAL_SEEDS="0 1 2" \
 bash isaaclab_twist2_g1/script/eval_scripts/twist2/run_vla_eval.sh
+
+MODEL_PATH=/path/to/checkpoint/pretrained_model \
+EVAL_SEEDS="0 1 2" \
+bash isaaclab_twist2_g1/script/eval_scripts/mimic_lite/run_vla_eval.sh
+
+MODEL_PATH=/path/to/checkpoint/pretrained_model \
+EVAL_SEEDS="0 1 2" \
+bash isaaclab_twist2_g1/script/eval_scripts/sonic_low_latency/run_vla_eval.sh
 ```
 
-`MODEL_PATH` may also point to a checkpoint directory that contains `pretrained_model/`. For PI0.5 checkpoints, use the matching scripts under `script/eval_scripts/sonic_pi05/` or `script/eval_scripts/twist2_pi05/`.
+`MODEL_PATH` may also point to a checkpoint directory that contains `pretrained_model/`. For PI0.5 checkpoints, use the matching scripts under `script/eval_scripts/sonic_pi05/` or `script/eval_scripts/twist2_pi05/`. SONIC low-latency is currently supported for evaluation only; it is not a released data-collection backend.
 
 Batch evaluation entrypoints include:
 
@@ -168,6 +172,8 @@ isaaclab_twist2_g1/batch_test_scripts/batch_1_test_v31_twist2.sh
 isaaclab_twist2_g1/batch_test_scripts/batch_1_test_v31_merage.sh
 isaaclab_twist2_g1/batch_test_scripts/batch_pi05_v31_sonic.sh
 isaaclab_twist2_g1/batch_test_scripts/batch_pi05_v31_twist2.sh
+isaaclab_twist2_g1/batch_test_scripts/batch_eval_mimic_lite_v3_1.sh
+isaaclab_twist2_g1/batch_test_scripts/batch_eval_0529_v3_1.sh
 ```
 
 See [Evaluation](docs/03_evaluation.md) for vision execution, semantic evaluation, and batch launch examples.

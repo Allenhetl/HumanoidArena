@@ -651,10 +651,10 @@ class XRobotTeleopToRobot:
         self.last_qpos = None
         self.last_time = time.time()
         requested_target_fps = int(args.target_fps)
-        if self.target_backend == "sonic_joint29" and requested_target_fps != SONIC_JOINT29_TARGET_FPS:
+        if self.target_backend in {"sonic_joint29", "mimic_lite"} and requested_target_fps != SONIC_JOINT29_TARGET_FPS:
             print(
-                f"[sonic_joint29] overriding target_fps {requested_target_fps} -> "
-                f"{SONIC_JOINT29_TARGET_FPS} to match SONIC live teleop cadence"
+                f"[{self.target_backend}] overriding target_fps {requested_target_fps} -> "
+                f"{SONIC_JOINT29_TARGET_FPS} to match the joint29 live teleop cadence"
             )
             requested_target_fps = SONIC_JOINT29_TARGET_FPS
         self.target_fps = requested_target_fps
@@ -1214,7 +1214,7 @@ class XRobotTeleopToRobot:
             }
             self.redis_pipeline.set("human_info_unitree_g1_with_hands", json.dumps(human_info))
 
-        if self.target_backend == "sonic_joint29":
+        if self.target_backend in {"sonic_joint29", "mimic_lite"}:
             gmr_qpos_to_send = self._select_gmr_qpos_to_send(qpos)
             body_quat_override = None
             if (
@@ -1536,7 +1536,7 @@ def parse_arguments():
     )
     parser.add_argument(
         "--target_backend",
-        choices=["twist2", "sonic_joint29"],
+        choices=["twist2", "sonic_joint29", "mimic_lite"],
         default="twist2",
         help="Select which Isaac input-ready/backend route this teleop publisher should target.",
     )
