@@ -12,6 +12,10 @@ import torch
 from action_provider.action_base import ActionProvider, ReplayComplete
 from action_provider.mimic_lite_runtime import MIMIC_LITE_JOINT_ORDER, MimicLitePolicyRuntime
 from action_provider.recording_common import AsyncEpisodeRecorder
+from action_provider.recording_control import (
+    get_recording_control_identity,
+    should_accept_recording_control,
+)
 from action_provider.reset_control import (
     GMR_BODY_POS_KEY,
     GMR_BODY_QUAT_W_KEY,
@@ -475,6 +479,7 @@ class MimicLiteActionProvider(ActionProvider):
         self._episode_id = 0
         self._latest_recording_control = None
         self._latest_recording_control_sequence = -1
+        self._latest_recording_control_identity = None
         self._raw_controller_data = None
         self._command_edge_this_frame = "none"
         self._default_full_pos_t = self.env.scene["robot"].data.default_joint_pos.clone().squeeze(0).to(self.device)
@@ -1001,7 +1006,6 @@ class MimicLiteActionProvider(ActionProvider):
             self._pending_save_jobs = 0
         self._torque_mode_configured = False
         self._latest_recording_control = None
-        self._latest_recording_control_sequence = -1
         self._raw_controller_data = None
         self._command_edge_this_frame = "none"
         if self._replay_enabled:
@@ -1559,15 +1563,20 @@ class MimicLiteActionProvider(ActionProvider):
                 self._latest_recording_control = json.loads(payload)
                 sequence = int(self._latest_recording_control.get("sequence", -1))
                 command = str(self._latest_recording_control.get("command", "none"))
-                self._recording_active = bool(self._latest_recording_control.get("active", False))
-                if (
-                    not self._waiting_for_reset_complete
-                    and command != "none"
-                    and sequence != self._latest_recording_control_sequence
+                recording_active = bool(self._latest_recording_control.get("active", False))
+                identity = get_recording_control_identity(self._latest_recording_control)
+                if should_accept_recording_control(
+                    self._latest_recording_control,
+                    last_identity=self._latest_recording_control_identity,
+                    waiting_for_reset_complete=self._waiting_for_reset_complete,
                 ):
                     self._latest_recording_control_sequence = sequence
+                    self._latest_recording_control_identity = identity
                     self._command_edge_this_frame = command
                     self._recording_command = command
+                    self._recording_active = recording_active
+                elif command == "none":
+                    self._recording_active = recording_active
             except Exception:
                 self._latest_recording_control = None
 
