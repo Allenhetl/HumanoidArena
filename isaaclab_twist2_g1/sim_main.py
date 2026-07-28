@@ -60,7 +60,7 @@ parser.add_argument(
     "--gmt_backend",
     type=str,
     default="",
-    choices=["", "twist2", "sonic", "sonic_joint29", "mimic_lite"],
+    choices=["", "twist2", "sonic", "sonic_joint29", "sonic_low_latency", "mimic_lite"],
     help="Optional GMT backend alias",
 )
 parser.add_argument(
@@ -313,6 +313,18 @@ from layeredcontrol.robot_control_system import (
 )
 
 from dds.reset_pose_dds import *
+
+# Bind MimicLite-aligned PD actuator config (G129_CFG_MIMIC_LITE) to gmt_backend=mimic_lite.
+# This must happen BEFORE `import tasks` because task env_cfg class attributes
+# (robot: ArticulationCfg = G1RobotPresets.g1_29dof_dex3_wholebody()) are evaluated at
+# module-import time, and get_base_config() reads MIMIC_LITE_ROBOT_CFG then.
+# Training-side PD from mimic-lite/assets/g1.py:
+#   stiffness = armature * (10*2*pi)^2, damping = 2*2*armature*(10*2*pi), friction=0.01
+# Other backends (twist2/sonic/sonic_low_latency) keep G129_CFG_WITH_DEX3_WHOLEBODY.
+if getattr(args_cli, "gmt_backend", "") == "mimic_lite" or getattr(args_cli, "action_source", "") == "mimic_lite_wholebody":
+    os.environ["MIMIC_LITE_ROBOT_CFG"] = "1"
+    print("[sim_main] gmt_backend=mimic_lite -> MIMIC_LITE_ROBOT_CFG=1 (BeyondMimic PD actuator config)")
+
 import tasks
 from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
 
@@ -348,12 +360,16 @@ def _normalize_control_routing(args_cli):
         route_map = {
             ("pico_twist2", "twist2"): "twist2_wholebody",
             ("pico_sonic", "sonic"): "sonic_wholebody",
+            ("pico_sonic", "sonic_low_latency"): "sonic_wholebody",
             ("pico_twist2", "sonic_joint29"): "sonic_wholebody",
             ("pico_mimic_lite", "mimic_lite"): "mimic_lite_wholebody",
             ("vla", "twist2"): "twist2_wholebody",
             ("vla", "sonic"): "sonic_wholebody",
+            ("vla", "sonic_low_latency"): "sonic_wholebody",
+            ("vla", "mimic_lite"): "mimic_lite_wholebody",
             ("replay", "twist2"): "twist2_wholebody",
             ("replay", "sonic"): "sonic_wholebody",
+            ("replay", "sonic_low_latency"): "sonic_wholebody",
             ("replay", "sonic_joint29"): "sonic_wholebody",
             ("replay", "mimic_lite"): "mimic_lite_wholebody",
         }
@@ -377,7 +393,7 @@ def _normalize_control_routing(args_cli):
         args_cli.input_source = args_cli.input_source or "replay"
         if args_cli.gmt_backend == "twist2":
             args_cli.action_source = "twist2_wholebody"
-        elif args_cli.gmt_backend == "sonic":
+        elif args_cli.gmt_backend in ("sonic", "sonic_low_latency"):
             args_cli.action_source = "sonic_wholebody"
         elif args_cli.gmt_backend == "sonic_joint29":
             args_cli.action_source = "sonic_wholebody"
@@ -526,6 +542,8 @@ def _resolve_input_guard_backend(args_cli):
     if getattr(args_cli, "gmt_backend", "") == "twist2" or getattr(args_cli, "action_source", "") == "twist2_wholebody":
         return "twist2"
     if getattr(args_cli, "gmt_backend", "") == "sonic" or getattr(args_cli, "action_source", "") == "sonic_wholebody":
+        if getattr(args_cli, "gmt_backend", "") == "sonic_low_latency":
+            return "sonic_low_latency"
         return "sonic"
     if getattr(args_cli, "gmt_backend", "") == "sonic_joint29":
         return "sonic_joint29"
@@ -881,7 +899,7 @@ def main():
         print(f"Input source: {args_cli.input_source or 'legacy'}")
         print(f"GMT backend: {args_cli.gmt_backend or 'legacy'}")
     if args_cli.input_source == "vla":
-        if args_cli.gmt_backend and args_cli.gmt_backend not in {"twist2", "sonic", "sonic_joint29"}:
+        if args_cli.gmt_backend and args_cli.gmt_backend not in {"twist2", "sonic", "sonic_joint29", "sonic_low_latency", "mimic_lite"}:
             raise ValueError("input_source=vla currently only supports --gmt_backend twist2, sonic, or sonic_joint29")
         if not args_cli.lerobot_server_url and not args_cli.lerobot_policy_path:
             raise ValueError("--lerobot_server_url or --lerobot_policy_path is required when using input_source=vla")

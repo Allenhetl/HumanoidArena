@@ -219,18 +219,14 @@ def _run_episode(
         str(episode_seed),
         "--max_steps",
         str(args.max_steps),
-        "--sonic_encoder_path",
-        args.sonic_encoder_path,
-        "--sonic_decoder_path",
-        args.sonic_decoder_path,
+        "--mimic_lite_onnx_path",
+        args.mimic_lite_onnx_path,
+        "--mimic_lite_yaml_path",
+        args.mimic_lite_yaml_path,
         "--gmt_backend",
         args.gmt_backend,
-        "--sonic_vla_root_rot6d_layout",
-        args.sonic_vla_root_rot6d_layout,
-        "--sonic_vla_root_max_delta_deg",
-        str(args.sonic_vla_root_max_delta_deg),
         "--model_path",
-        args.sonic_encoder_path,
+        args.mimic_lite_onnx_path,
         "--lerobot_server_url",
         server_url,
         "--lerobot_server_timeout",
@@ -362,18 +358,14 @@ def _run_episode_batch(
         str(seed),
         "--max_steps",
         str(args.max_steps),
-        "--sonic_encoder_path",
-        args.sonic_encoder_path,
-        "--sonic_decoder_path",
-        args.sonic_decoder_path,
+        "--mimic_lite_onnx_path",
+        args.mimic_lite_onnx_path,
+        "--mimic_lite_yaml_path",
+        args.mimic_lite_yaml_path,
         "--gmt_backend",
         args.gmt_backend,
-        "--sonic_vla_root_rot6d_layout",
-        args.sonic_vla_root_rot6d_layout,
-        "--sonic_vla_root_max_delta_deg",
-        str(args.sonic_vla_root_max_delta_deg),
         "--model_path",
-        args.sonic_encoder_path,
+        args.mimic_lite_onnx_path,
         "--lerobot_server_url",
         server_url,
         "--lerobot_server_timeout",
@@ -649,26 +641,14 @@ def main() -> int:
     parser.add_argument("--step_log_every_n", type=int, default=0)
     parser.add_argument("--verbose_startup", action="store_true", default=False)
     parser.add_argument("--robot_type", type=str, default="unitree_g1_refpose_v3_1")
-    parser.add_argument("--sonic_encoder_path", type=str, required=True)
-    parser.add_argument("--sonic_decoder_path", type=str, required=True)
+    parser.add_argument("--mimic_lite_onnx_path", type=str, required=True)
+    parser.add_argument("--mimic_lite_yaml_path", type=str, required=True)
     parser.add_argument(
         "--gmt_backend",
         type=str,
-        default="sonic",
-        choices=["sonic", "sonic_low_latency"],
-        help="SONIC GMT backend variant: sonic (default 1762-dim) or sonic_low_latency (1247-dim).",
-    )
-    parser.add_argument(
-        "--sonic_vla_root_rot6d_layout",
-        type=str,
-        default="auto",
-        choices=["auto", "row", "col"],
-    )
-    parser.add_argument(
-        "--sonic_vla_root_max_delta_deg",
-        type=float,
-        default=26.0,
-        help="Clamp max root orientation delta per step (degrees). <=0 to disable.",
+        default="mimic_lite",
+        choices=["sonic", "sonic_low_latency", "mimic_lite"],
+        help="GMT backend variant: sonic, sonic_low_latency, or mimic_lite.",
     )
     parser.add_argument("--results_dir", type=str, required=True)
     parser.add_argument("--headless", action="store_true", default=False)

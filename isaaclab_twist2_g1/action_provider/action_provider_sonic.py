@@ -894,6 +894,27 @@ _STEP5_FRAMES = 10
 _STEP5_STRIDE = 5
 _STEP5_HISTORY_LEN = (_STEP5_FRAMES - 1) * _STEP5_STRIDE + 1
 
+# ---------------------------------------------------------------------------
+# SONIC low-latency teleoperation checkpoint variant.
+# Reference: GR00T-WholeBodyControl gear_sonic_deploy/policy/low_latency/
+#   observation_config.yaml
+# Differences vs default release:
+#   - SMPL future-reference frames: 10 -> 4  (200ms -> 80ms lookahead)
+#   - g1/teleop motion future-reference stride: step5 -> step1 (still 10 frames)
+#   - motion_root_z_position* observations removed
+#   - encoder input dim: 1762 -> 1247 (decoder/policy 994 and token 64 unchanged)
+# Concat order (per low_latency/observation_config.yaml):
+#   encoder_mode(4) | mjp_step1(290) | mjv_step1(290) | mao_step1(60) |
+#   mao_single(6)  | mjpl_step1(120)| mjvl_step1(120)| vr3pt_pos(9)  |
+#   vr3pt_orn(12)  | smpl_joints_4(288) | smpl_anchor_4(24) | wrist_4(24) = 1247
+# ---------------------------------------------------------------------------
+_LL_SMPL_FRAMES = 4                       # SMPL future ref: 4 frames (was 10)
+_LL_MOTION_FRAMES = 10                    # g1/teleop motion: still 10 frames
+_LL_MOTION_STRIDE = 1                     # g1/teleop motion: step1 (was step5)
+_LL_MOTION_HISTORY_LEN = (_LL_MOTION_FRAMES - 1) * _LL_MOTION_STRIDE + 1  # = 10
+_LL_ENCODER_DIM = 1247
+_LL_DECODER_DIM = 994                     # unchanged from default
+
 OFFICIAL_WRIST_INDICES = [23, 24, 25, 26, 27, 28]
 OFFICIAL_LOWERBODY_INDICES = [0, 3, 6, 9, 13, 17, 1, 4, 7, 10, 14, 18]
 SMPL_MODE_ACTIVE_BLOCKS = [
@@ -1514,6 +1535,10 @@ class SonicActionProvider(ActionProvider):
         self._gmt_backend = getattr(args_cli, "gmt_backend", "") or ""
         self._use_lerobot_vla = self._input_source == "vla"
         self._sonic_joint29_mode = self._gmt_backend == "sonic_joint29" or self._use_lerobot_vla
+        # SONIC low-latency teleoperation checkpoint variant.
+        # When enabled, the encoder input is assembled per the low_latency
+        # observation_config.yaml (4-frame SMPL, step1 motion, no root_z).
+        self._low_latency = (self._gmt_backend == "sonic_low_latency")
         self._vla_action_format = str(
             getattr(args_cli, "sonic_vla_action_format", os.environ.get("SONIC_VLA_ACTION_FORMAT", "semantic_v3"))
             or "semantic_v3"
@@ -1678,7 +1703,8 @@ class SonicActionProvider(ActionProvider):
         self._latest_recording_control_sequence = -1
         self._raw_pose_payload = {}
         self._latest_pose_payload = {}
-        self._latest_encoder_input = np.zeros((1762,), dtype=np.float32)
+        _enc_dim = _LL_ENCODER_DIM if getattr(self, "_low_latency", False) else 1762
+        self._latest_encoder_input = np.zeros((_enc_dim,), dtype=np.float32)
         self._latest_smpl_joint_window = np.zeros((_STEP1_FRAMES, _N_SMPL_JOINTS, 3), dtype=np.float32)
         self._latest_anchor_window = np.zeros((_STEP1_FRAMES, 6), dtype=np.float32)
         self._latest_wrist_window = np.zeros((_STEP1_FRAMES, len(OFFICIAL_WRIST_INDICES)), dtype=np.float32)
@@ -3891,6 +3917,11 @@ class SonicActionProvider(ActionProvider):
 
     def _get_stream_required_future_span(self) -> int:
         """Return the global-frame future span required by the active encoder mode."""
+        if getattr(self, "_low_latency", False):
+            # Low-latency: g1/teleop use 10-frame step1; SMPL uses 4-frame step1.
+            if self._sonic_joint29_mode:
+                return (_LL_MOTION_FRAMES - 1) * _LL_MOTION_STRIDE * self._stream_frame_step
+            return (_LL_SMPL_FRAMES - 1) * self._stream_frame_step
         if self._sonic_joint29_mode:
             return (_STEP5_FRAMES - 1) * _STEP5_STRIDE * self._stream_frame_step
         return (_STEP1_FRAMES - 1) * self._stream_frame_step
@@ -5101,29 +5132,61 @@ class SonicActionProvider(ActionProvider):
                 reference_joint_window = None
 
             # 拼接所有观察值
-            encoder_input = np.concatenate([
-                encoder_mode,                           # 4
-                motion_joint_pos_step5_full,            # 290
-                motion_joint_vel_step5_full,            # 290
-                motion_root_z_step5,                    # 10
-                motion_root_z,                          # 1
-                motion_anchor_orient,                   # 6
-                motion_anchor_orient_step5_full,        # 60
-                motion_joint_pos_lowerbody_full,        # 120
-                motion_joint_vel_lowerbody_full,        # 120
-                vr_3pt_pos,                             # 9
-                vr_3pt_orn,                             # 12
-                smpl_joints_flat,                       # 720
-                smpl_anchor_orient_flat,                # 60
-                motion_wrist_pos,                       # 60
-            ])[np.newaxis]  # (1, 1762)
+            if getattr(self, "_low_latency", False):
+                # SONIC low-latency teleoperation checkpoint (encoder input = 1247).
+                # Per low_latency/observation_config.yaml:
+                #   - SMPL future-ref windows truncated to 4 frames (80ms lookahead)
+                #   - g1/teleop motion blocks use step1 (10 frames, stride 1)
+                #   - motion_root_z_position* blocks removed
+                #   - motion_anchor_orientation order: multi-frame(60) then single(6)
+                ll_smpl_frames = _LL_SMPL_FRAMES
+                # Truncate SMPL windows from 10 frames down to 4 (take the latest 4).
+                smpl_joint_window_ll = smpl_joint_window[-ll_smpl_frames:]
+                anchor_window_ll = anchor_window[-ll_smpl_frames:]
+                wrist_window_ll = wrist_window[-ll_smpl_frames:]
+                smpl_joints_flat = smpl_joint_window_ll.reshape(-1)            # 288
+                smpl_anchor_orient_flat = anchor_window_ll.reshape(-1)        # 24
+                motion_wrist_pos = wrist_window_ll.reshape(-1)                # 24
+
+                encoder_input = np.concatenate([
+                    encoder_mode,                           # 4
+                    motion_joint_pos_step5_full,            # 290  (g1, step1)
+                    motion_joint_vel_step5_full,            # 290  (g1, step1)
+                    motion_anchor_orient_step5_full,        # 60   (multi-frame, FIRST)
+                    motion_anchor_orient,                   # 6    (single-frame, SECOND)
+                    motion_joint_pos_lowerbody_full,        # 120  (teleop, step1)
+                    motion_joint_vel_lowerbody_full,        # 120  (teleop, step1)
+                    vr_3pt_pos,                             # 9
+                    vr_3pt_orn,                             # 12
+                    smpl_joints_flat,                       # 288  (SMPL, 4-frame)
+                    smpl_anchor_orient_flat,                # 24   (SMPL, 4-frame)
+                    motion_wrist_pos,                       # 24   (SMPL, 4-frame)
+                ])[np.newaxis]  # (1, 1247)
+            else:
+                encoder_input = np.concatenate([
+                    encoder_mode,                           # 4
+                    motion_joint_pos_step5_full,            # 290
+                    motion_joint_vel_step5_full,            # 290
+                    motion_root_z_step5,                    # 10
+                    motion_root_z,                          # 1
+                    motion_anchor_orient,                   # 6
+                    motion_anchor_orient_step5_full,        # 60
+                    motion_joint_pos_lowerbody_full,        # 120
+                    motion_joint_vel_lowerbody_full,        # 120
+                    vr_3pt_pos,                             # 9
+                    vr_3pt_orn,                             # 12
+                    smpl_joints_flat,                       # 720
+                    smpl_anchor_orient_flat,                # 60
+                    motion_wrist_pos,                       # 60
+                ])[np.newaxis]  # (1, 1762)
             self._latest_encoder_input = encoder_input[0].astype(np.float32, copy=True)
             self._latest_smpl_joint_window = smpl_joint_window.astype(np.float32, copy=True)
             self._latest_anchor_window = anchor_window.astype(np.float32, copy=True)
             self._latest_wrist_window = wrist_window.astype(np.float32, copy=True)
 
             if do_log:
-                print(f"[SONIC] Encoder input shape: {encoder_input.shape}, expected: (1, 1762)")
+                _ll_exp = 1247 if getattr(self, "_low_latency", False) else 1762
+                print(f"[SONIC] Encoder input shape: {encoder_input.shape}, expected: (1, {_ll_exp})")
                 print(f"[SONIC] Encoder input dtype: {encoder_input.dtype}")
                 print(f"[SONIC] Encoder input range: [{encoder_input.min():.4f}, {encoder_input.max():.4f}]")
                 if self._sonic_joint29_mode:

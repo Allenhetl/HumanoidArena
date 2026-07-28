@@ -38,6 +38,27 @@ try:
 except ImportError:
     redis = None
 
+# VLA support (aligned with SonicActionProvider VLA pipeline)
+from collections import deque
+from action_provider.lerobot_vla_http_client import LeRobotVLAHttpClient
+from action_provider.vla_robot_current_local_runtime_v3 import (
+    UnifiedRobotCurrentLocalActionRuntimeV3,
+    build_sonic_joint29_payload_v3,
+    build_vla_rotlocal_v3_observation_state,
+    VLA_ROBOT_CURRENT_LOCAL_V3_ACTION_DIM as SONIC_VLA_ACTION_DIM,
+    VLA_ROBOT_CURRENT_LOCAL_V3_STATE_DIM as SONIC_VLA_STATE_DIM,
+)
+from action_provider.vla_smpl_runtime import (
+    quat_from_roll_pitch_yaw_wxyz,
+    quat_mul_wxyz,
+    quat_normalize_wxyz,
+    quat_to_rot6d_wxyz,
+    rot6d_to_quat_wxyz_with_layout,
+    yaw_from_quat_wxyz,
+)
+from pico_server.data_utils.params import DEFAULT_HAND_POSE
+from action_provider.action_provider_sonic import SONIC_HAND_POSE_ROBOT_NAME
+
 
 PROJECT_ROOT = Path(os.environ.get("PROJECT_ROOT", Path(__file__).resolve().parents[1]))
 REPO_ROOT = PROJECT_ROOT.parent
@@ -323,6 +344,54 @@ class MimicLiteActionProvider(ActionProvider):
         self._startup_blend_sec = float(os.environ.get("MIMIC_LITE_STARTUP_BLEND_SEC", "0") or 0.0)
         self._frame_count = 0
         self.task_name = getattr(args_cli, "task", "mimic_lite")
+        # --- VLA support (aligned with SonicActionProvider) ---
+        self._input_source = getattr(args_cli, "input_source", "") or ""
+        self._gmt_backend = getattr(args_cli, "gmt_backend", "") or ""
+        self._use_lerobot_vla = self._input_source == "vla"
+        self._enable_robot = str(getattr(args_cli, "robot_type", "") or "")
+        self._lerobot_server_url = getattr(args_cli, "lerobot_server_url", "") or ""
+        self._lerobot_server_timeout = float(getattr(args_cli, "lerobot_server_timeout", 5.0))
+        self._lerobot_server_verify_ssl = bool(getattr(args_cli, "lerobot_server_verify_ssl", False))
+        self._lerobot_policy = None
+        self._lerobot_preprocessor = None
+        self._lerobot_postprocessor = None
+        self._lerobot_predict_action = None
+        self._lerobot_device = None
+        self._lerobot_http_client = None
+        self._lerobot_vla_runtime = UnifiedRobotCurrentLocalActionRuntimeV3(
+            root_rot6d_layout="auto",
+            max_root_delta_deg=26.0,
+        )
+        self._vla_initial_robot_quat_wxyz = None
+        # Yaw calibration for mimic_lite VLA data convention mismatch.
+        # mimic_lite training data has state[0:6] and action[3:9]/[0:2] with a fixed
+        # +yaw(robot_reset) offset (raw world frame) instead of heading-canonicalized (yaw=0).
+        # This injects +calib to state and -calib to action to match the training distribution.
+        # Default 0.0 = off (Convention A). Set to 90.0 for mimic_lite data trained VLA.
+        self._vla_yaw_calib_deg = float(os.environ.get("VLA_MIMICLITE_YAW_CALIB_DEG", "0.0") or "0.0")
+        self._vla_yaw_calib_rad = float(np.deg2rad(self._vla_yaw_calib_deg)) if abs(self._vla_yaw_calib_deg) > 1e-6 else 0.0
+        self._vla_yaw_calib_quat_wxyz = (
+            quat_from_roll_pitch_yaw_wxyz(0.0, 0.0, self._vla_yaw_calib_rad)
+            if abs(self._vla_yaw_calib_deg) > 1e-6
+            else None
+        )
+        self._vla_yaw_calib_quat_inv_wxyz = (
+            quat_from_roll_pitch_yaw_wxyz(0.0, 0.0, -self._vla_yaw_calib_rad)
+            if abs(self._vla_yaw_calib_deg) > 1e-6
+            else None
+        )
+        self._lerobot_hand_binary_threshold = float(getattr(args_cli, "lerobot_gripper_threshold", 0.5))
+        self._lerobot_action_chunk_queue = deque()
+        self._latest_vla_action = None
+        # Replay state early init (needed before VLA/replay mutual-exclusion check below).
+        self._replay_file = getattr(args_cli, "replay_file", "") or ""
+        self._replay_mode = self._normalize_replay_mode(getattr(args_cli, "replay_mode", "inference_replay"))
+        self._replay_loop = bool(getattr(args_cli, "replay_loop", False))
+        self._replay_enabled = bool(self._replay_file)
+        self._record_during_replay = bool(getattr(args_cli, "record_during_replay", False))
+        self._exit_when_replay_complete = bool(getattr(args_cli, "exit_when_replay_complete", False))
+        if self._use_lerobot_vla and self._replay_enabled:
+            raise ValueError("[MimicLiteActionProvider] input_source=vla and replay_file are mutually exclusive")
 
         onnx_path = getattr(args_cli, "mimic_lite_onnx_path", "") or str(DEFAULT_MIMIC_LITE_ONNX)
         yaml_path = getattr(args_cli, "mimic_lite_yaml_path", "") or str(DEFAULT_MIMIC_LITE_YAML)
@@ -336,7 +405,13 @@ class MimicLiteActionProvider(ActionProvider):
         )
         self._setup_joint_mapping()
         self._setup_hand_interfaces()
-        self._setup_redis()
+        if not self._use_lerobot_vla:
+            self._setup_redis()
+        # Hand target buffers (aligned with SonicActionProvider, needed by VLA path).
+        self._left_hand_target = np.zeros(7, dtype=np.float32)
+        self._right_hand_target = np.zeros(7, dtype=np.float32)
+        self._left_hand_binary_state = False
+        self._right_hand_binary_state = False
         self._last_ref_joint_pos = self.runtime.default_joint_pos.copy()
         self._last_ref_joint_vel = np.zeros((29,), dtype=np.float32)
         robot = self.env.scene["robot"].data
@@ -405,12 +480,8 @@ class MimicLiteActionProvider(ActionProvider):
         self._default_full_pos_t = self.env.scene["robot"].data.default_joint_pos.clone().squeeze(0).to(self.device)
 
         # Replay state (aligned with SONIC/TWIST2 replay support).
-        self._replay_file = getattr(args_cli, "replay_file", "") or ""
-        self._replay_mode = self._normalize_replay_mode(getattr(args_cli, "replay_mode", "inference_replay"))
-        self._replay_loop = bool(getattr(args_cli, "replay_loop", False))
-        self._replay_enabled = bool(self._replay_file)
-        self._record_during_replay = bool(getattr(args_cli, "record_during_replay", False))
-        self._exit_when_replay_complete = bool(getattr(args_cli, "exit_when_replay_complete", False))
+        # NOTE: _replay_file/_replay_mode/_replay_loop/_replay_enabled/_record_during_replay/
+        # _exit_when_replay_complete were already initialized early (before the VLA check above).
         self._replay_body_targets = None
         self._replay_commands = None
         self._replay_policies = None
@@ -432,6 +503,9 @@ class MimicLiteActionProvider(ActionProvider):
             self._setup_local_replay()
         # Align with SONIC: only auto-start recording in live mode or when record_during_replay is set
         self._should_start_recording_on_first_call = (not self._replay_enabled) or self._record_during_replay
+
+        if self._use_lerobot_vla:
+            self._setup_lerobot_vla(args_cli)
 
         print(
             f"[MimicLiteActionProvider] ready redis={self.redis_host}:{self.redis_port} "
@@ -589,6 +663,260 @@ class MimicLiteActionProvider(ActionProvider):
         self._redis_client.ping()
         self._redis_control_client.ping()
 
+    # ==================================================================
+    # VLA support methods (aligned with SonicActionProvider)
+    # ==================================================================
+
+    def _setup_lerobot_vla(self, args_cli) -> None:
+        if self._lerobot_server_url:
+            self._lerobot_http_client = LeRobotVLAHttpClient(
+                base_url=self._lerobot_server_url,
+                timeout_s=self._lerobot_server_timeout,
+                verify_ssl=self._lerobot_server_verify_ssl,
+            )
+            print(
+                f"[MimicLiteActionProvider] LeRobot VLA remote client enabled: "
+                f"url={self._lerobot_server_url} verify_ssl={self._lerobot_server_verify_ssl}"
+            )
+            return
+        lerobot_policy_path = Path(getattr(args_cli, "lerobot_policy_path", "")).expanduser().resolve()
+        if not lerobot_policy_path.is_dir():
+            raise FileNotFoundError(
+                f"[MimicLiteActionProvider] LeRobot policy directory not found: {lerobot_policy_path}"
+            )
+        project_root = os.environ.get("PROJECT_ROOT")
+        isaaclab_root = Path(project_root) if project_root else Path(__file__).resolve().parents[1]
+        lerobot_src = isaaclab_root.parent / "lerobot" / "src"
+        if not lerobot_src.is_dir():
+            raise FileNotFoundError(
+                f"[MimicLiteActionProvider] LeRobot src directory not found: {lerobot_src}"
+            )
+        import sys as _sys
+        if str(lerobot_src) not in _sys.path:
+            _sys.path.insert(0, str(lerobot_src))
+        from lerobot.configs.policies import PreTrainedConfig
+        from lerobot.policies.factory import _reconnect_relative_absolute_steps, get_policy_class
+        from lerobot.processor import PolicyProcessorPipeline
+        from lerobot.processor.converters import policy_action_to_transition, transition_to_policy_action
+        from lerobot.utils.constants import (
+            POLICY_POSTPROCESSOR_DEFAULT_NAME,
+            POLICY_PREPROCESSOR_DEFAULT_NAME,
+        )
+        from lerobot.utils.control_utils import predict_action
+
+        device_name = getattr(args_cli, "lerobot_policy_device", "") or getattr(args_cli, "device", "cuda:0")
+        config = PreTrainedConfig.from_pretrained(lerobot_policy_path)
+        config.device = device_name
+        state_feature = (config.input_features or {}).get("observation.state")
+        action_feature = (config.output_features or {}).get("action")
+        state_shape = tuple(getattr(state_feature, "shape", ()) or ())
+        action_shape = tuple(getattr(action_feature, "shape", ()) or ())
+        if state_shape and state_shape != (SONIC_VLA_STATE_DIM,):
+            raise ValueError(
+                f"[MimicLiteActionProvider] VLA policy must use observation.state shape {(SONIC_VLA_STATE_DIM,)}, "
+                f"got {state_shape}"
+            )
+        if action_shape and action_shape != (SONIC_VLA_ACTION_DIM,):
+            raise ValueError(
+                f"[MimicLiteActionProvider] VLA policy action shape mismatch: expected {(SONIC_VLA_ACTION_DIM,)}, "
+                f"got {action_shape}"
+            )
+        policy_cls = get_policy_class(config.type)
+        self._lerobot_policy = policy_cls.from_pretrained(lerobot_policy_path, config=config)
+        self._lerobot_preprocessor = PolicyProcessorPipeline.from_pretrained(
+            lerobot_policy_path,
+            config_filename=f"{POLICY_PREPROCESSOR_DEFAULT_NAME}.json",
+        )
+        self._lerobot_postprocessor = PolicyProcessorPipeline.from_pretrained(
+            lerobot_policy_path,
+            config_filename=f"{POLICY_POSTPROCESSOR_DEFAULT_NAME}.json",
+            to_transition=policy_action_to_transition,
+            to_output=transition_to_policy_action,
+        )
+        _reconnect_relative_absolute_steps(self._lerobot_preprocessor, self._lerobot_postprocessor)
+        self._lerobot_predict_action = predict_action
+        self._lerobot_device = torch.device(device_name)
+        self._lerobot_policy.reset()
+        self._lerobot_preprocessor.reset()
+        self._lerobot_postprocessor.reset()
+        print(
+            f"[MimicLiteActionProvider] LeRobot VLA enabled: "
+            f"path={lerobot_policy_path} type={config.type} device={self._lerobot_device}"
+        )
+
+    def _get_front_camera_rgb_for_vla(self) -> np.ndarray:
+        if "front_camera" not in self.env.scene.keys():
+            raise RuntimeError(
+                "[MimicLiteActionProvider] front_camera not found in scene for LeRobot VLA inference"
+            )
+        camera = self.env.scene["front_camera"]
+        if "rgb" not in camera.data.output:
+            raise RuntimeError(
+                "[MimicLiteActionProvider] front_camera has no rgb output for LeRobot VLA inference"
+            )
+        rgb = camera.data.output["rgb"][0].detach().cpu().numpy()
+        if rgb.ndim != 3:
+            raise RuntimeError(f"[MimicLiteActionProvider] Unexpected front_camera rgb shape: {rgb.shape}")
+        if rgb.shape[-1] == 4:
+            rgb = rgb[..., :3]
+        if rgb.dtype != np.uint8:
+            rgb = np.clip(rgb, 0, 255).astype(np.uint8)
+        return rgb
+
+    def _get_current_robot_root_pose_for_vla(self) -> tuple[np.ndarray, np.ndarray]:
+        robot = self.env.scene["robot"].data
+        root_state = robot.root_state_w[0].detach().cpu().numpy().astype(np.float32)
+        root_xy_world = root_state[0:2].astype(np.float32, copy=True)
+        root_quat_wxyz = root_state[3:7].astype(np.float32, copy=True)
+        return root_quat_wxyz, root_xy_world
+
+    def _build_lerobot_vla_observation_state(self) -> np.ndarray:
+        robot = self.env.scene["robot"].data
+        joint_pos = robot.joint_pos[0, self._body_idx].cpu().numpy().astype(np.float32)
+        joint_vel = robot.joint_vel[0, self._body_idx].cpu().numpy().astype(np.float32)
+        base_quat_wxyz, _ = self._get_current_robot_root_pose_for_vla()
+        if self._vla_initial_robot_quat_wxyz is None:
+            self._vla_initial_robot_quat_wxyz = base_quat_wxyz.copy()
+        state = build_vla_rotlocal_v3_observation_state(
+            initial_robot_orientation_wxyz=self._vla_initial_robot_quat_wxyz,
+            root_orientation_wxyz=base_quat_wxyz,
+            joint_pos_canonical_29=joint_pos,
+            joint_vel_canonical_29=joint_vel,
+        )
+        # Yaw calibration: inject +calib yaw to state[0:6] to match mimic_lite
+        # training data convention (raw world-frame quat instead of heading-canonicalized).
+        if self._vla_yaw_calib_quat_wxyz is not None:
+            heading_canonical_quat = rot6d_to_quat_wxyz_with_layout(
+                state[0:6], layout="row"
+            ).reshape(4).astype(np.float32)
+            calibrated_quat = quat_mul_wxyz(self._vla_yaw_calib_quat_wxyz, heading_canonical_quat)
+            state[0:6] = quat_to_rot6d_wxyz(calibrated_quat).reshape(6).astype(np.float32)
+        if state.shape != (SONIC_VLA_STATE_DIM,):
+            raise RuntimeError(
+                f"[MimicLiteActionProvider] expected VLA observation.state shape {(SONIC_VLA_STATE_DIM,)}, "
+                f"got {state.shape}"
+            )
+        return state
+
+    def _fetch_lerobot_action_chunk(self) -> np.ndarray:
+        rgb = self._get_front_camera_rgb_for_vla()
+        state = self._build_lerobot_vla_observation_state()
+        if self._lerobot_http_client is not None:
+            action_chunk = self._lerobot_http_client.infer_chunk(
+                front_rgb=rgb,
+                observation_state=state,
+                robot_type=self._enable_robot,
+                task=self.task_name,
+            )
+        else:
+            if self._lerobot_policy is None or self._lerobot_predict_action is None:
+                raise RuntimeError(
+                    "[MimicLiteActionProvider] LeRobot VLA requested before initialization"
+                )
+            observation = {
+                "observation.images.front": rgb,
+                "observation.state": state,
+            }
+            action = self._lerobot_predict_action(
+                observation=observation,
+                policy=self._lerobot_policy,
+                device=self._lerobot_device,
+                preprocessor=self._lerobot_preprocessor,
+                postprocessor=self._lerobot_postprocessor,
+                use_amp=self._lerobot_device.type == "cuda",
+                task=self.task_name,
+                robot_type=self._enable_robot,
+            )
+            if isinstance(action, torch.Tensor):
+                action_chunk = action.detach().cpu().numpy().astype(np.float32)
+            else:
+                action_chunk = np.asarray(action, dtype=np.float32)
+        action_chunk = np.asarray(action_chunk, dtype=np.float32)
+        if action_chunk.ndim == 1:
+            action_chunk = action_chunk.reshape(1, -1)
+        if action_chunk.ndim != 2 or action_chunk.shape[1] != SONIC_VLA_ACTION_DIM:
+            raise ValueError(
+                f"[MimicLiteActionProvider] Expected VLA action chunk shape [N, {SONIC_VLA_ACTION_DIM}], "
+                f"got {action_chunk.shape}"
+            )
+        return action_chunk
+
+    def _pop_lerobot_action(self) -> np.ndarray:
+        if not self._lerobot_action_chunk_queue:
+            for action in self._fetch_lerobot_action_chunk():
+                self._lerobot_action_chunk_queue.append(
+                    np.asarray(action, dtype=np.float32).copy()
+                )
+        return np.asarray(
+            self._lerobot_action_chunk_queue.popleft(), dtype=np.float32
+        ).reshape(-1)
+
+    def _infer_lerobot_semantic_action(self) -> np.ndarray:
+        action = self._pop_lerobot_action()
+        if action.shape != (SONIC_VLA_ACTION_DIM,):
+            raise ValueError(
+                f"[MimicLiteActionProvider] Expected VLA action dim {SONIC_VLA_ACTION_DIM}, got {action.shape}"
+            )
+        return action
+
+    def _should_refresh_lerobot_visuals_next_step(self) -> bool:
+        return (not self._use_lerobot_vla) or (len(self._lerobot_action_chunk_queue) == 0)
+
+    def _get_hand_pose_from_binary(self, side: str, closed: bool) -> np.ndarray:
+        pose_name = "close" if closed else "open"
+        pose = DEFAULT_HAND_POSE[SONIC_HAND_POSE_ROBOT_NAME][side][pose_name]
+        return np.asarray(pose, dtype=np.float32).reshape(-1)
+
+    def _apply_hand_binary_targets(self, left_closed: bool, right_closed: bool) -> None:
+        self._left_hand_binary_state = bool(left_closed)
+        self._right_hand_binary_state = bool(right_closed)
+        self._left_hand_target[:] = self._get_hand_pose_from_binary("left", left_closed)
+        self._right_hand_target[:] = self._get_hand_pose_from_binary("right", right_closed)
+
+    def _apply_lerobot_vla_action(self, action: np.ndarray) -> dict:
+        # Decode 40-dim VLA action and step mimic_lite runtime. Returns result dict.
+        action = np.asarray(action, dtype=np.float32).reshape(-1)
+        self._latest_vla_action = action.copy()
+        current_robot_quat_wxyz, current_robot_xy_world = self._get_current_robot_root_pose_for_vla()
+        # Yaw calibration: correct action[0:2] (xy_delta) and action[3:9] (rot6d) by -calib
+        # to cancel the fixed +yaw offset in mimic_lite training data convention.
+        if self._vla_yaw_calib_quat_inv_wxyz is not None:
+            action = action.copy()
+            # action[0:2]: 2D rotate by -calib_deg (cancel training data +calib rotation)
+            c, s = float(np.cos(-self._vla_yaw_calib_rad)), float(np.sin(-self._vla_yaw_calib_rad))
+            xy = action[0:2].astype(np.float32).copy()
+            action[0] = c * xy[0] - s * xy[1]
+            action[1] = s * xy[0] + c * xy[1]
+            # action[3:9]: decode -> left-multiply inv-calib yaw -> re-encode
+            decoded_quat = rot6d_to_quat_wxyz_with_layout(
+                action[3:9], layout="row"
+            ).reshape(4).astype(np.float32)
+            corrected_quat = quat_mul_wxyz(self._vla_yaw_calib_quat_inv_wxyz, decoded_quat)
+            action[3:9] = quat_to_rot6d_wxyz(corrected_quat).reshape(6).astype(np.float32)
+        runtime_frame = self._lerobot_vla_runtime.step(
+            action,
+            current_robot_quat_wxyz=current_robot_quat_wxyz,
+            current_robot_xy_world=current_robot_xy_world,
+        )
+        control_dt = float(self.env.physics_dt * self._decimation)
+        payload = build_sonic_joint29_payload_v3(
+            runtime_frame=runtime_frame,
+            control_dt=control_dt,
+        )
+        # Feed decoded reference to mimic_lite runtime (interfaces are aligned)
+        timestamp_ns = time.time_ns()
+        result = self.runtime.step(
+            ref_joint_pos=payload["joint_pos"],
+            ref_body_pos_w=payload["body_pos"],
+            ref_body_quat_wxyz=payload["body_quat_w"],
+            timestamp_ns=timestamp_ns,
+        )
+        # Update hand targets
+        left_closed = bool(runtime_frame.hand_binary[0] >= self._lerobot_hand_binary_threshold)
+        right_closed = bool(runtime_frame.hand_binary[1] >= self._lerobot_hand_binary_threshold)
+        self._apply_hand_binary_targets(left_closed=left_closed, right_closed=right_closed)
+        return {"result": result, "left_closed": left_closed, "right_closed": right_closed}
+
     def _collect_env_state(self) -> dict[str, Any]:
         return collect_recordable_env_object_states(self.env, self.env.cfg)
 
@@ -638,6 +966,29 @@ class MimicLiteActionProvider(ActionProvider):
         self._prev_ref_debug_pos = None
         self._prev_ref_debug_joint = None
         self._episode_init_env_state = self._collect_env_state()
+        # VLA reset (aligned with SonicActionProvider)
+        if self._use_lerobot_vla:
+            self._lerobot_action_chunk_queue.clear()
+            self._latest_vla_action = None
+            try:
+                root_quat_wxyz, root_xy_world = self._get_current_robot_root_pose_for_vla()
+                self._vla_initial_robot_quat_wxyz = root_quat_wxyz.copy()
+                self._lerobot_vla_runtime.reset(
+                    body_xy_world=root_xy_world,
+                    target_root_quat_wxyz=root_quat_wxyz,
+                )
+            except Exception:
+                self._vla_initial_robot_quat_wxyz = None
+                self._lerobot_vla_runtime.reset()
+            self._apply_hand_binary_targets(left_closed=False, right_closed=False)
+            if self._lerobot_http_client is not None:
+                self._lerobot_http_client.reset()
+            if self._lerobot_policy is not None:
+                self._lerobot_policy.reset()
+            if self._lerobot_preprocessor is not None:
+                self._lerobot_preprocessor.reset()
+            if self._lerobot_postprocessor is not None:
+                self._lerobot_postprocessor.reset()
         if getattr(self, "_disable_eval_recording", False):
             try:
                 self.recording_manager.cancel_recording()
@@ -1424,6 +1775,12 @@ class MimicLiteActionProvider(ActionProvider):
         if self._replay_enabled and replay_frame_idx is not None:
             left_hand, right_hand = self._set_replay_hand_targets(replay_frame_idx)
             result = self._run_replay_policy(replay_frame_idx)
+        elif self._use_lerobot_vla:
+            action = self._infer_lerobot_semantic_action()
+            vla_out = self._apply_lerobot_vla_action(action)
+            result = vla_out["result"]
+            left_hand = self._left_hand_target.copy()
+            right_hand = self._right_hand_target.copy()
         else:
             left_hand, right_hand, timestamp_ns = self._read_reference()
             ref_joint_pos, ref_body_pos, ref_body_quat, startup_alpha = self._startup_blended_reference()

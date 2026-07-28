@@ -62,30 +62,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--episode_batch_json", type=str, default="")
     parser.add_argument("--max_steps", type=int, default=300)
     parser.add_argument("--model_path", type=str, default="", help="Compatibility argument (unused in SONIC VLA eval)")
-    parser.add_argument("--sonic_encoder_path", type=str, required=True, help="SONIC encoder ONNX path (29DoF controller)")
-    parser.add_argument("--sonic_decoder_path", type=str, required=True, help="SONIC decoder ONNX path (29DoF controller)")
-    parser.add_argument(
-        "--sonic_vla_root_rot6d_layout",
-        type=str,
-        default="row",
-        choices=["auto", "row", "col"],
-        help="Root rot6d decode layout for VLA action (auto=row/col continuity selection).",
-    )
-    parser.add_argument(
-        "--sonic_vla_root_max_delta_deg",
-        type=float,
-        default=26.0,
-        help="Clamp max root orientation delta per step (degrees). <=0 to disable.",
-    )
+    parser.add_argument("--mimic_lite_onnx_path", type=str, required=True, help="MimicLite ONNX policy path")
+    parser.add_argument("--mimic_lite_yaml_path", type=str, required=True, help="MimicLite deploy YAML path")
     parser.add_argument("--sonic_effort_control", action="store_true", default=False)
     parser.add_argument("--sonic_debug", action="store_true", default=False)
     parser.add_argument("--sonic_log_every", type=int, default=50)
     parser.add_argument(
         "--gmt_backend",
         type=str,
-        default="sonic",
-        choices=["sonic", "sonic_low_latency"],
-        help="SONIC GMT backend variant: sonic (default 1762-dim encoder) or sonic_low_latency (1247-dim encoder).",
+        default="mimic_lite",
+        choices=["sonic", "sonic_low_latency", "mimic_lite"],
+        help="GMT backend variant: sonic, sonic_low_latency, or mimic_lite.",
     )
     parser.add_argument("--lerobot_server_url", type=str, required=True)
     parser.add_argument("--lerobot_server_timeout", type=float, default=5.0)
@@ -173,10 +160,13 @@ def _ensure_unique_multi_image_shm_name(args) -> str:
 
 def _normalize_control_routing(args):
     args.input_source = "vla"
-    # Preserve the requested SONIC variant (sonic | sonic_low_latency).
-    if not getattr(args, "gmt_backend", None) or args.gmt_backend not in {"sonic", "sonic_low_latency"}:
-        args.gmt_backend = "sonic"
-    args.action_source = "sonic_wholebody"
+    # Preserve the requested GMT variant (sonic | sonic_low_latency | mimic_lite).
+    if not getattr(args, "gmt_backend", None) or args.gmt_backend not in {"sonic", "sonic_low_latency", "mimic_lite"}:
+        args.gmt_backend = "mimic_lite"
+    if args.gmt_backend == "mimic_lite":
+        args.action_source = "mimic_lite_wholebody"
+    else:
+        args.action_source = "sonic_wholebody"
     args.enable_wholebody_dds = True
     args.enable_dex1_dds = False
     args.enable_dex3_dds = True
@@ -864,6 +854,17 @@ def main() -> int:
     simulation_app = app_launcher.app
 
     import gymnasium as gym
+
+    # Bind MimicLite-aligned PD actuator config (G129_CFG_MIMIC_LITE) to gmt_backend=mimic_lite.
+    # This must happen BEFORE `import tasks` because task env_cfg class attributes
+    # (robot: ArticulationCfg = G1RobotPresets.g1_29dof_dex3_wholebody()) are evaluated at
+    # module-import time, and get_base_config() reads MIMIC_LITE_ROBOT_CFG then.
+    # Training-side PD from mimic-lite/assets/g1.py:
+    #   stiffness = armature * (10*2*pi)^2, damping = 2*2*armature*(10*2*pi), friction=0.01
+    # Other backends (twist2/sonic/sonic_low_latency) keep G129_CFG_WITH_DEX3_WHOLEBODY.
+    if getattr(args_cli, "gmt_backend", "") == "mimic_lite" or getattr(args_cli, "action_source", "") == "mimic_lite_wholebody":
+        os.environ["MIMIC_LITE_ROBOT_CFG"] = "1"
+        print("[sim_eval_vla] gmt_backend=mimic_lite -> MIMIC_LITE_ROBOT_CFG=1 (BeyondMimic PD actuator config)")
 
     import tasks
     from action_provider.create_action_provider import create_action_provider

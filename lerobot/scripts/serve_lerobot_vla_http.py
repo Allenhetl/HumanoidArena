@@ -139,6 +139,17 @@ def _prepare_compat_policy_dir(policy_dir: Path):
             continue
 
         remapped_payload, changed = _remap_json_tree(payload)
+
+        # Newer LeRobot diffusion checkpoints may serialize these two training
+        # configuration fields.  The deployed LeRobot version predates them,
+        # and its strict Draccus decoder rejects otherwise-compatible policies.
+        # They do not affect inference: pretrained_revision is metadata and
+        # gradient_checkpointing is a training-only memory optimization.
+        if json_path.name == "config.json" and isinstance(remapped_payload, dict):
+            for field_name in ("pretrained_revision", "gradient_checkpointing"):
+                if field_name in remapped_payload:
+                    remapped_payload.pop(field_name)
+                    changed = True
         if not changed:
             continue
 

@@ -398,7 +398,7 @@ def main() -> int:
     parser.add_argument(
         "--gmt_backend",
         type=str,
-        default="sonic",
+        default="sonic_low_latency",
         choices=["sonic", "sonic_low_latency"],
         help="SONIC GMT backend variant: sonic (default 1762-dim) or sonic_low_latency (1247-dim).",
     )

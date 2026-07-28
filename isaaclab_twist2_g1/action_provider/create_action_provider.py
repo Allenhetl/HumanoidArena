@@ -16,7 +16,7 @@ def create_action_provider(env,args):
         if args.gmt_backend == "twist2":
             from action_provider.action_provider_wh_twist2 import TWIST2ActionProvider
             return TWIST2ActionProvider(env=env, args_cli=args)
-        elif args.gmt_backend == "sonic":
+        elif args.gmt_backend in ("sonic", "sonic_low_latency"):
             from action_provider.action_provider_sonic import SonicActionProvider
             return SonicActionProvider(env=env, args_cli=args)
         elif args.gmt_backend == "mimic_lite":
