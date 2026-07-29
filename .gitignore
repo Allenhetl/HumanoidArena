@@ -21,6 +21,7 @@
 /external/
 GMR
 .omx/
+/vla_ckpts/
 
 # Release hygiene: local editor and agent state
 .DS_Store

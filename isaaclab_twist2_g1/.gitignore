@@ -122,3 +122,8 @@ data/
 assets/
 assets.*
 assets
+
+# Local analysis and smoke-test artifacts
+/analysis_outputs/
+/test_logs/
+/test_videos/
