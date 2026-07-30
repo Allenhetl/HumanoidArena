@@ -22,3 +22,18 @@ overrides:
         x: [-1.2, 1.2]
         y: [-1.2, 1.2]
       zero_velocity_on_reset: true
+  scene:
+    room: null
+    robot_key_light: null
+    auto_tube_light_00: null
+    auto_tube_light_01: null
+    auto_tube_light_02: null
+    auto_tube_light_03: null
+    auto_tube_light_04: null
+    auto_tube_light_05: null
+    auto_tube_light_06: null
+    auto_tube_light_07: null
+    auto_tube_light_08: null
+    auto_tube_light_09: null
+    auto_tube_light_10: null
+    auto_tube_light_11: null
