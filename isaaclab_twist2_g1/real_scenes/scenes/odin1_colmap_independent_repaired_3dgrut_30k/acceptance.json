@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "scene_id": "odin1_colmap_independent_repaired_3dgrut_30k",
+  "policy_id": "real-scene-gaussian-lidar-v1",
+  "status": "provisional-current-spawn",
+  "reconstruction": {
+    "registered_images": 3375,
+    "input_images": 3375,
+    "registered_ratio": 1.0,
+    "points3D": 245893,
+    "observations": 3551208,
+    "mean_track_length": 14.442087,
+    "mean_reprojection_error_px": 0.801438
+  },
+  "rendering": {
+    "iterations": 30000,
+    "gaussians": 1493826,
+    "test_images": 422,
+    "psnr": 27.207635780081365,
+    "ssim": 0.8730040893170505,
+    "lpips": 0.3235595664848084,
+    "color_corrected_psnr": 27.874629445550568
+  },
+  "alignment": {
+    "uniform_scale": 0.8336741378032162,
+    "sparse_to_lidar_median_m": 0.034282172194923674,
+    "icp_fitness_0_10m": 0.7231710131548581,
+    "icp_inlier_rmse_m": 0.04171611213076327,
+    "camera_holdout_median_m": 0.04373087127251467,
+    "camera_holdout_p95_m": 0.07351765820585991,
+    "physical_alignment_authority": "lidar_structural"
+  },
+  "usd": {
+    "meters_per_unit": 1,
+    "up_axis": "Z",
+    "nurec_volume_count": 1,
+    "collision_enabled_prim_count": 2,
+    "visual_collision_api_present": false,
+    "collision_prims_invisible": true
+  },
+  "runtime": {
+    "current_spawn_smoke_steps": 20,
+    "current_spawn_smoke_reason": "fixed_horizon_complete",
+    "relevant_log_error_count": 0,
+    "current_spawn_formal_complete": false,
+    "historical_spawn_formal_steps": 500,
+    "historical_spawn_final_reward": -1.0
+  },
+  "evidence": {
+    "camera_alignment_report": "${REAL_SCENE_WORKSPACE}/artifacts/odin1/colmap_independent_alignment_repaired/alignment_report.json",
+    "structural_alignment_report": "${REAL_SCENE_WORKSPACE}/artifacts/odin1/colmap_independent_structural_alignment/structural_alignment_report.json",
+    "current_spawn_smoke": "${HUMANOID_ARENA_ROOT}/isaaclab_twist2_g1/script/eval_scripts/sonic_pi05/eval_results/odin1_colmap_independent_repaired_3dgrut_30k_training_supported_pose_smoke20_20260731",
+    "historical_spawn_formal": "${HUMANOID_ARENA_ROOT}/isaaclab_twist2_g1/script/eval_scripts/sonic_pi05/eval_results/odin1_colmap_independent_repaired_3dgrut_30k_vla_front_seed0_repeat1_20260730"
+  }
+}

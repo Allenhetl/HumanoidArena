@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "policy_id": "real-scene-gaussian-lidar-v1",
+  "gates": [
+    {
+      "id": "colmap_registered_ratio",
+      "path": "reconstruction.registered_ratio",
+      "operator": "min",
+      "value": 0.999,
+      "severity": "required"
+    },
+    {
+      "id": "colmap_reprojection_error",
+      "path": "reconstruction.mean_reprojection_error_px",
+      "operator": "max",
+      "value": 1.0,
+      "severity": "required"
+    },
+    {
+      "id": "render_psnr",
+      "path": "rendering.psnr",
+      "operator": "min",
+      "value": 27.0,
+      "severity": "required"
+    },
+    {
+      "id": "render_ssim",
+      "path": "rendering.ssim",
+      "operator": "min",
+      "value": 0.87,
+      "severity": "required"
+    },
+    {
+      "id": "render_lpips",
+      "path": "rendering.lpips",
+      "operator": "max",
+      "value": 0.33,
+      "severity": "required"
+    },
+    {
+      "id": "structural_median",
+      "path": "alignment.sparse_to_lidar_median_m",
+      "operator": "max",
+      "value": 0.04,
+      "severity": "required"
+    },
+    {
+      "id": "structural_icp_fitness",
+      "path": "alignment.icp_fitness_0_10m",
+      "operator": "min",
+      "value": 0.7,
+      "severity": "required"
+    },
+    {
+      "id": "structural_icp_rmse",
+      "path": "alignment.icp_inlier_rmse_m",
+      "operator": "max",
+      "value": 0.05,
+      "severity": "required"
+    },
+    {
+      "id": "camera_holdout_median",
+      "path": "alignment.camera_holdout_median_m",
+      "operator": "max",
+      "value": 0.02,
+      "severity": "warning"
+    },
+    {
+      "id": "camera_holdout_p95",
+      "path": "alignment.camera_holdout_p95_m",
+      "operator": "max",
+      "value": 0.05,
+      "severity": "warning"
+    },
+    {
+      "id": "nurec_volume_count",
+      "path": "usd.nurec_volume_count",
+      "operator": "eq",
+      "value": 1,
+      "severity": "required"
+    },
+    {
+      "id": "collision_prim_count",
+      "path": "usd.collision_enabled_prim_count",
+      "operator": "eq",
+      "value": 2,
+      "severity": "required"
+    },
+    {
+      "id": "smoke_steps",
+      "path": "runtime.current_spawn_smoke_steps",
+      "operator": "min",
+      "value": 20,
+      "severity": "required"
+    },
+    {
+      "id": "runtime_errors",
+      "path": "runtime.relevant_log_error_count",
+      "operator": "eq",
+      "value": 0,
+      "severity": "required"
+    },
+    {
+      "id": "current_spawn_formal_run",
+      "path": "runtime.current_spawn_formal_complete",
+      "operator": "eq",
+      "value": true,
+      "severity": "warning"
+    }
+  ]
+}

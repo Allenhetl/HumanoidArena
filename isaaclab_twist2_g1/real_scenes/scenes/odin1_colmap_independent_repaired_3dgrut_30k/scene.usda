@@ -1,0 +1,38 @@
+#usda 1.0
+(
+    customLayerData = {
+        dictionary renderSettings = {
+            bool "rtx:post:registeredCompositing:invertColorCorrection" = 0
+            bool "rtx:post:registeredCompositing:invertToneMap" = 0
+        }
+    }
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "World"
+{
+    def Xform "GaussianVisual" (
+        prepend references = @odin1_colmap_independent_repaired_3dgrut_30k.usdz@</World>
+    )
+    {
+        matrix4d xformOp:transform = ( (0.8255063839646276, 0.11639801386913166, 0.0018111992993892355, 0),
+                                       (0.04223680183662225, -0.31156201032459674, 0.772112514038625, 0),
+                                       (0.10847963240256017, -0.7644561361724771, -0.3144066686061038, 0),
+                                       (-2.8707523575629557, -1.8774184431887595, 1.1178267409565537, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def Xform "CollisionShell" (
+        prepend references = @odin_kf800_lidar_agree_final22000_collision_shell.usdc@</World>
+    )
+    {
+    }
+
+    def Xform "CollisionFloor" (
+        prepend references = @odin_kf800_lidar_agree_final22000_collision_floor.usdc@</World>
+    )
+    {
+    }
+}
