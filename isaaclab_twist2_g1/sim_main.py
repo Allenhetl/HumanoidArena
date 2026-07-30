@@ -929,7 +929,15 @@ def main():
     import os
     import atexit
     _normalize_control_routing(args_cli)
+    local_gmt_replay = bool(args_cli.replay_file) and args_cli.input_source == "replay" and args_cli.gmt_backend in {
+        "twist2",
+        "sonic",
+        "sonic_joint29",
+        "sonic_low_latency",
+        "mimic_lite",
+    }
     image_servers = None
+    dds_manager = None
     try:
         if args_cli.setpgrp:
             os.setpgrp()
@@ -1198,7 +1206,10 @@ def main():
     
     # create controller
 
-    if not args_cli.replay_data:
+    if local_gmt_replay:
+        image_servers = []
+        print("[sim_main] Local GMT replay: skipping live image servers and DDS")
+    elif not args_cli.replay_data:
         print("========= create image server(s) =========")
         image_servers = []  # List to hold all image servers
 
@@ -1333,7 +1344,7 @@ def main():
 
 
     # set signal handlers
-    if not args_cli.replay_data:
+    if not args_cli.replay_data and not local_gmt_replay:
         setup_signal_handlers(controller, dds_manager, image_servers, simulation_app)
     else:
         setup_signal_handlers(controller, None, None, simulation_app)
@@ -1366,7 +1377,7 @@ def main():
         controller.start()
         print("========= start controller success =========")
         redis_reset_client = None
-        if not args_cli.replay_data:
+        if not args_cli.replay_data and not local_gmt_replay:
             try:
                 redis_reset_client = create_redis_client(
                     host=getattr(args_cli, "sonic_redis_host", "localhost"),
@@ -1387,7 +1398,7 @@ def main():
         last_loop_time = time.time()
         recent_loop_times = []  # for calculating moving average frequency
         camera_update_fn = None
-        if args_cli.enable_cameras:
+        if args_cli.enable_cameras and not local_gmt_replay:
             try:
                 from tasks.common_observations.camera_state import get_camera_image
 
@@ -1404,7 +1415,7 @@ def main():
                 while simulation_app.is_running() and controller.is_running:
                     current_time = time.time()
                     loop_count += 1
-                    if not args_cli.replay_data:
+                    if not args_cli.replay_data and not local_gmt_replay:
                         # Only update state and reward every 10 loops to improve performance
                         if loop_count % 10 == 0:
                             try:
@@ -1494,7 +1505,7 @@ def main():
                             except Exception as e:
                                 print(f"Failed to write reset pose command: {e}")
                                 raise e
-                    else:
+                    elif args_cli.replay_data:
                         if action_provider.get_start_loop() and data_idx < len(data_json_list):
                             print(f"data_idx: {data_idx}")
                             try:

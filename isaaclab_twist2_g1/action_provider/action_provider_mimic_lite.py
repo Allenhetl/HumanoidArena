@@ -408,8 +408,14 @@ class MimicLiteActionProvider(ActionProvider):
             expected_joint_order=MIMIC_LITE_JOINT_ORDER,
         )
         self._setup_joint_mapping()
-        self._setup_hand_interfaces()
-        if not self._use_lerobot_vla:
+        if self._replay_enabled:
+            self.dex3_dds = None
+            self.gripper_dds = None
+        else:
+            self._setup_hand_interfaces()
+        self._redis_client = None
+        self._redis_control_client = None
+        if not self._use_lerobot_vla and not self._replay_enabled:
             self._setup_redis()
         # Hand target buffers (aligned with SonicActionProvider, needed by VLA path).
         self._left_hand_target = np.zeros(7, dtype=np.float32)
