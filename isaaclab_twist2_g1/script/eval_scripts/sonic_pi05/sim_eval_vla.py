@@ -11,13 +11,14 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from task_runtime_profiles import apply_task_runtime_profile
 
 ISAACLAB_ROOT = Path(__file__).resolve().parents[3]
 PROJECT_ROOT = str(ISAACLAB_ROOT)
 os.environ["PROJECT_ROOT"] = PROJECT_ROOT
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
+
+from task_runtime_profiles import apply_task_runtime_profile
 
 from isaaclab.app import AppLauncher
 
@@ -61,6 +62,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--episode_seed", type=int, default=None)
     parser.add_argument("--episode_batch_json", type=str, default="")
     parser.add_argument("--max_steps", type=int, default=300)
+    parser.add_argument("--fixed_horizon", action="store_true", help="Run to max_steps without reward-based success.")
     parser.add_argument("--model_path", type=str, default="", help="Compatibility argument (unused in SONIC VLA eval)")
     parser.add_argument("--sonic_encoder_path", type=str, required=True, help="SONIC encoder ONNX path (29DoF controller)")
     parser.add_argument("--sonic_decoder_path", type=str, required=True, help="SONIC decoder ONNX path (29DoF controller)")
@@ -264,6 +266,54 @@ def _capture_front_camera_rgb(env):
         return frame
     except Exception:
         return None
+
+
+def _dump_front_camera_frame0(env, frame, episode_name: str) -> None:
+    dump_root = os.environ.get("FRAME0_CAMERA_DUMP_DIR", "").strip()
+    if not dump_root or frame is None or "front_camera" not in env.scene.keys():
+        return
+
+    import numpy as np
+    import torch
+    from PIL import Image
+
+    from tasks.common_observations.joint_projection import compute_camera_extrinsics
+
+    camera = env.scene["front_camera"]
+    data = camera.data
+    position_w = data.pos_w[0:1]
+    quaternion_wxyz = data.quat_w_world[0:1]
+    world_to_camera_cv = compute_camera_extrinsics(position_w, quaternion_wxyz)[0]
+    camera_to_world_cv = torch.linalg.inv(world_to_camera_cv)
+
+    output_dir = Path(dump_root).expanduser().resolve() / episode_name
+    output_dir.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(frame).save(output_dir / "front_camera_frame0.png")
+
+    prim_paths = getattr(camera, "prim_paths", None)
+    metadata = {
+        "image_width": int(frame.shape[1]),
+        "image_height": int(frame.shape[0]),
+        "image_encoding": "RGB uint8",
+        "intrinsic_matrix": data.intrinsic_matrices[0].detach().cpu().numpy().tolist(),
+        "position_world": position_w[0].detach().cpu().numpy().tolist(),
+        "quaternion_world_wxyz": quaternion_wxyz[0].detach().cpu().numpy().tolist(),
+        "world_to_camera_right_down_forward": world_to_camera_cv.detach().cpu().numpy().tolist(),
+        "camera_to_world_right_down_forward": camera_to_world_cv.detach().cpu().numpy().tolist(),
+        "camera_axes": "+X right, +Y down, +Z forward",
+        "pixel_axes": "+u right, +v down",
+        "prim_paths": list(prim_paths) if prim_paths is not None else [],
+    }
+    for field_name in ("quat_w_ros", "quat_w_opengl"):
+        value = getattr(data, field_name, None)
+        if value is not None:
+            metadata[field_name] = value[0].detach().cpu().numpy().tolist()
+
+    (output_dir / "front_camera_frame0.json").write_text(json.dumps(metadata, indent=2) + "\n")
+    depth = data.output.get("distance_to_image_plane")
+    if depth is not None:
+        np.save(output_dir / "front_camera_frame0_depth.npy", depth[0].detach().cpu().numpy())
+    print(f"[sim_eval_vla] dumped frame-0 front camera to {output_dir}")
 
 
 def _extract_reward_info(env) -> dict:
@@ -526,6 +576,7 @@ def _build_single_episode_spec(args_cli) -> dict:
         "eval_model_path": args_cli.eval_model_path,
         "recording_save_dir": args_cli.recording_save_dir,
         "max_steps": int(args_cli.max_steps),
+        "fixed_horizon": bool(args_cli.fixed_horizon),
     }
 
 
@@ -556,6 +607,7 @@ def _load_episode_specs(args_cli) -> list[dict]:
                 "eval_model_path": str(entry.get("eval_model_path", args_cli.eval_model_path)),
                 "recording_save_dir": str(entry.get("recording_save_dir", args_cli.recording_save_dir)),
                 "max_steps": int(entry.get("max_steps", args_cli.max_steps)),
+                "fixed_horizon": bool(entry.get("fixed_horizon", args_cli.fixed_horizon)),
             }
         )
     return normalized
@@ -611,6 +663,7 @@ def _build_result_payload(args_cli, spec: dict, model_label: str, server_url: st
         "failure_reason": failure_reason,
         "episode_steps": int(terminal_step_idx or step_idx),
         "max_steps": int(spec["max_steps"]),
+        "fixed_horizon": bool(spec.get("fixed_horizon", False)),
         "final_reward": float(final_reward),
         "final_reward_scaled": float(final_reward_scaled),
         "max_reward": 0.0 if max_reward == float("-inf") else float(max_reward),
@@ -669,8 +722,9 @@ def _run_episode_once(simulation_app, env, env_cfg, action_provider, controller,
         _notify_action_provider_env_reset(action_provider)
         controller.start()
 
+        initial_frame = _capture_front_camera_rgb(env)
+        _dump_front_camera_frame0(env, initial_frame, episode_name)
         if recorder is not None:
-            initial_frame = _capture_front_camera_rgb(env)
             if initial_frame is not None:
                 recorder.add_frame(initial_frame)
 
@@ -711,7 +765,7 @@ def _run_episode_once(simulation_app, env, env_cfg, action_provider, controller,
                     + (f" | {terms_str}" if terms_str else "")
                 )
 
-            if final_reward >= 1.0:
+            if not spec.get("fixed_horizon", False) and final_reward >= 1.0:
                 success = True
                 failure_reason = "success"
                 terminal_step_idx = step_idx
@@ -741,7 +795,11 @@ def _run_episode_once(simulation_app, env, env_cfg, action_provider, controller,
                 continue
 
             if step_idx >= int(spec["max_steps"]):
-                failure_reason = "timeout"
+                if spec.get("fixed_horizon", False):
+                    success = True
+                    failure_reason = "fixed_horizon_complete"
+                else:
+                    failure_reason = "timeout"
                 terminal_step_idx = step_idx
                 post_termination_steps_remaining = record_post_termination_steps
                 if post_termination_steps_remaining <= 0:
