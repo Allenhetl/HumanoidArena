@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "coordinate_frame": "scene_xy_meters",
+  "source_overview_image": "artifacts/real_scene_collision_repair_report_20260718/plane15/01_floor_masks_and_residuals.png",
+  "notes": "Polygons are in scene XY coordinates, not image pixels. Use ground_walkable for areas that should be treated as traversable floor; use operation_zone for task-relevant regions where robot interaction/path planning should be evaluated more strictly.",
+  "regions": [
+    {
+      "id": "walkable_corridor_left",
+      "type": "ground_walkable",
+      "priority": "must_include",
+      "polygon_xy": [
+        [0.0, 0.0],
+        [1.0, 0.0],
+        [1.0, 1.0],
+        [0.0, 1.0]
+      ],
+      "constraints": {
+        "max_plane_residual_m": 0.18,
+        "allow_hole_fill": true,
+        "min_clearance_m": 0.25
+      }
+    },
+    {
+      "id": "operation_area_example",
+      "type": "operation_zone",
+      "priority": "evaluate_strictly",
+      "polygon_xy": [
+        [2.0, 2.0],
+        [3.0, 2.0],
+        [3.0, 3.0],
+        [2.0, 3.0]
+      ],
+      "constraints": {
+        "max_plane_residual_m": 0.12,
+        "require_reachable_from_start": true,
+        "report_feet_contact_metrics": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+name: real_scene_ipark_sonic
+description: SONIC env config for ipark real-scene (ipark_t2_505_20260721).
+task_name: Isaac-Move-Real-Scene-Lab-G129-Dex3-Wholebody
+backend: sonic
+
+overrides:
+  sim:
+    dt: 0.005
+  decimation: 4
+  scene:
+    room:
+      spawn:
+        usd_path: "${PROJECT_ROOT}/assets/objects/real_scene/ipark_t2_505_20260721_gauss_ccm1.usda"
+    robot:
+      init_state:
+        pos: [-3.239, -4.425, -0.335]
+        # quaternion order: (w, x, y, z)
+        # rotate 90 deg around Z: (0.7071, 0, 0, 0.7071)
+        rot: [0.7071, 0.0, 0.0, 0.7071]
+    robot_key_light:
+      init_state:
+        pos: [-3.239, -4.425, 1.4]

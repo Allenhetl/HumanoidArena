@@ -1,0 +1,25 @@
+name: real_scene_odin_mvs_sonic
+description: SONIC smoke-test config for MVSAnywhere colored mesh reconstruction, using the ipark robot XY as an initial alignment check.
+task_name: Isaac-Move-Real-Scene-Lab-G129-Dex3-Wholebody
+backend: sonic
+
+overrides:
+  sim:
+    dt: 0.005
+  decimation: 4
+  scene:
+    room:
+      spawn:
+        usd_path: "${PROJECT_ROOT}/assets/objects/real_scene/odin_mvsanywhere_full_mesh.usda"
+      init_state:
+        pos: [0.0, 0.0, 0.0]
+        rot: [1.0, 0.0, 0.0, 0.0]
+    robot:
+      init_state:
+        # ipark XY requested for first MVS alignment smoke test.
+        # z uses local MVS floor candidate around z ~= 0.33 plus ipark pelvis-floor offset ~= 0.789.
+        pos: [-3.239, -4.425, 1.119]
+        rot: [0.7071, 0.0, 0.0, 0.7071]
+    robot_key_light:
+      init_state:
+        pos: [-3.239, -4.425, 2.854]

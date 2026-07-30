@@ -1,0 +1,58 @@
+schema_version: 1
+scene_id: odin1_colmap_independent_repaired_3dgrut_30k
+description: Repaired image-only COLMAP and official 3DGRUT visual with floor-aligned Odin LiDAR collision.
+
+source:
+  capture_id: odin1
+  image_count: 3375
+  reconstruction_policy: image_only
+  workspace_root_env: ODIN1_RECONSTRUCTION_ROOT
+  repaired_colmap: ${ODIN1_RECONSTRUCTION_ROOT}/colmap_independent_repair_initial/final
+
+external_dependencies:
+  three_d_grut:
+    repository: https://github.com/nv-tlabs/3dgrut.git
+    commit: a37ef721012dea0f29c0fcfff2d525023b4e854a
+    root_env: THREE_D_GRUT_ROOT
+    python_env: THREE_D_GRUT_PYTHON
+    training_config: apps/colmap_3dgut.yaml
+
+pipeline:
+  - id: reconstruct_colmap
+    owner: external_colmap_workspace
+    output: repaired_colmap
+  - id: diagnose_registration
+    tool: isaaclab_twist2_g1/tools/align_colmap_to_odin.py
+    output_report: alignment_report.json
+  - id: repair_colmap
+    owner: external_colmap_workspace
+    method: fixed_existing_image_registration_and_triangulation
+    output: repaired_colmap
+  - id: train_3dgrut
+    owner: external_3dgrut_checkout
+    iterations: 30000
+    output: checkpoint
+  - id: export_nurec
+    tool: isaaclab_twist2_g1/tools/export_3dgrut_checkpoint_raw.py
+    output: visual_usdz
+  - id: align_to_sim
+    tool: isaaclab_twist2_g1/tools/refine_colmap_lidar_alignment.py
+    output_report: structural_alignment_report.json
+  - id: compose_collision
+    wrapper: scene.usda
+  - id: validate_release
+    tool: isaaclab_twist2_g1/tools/real_scene/validate_scene_release.py
+  - id: smoke_test
+    steps: 20
+  - id: formal_test
+    steps: 500
+    status: pending_current_spawn
+
+runtime:
+  asset_directory: isaaclab_twist2_g1/assets/objects/real_scene
+  task_config: isaaclab_twist2_g1/tasks/common_env_config/real_scene_odin1_colmap_independent_repaired_3dgrut_30k_lidar_collision_football_vla_smoke_sonic.yaml
+  robot_spawn:
+    position: [-1.27, -2.98, 0.789]
+    quaternion_wxyz: [0.0805, 0.0, 0.0, -0.9968]
+  football_spawn:
+    position: [-2.74, -3.25, 0.11]

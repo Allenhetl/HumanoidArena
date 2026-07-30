@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "scene_id": "odin1_colmap_independent_repaired_3dgrut_30k",
+  "release_status": "provisional-current-spawn",
+  "source_revisions": {
+    "humanoid_arena_commit": "0a3192c",
+    "fixed_horizon_evaluator_commit": "2537eb0",
+    "three_d_grut_repository": "https://github.com/nv-tlabs/3dgrut.git",
+    "three_d_grut_commit": "a37ef721012dea0f29c0fcfff2d525023b4e854a",
+    "training_config": "apps/colmap_3dgut.yaml"
+  },
+  "artifacts": [
+    {
+      "role": "visual_nurec",
+      "path": "odin1_colmap_independent_repaired_3dgrut_30k.usdz",
+      "bytes": 176290538,
+      "sha256": "ab948809630e05d41fa6fa9b907e1e742f393aeb5d5e68209b6834e09370180c",
+      "required": true
+    },
+    {
+      "role": "collision_shell",
+      "path": "odin_kf800_lidar_agree_final22000_collision_shell.usdc",
+      "bytes": 3148833,
+      "sha256": "32f8b3879a16011afd368267a6e9042a4f3112e351dda539d1a0d5e238399002",
+      "required": true
+    },
+    {
+      "role": "collision_floor",
+      "path": "odin_kf800_lidar_agree_final22000_collision_floor.usdc",
+      "bytes": 1786043,
+      "sha256": "3b3bcab2d3a966a751bc81bce985e3ba7ad9a8b8c29d69b4171c1d43edf3adbf",
+      "required": true
+    },
+    {
+      "role": "runtime_wrapper",
+      "path": "odin1_colmap_independent_repaired_3dgrut_30k_lidar_collision_scene.usda",
+      "bytes": 1245,
+      "sha256": "fbddb47da0bd2cda8cf77b38d6c7fe46bd244ef248d70e36a8c8304fbc8929fb",
+      "required": true
+    }
+  ],
+  "control_files": [
+    {
+      "role": "tracked_wrapper",
+      "path": "isaaclab_twist2_g1/real_scenes/scenes/odin1_colmap_independent_repaired_3dgrut_30k/scene.usda",
+      "sha256": "fbddb47da0bd2cda8cf77b38d6c7fe46bd244ef248d70e36a8c8304fbc8929fb",
+      "required": true
+    },
+    {
+      "role": "task_config",
+      "path": "isaaclab_twist2_g1/tasks/common_env_config/real_scene_odin1_colmap_independent_repaired_3dgrut_30k_lidar_collision_football_vla_smoke_sonic.yaml",
+      "sha256": "b768b98d3b6365e6691ded4ef37237fcb697f921998960dee16ab3e6bf5fadea",
+      "required": true
+    }
+  ],
+  "reconstruction_hashes": {
+    "cameras_bin": "1277079b903c225a3efd0d84149e353675b11a0bbec27c84fb9519ae1efb85e1",
+    "images_bin": "28fd45dda52e2b3520abfc3f92e63691416d8ecce9455d69ef175af1a5d639ef",
+    "points3D_bin": "fe79d42b546b32ce63e00e0010b2608dddefdbc01534bd4243ce7970fb2920cd",
+    "checkpoint": "b512a3fcbae3ff181878246dc046933f9b9730ccc16f743f43f9c74711fe3878"
+  },
+  "distribution": {
+    "mode": "server-local",
+    "server": "${REAL_SCENE_HOST}",
+    "asset_directory": "${HUMANOID_ARENA_ROOT}/isaaclab_twist2_g1/assets/objects/real_scene",
+    "repository": null,
+    "revision": null
+  }
+}

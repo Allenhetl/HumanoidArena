@@ -1,0 +1,22 @@
+name: real_scene_ipark_sonic_default_rot
+description: SONIC env config for ipark real-scene with default rotation.
+task_name: Isaac-Move-Real-Scene-Lab-G129-Dex3-Wholebody
+backend: sonic
+
+overrides:
+  sim:
+    dt: 0.005
+  decimation: 4
+  scene:
+    room:
+      spawn:
+        usd_path: "${PROJECT_ROOT}/assets/objects/real_scene/ipark_t2_505_20260721_gauss_ccm1.usda"
+    robot:
+      init_state:
+        pos: [-3.239, -4.425, -0.335]
+        # quaternion order: (w, x, y, z)
+        # default identity: (1, 0, 0, 0), robot faces -X
+        rot: [1.0, 0.0, 0.0, 0.0]
+    robot_key_light:
+      init_state:
+        pos: [-3.239, -4.425, 1.4]

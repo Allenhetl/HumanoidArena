@@ -1,0 +1,58 @@
+name: real_scene_odin_mvs_tuned_football_sonic
+description: Tuned MVSAnywhere colored mesh real-scene background with football; first pass uses ipark XY and identity room transform.
+task_name: Isaac-Move-Football-Single-G129-Dex3-Wholebody
+backend: sonic
+
+overrides:
+  sim:
+    dt: 0.005
+  decimation: 4
+
+  object_reset_seed_source: env_seed
+  deterministic_object_resets:
+    - record_name: football
+      scene_keys: [object, football]
+      pose_range:
+        x: [-3.239, -3.239]
+        y: [-3.225, -3.225]
+        # Tuned MVS local floor candidate near ipark robot XY: z ~= -1.30.
+        z: [-1.190, -1.190]
+      zero_velocity_on_reset: true
+
+  scene:
+    room:
+      spawn:
+        usd_path: ${PROJECT_ROOT}/assets/objects/real_scene/odin_mvsanywhere_tuned_full_mesh.usda
+      init_state:
+        pos: [0.0, 0.0, 0.0]
+        rot: [1.0, 0.0, 0.0, 0.0]
+
+    robot:
+      init_state:
+        # ipark XY for alignment. z = floor_z(-1.30) + ipark pelvis-floor offset(0.789).
+        pos: [-3.239, -4.425, -0.511]
+        rot: [0.7071, 0.0, 0.0, 0.7071]
+
+    object:
+      init_state:
+        pos: [-3.239, -3.225, -1.190]
+        rot: [1.0, 0.0, 0.0, 0.0]
+
+    # Keep a thin kinematic physics floor because the MVS mesh is visual-only.
+    # Center at floor_z - thickness/2 = -1.30 - 0.005.
+    ground:
+      init_state:
+        pos: [0.0, 0.0, -1.305]
+        rot: [1.0, 0.0, 0.0, 0.0]
+
+    goal_net: null
+    goal_backdrop_1: null
+    goal_backdrop_2: null
+    goal_backdrop_3: null
+    goal_backdrop_4: null
+
+    light:
+      spawn:
+        intensity: 8000.0
+
+    robot_key_light: null

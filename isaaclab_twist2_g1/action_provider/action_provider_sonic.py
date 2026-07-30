@@ -1514,6 +1514,10 @@ class SonicActionProvider(ActionProvider):
         self._sonic_log_every = int(getattr(args_cli, "sonic_log_every", self._sonic_log_every))
         self._enable_rtf_monitor = getattr(args_cli, "enable_rtf_monitor", False)
         self._use_effort_control = bool(getattr(args_cli, "sonic_effort_control", False))
+        self._sonic_input_timeout_s = max(
+            0.0,
+            float(getattr(args_cli, "sonic_input_timeout_s", os.environ.get("SONIC_INPUT_TIMEOUT_S", 0.25))),
+        )
 
         self.enable_dex3    = getattr(args_cli, "enable_dex3_dds",   False)
         self.enable_gripper = getattr(args_cli, "enable_dex1_dds",   False)
@@ -1721,6 +1725,8 @@ class SonicActionProvider(ActionProvider):
         self._latest_heading_increment = 0.0
         self._latest_consumed_new_this_step = False
         self._latest_consumed_control_step = -1
+        self._last_fresh_input_monotonic = None
+        self._sonic_input_hold_active = False
         self._latest_aligned_body_quat_wxyz = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
         self._latest_consumed_anchor_rot6d = np.array([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=np.float32)
         self._latest_canonical_action_raw = _default_vla_action()
@@ -2151,7 +2157,8 @@ class SonicActionProvider(ActionProvider):
         raise ValueError(f"[SonicActionProvider] Unsupported replay_mode: {replay_mode}")
 
     def _resolve_ort_device_id(self) -> int | None:
-        device_name = str(getattr(self, "device", "") or "").strip().lower()
+        # SONIC_ONNX_DEVICE lets us run ONNX encoder/decoder on CPU even when Isaac/Torch stays on cuda:0.
+        device_name = str(os.environ.get("SONIC_ONNX_DEVICE", "") or getattr(self, "device", "") or "").strip().lower()
         if not device_name or device_name == "cpu":
             return None
         if device_name == "cuda":
@@ -4438,6 +4445,8 @@ class SonicActionProvider(ActionProvider):
             self._latest_timestamp_monotonic = float(self._raw_input_timestamp_monotonic)
             self._latest_consumed_new_this_step = True
             self._latest_consumed_control_step = int(self._frame_count)
+            self._last_fresh_input_monotonic = time.monotonic()
+            self._sonic_input_hold_active = False
             self._latest_controller_data = self._raw_controller_data
             self._consumed_controller_data = self._raw_controller_data
 
@@ -4992,6 +5001,30 @@ class SonicActionProvider(ActionProvider):
                 "[SonicActionProvider] Encoder/Decoder missing during runtime; "
                 "refusing to fall back to default pose"
             )
+        if (
+            not self._replay_enabled
+            and not self._use_lerobot_vla
+            and self._sonic_input_timeout_s > 0.0
+            and (
+                self._last_fresh_input_monotonic is None
+                or time.monotonic() - self._last_fresh_input_monotonic > self._sonic_input_timeout_s
+            )
+        ):
+            if not self._sonic_input_hold_active:
+                age = float("inf") if self._last_fresh_input_monotonic is None else (
+                    time.monotonic() - self._last_fresh_input_monotonic
+                )
+                print(
+                    "[SONIC] no fresh pose input for "
+                    f"{age:.3f}s (timeout={self._sonic_input_timeout_s:.3f}s); holding default pose"
+                )
+            self._sonic_input_hold_active = True
+            self._last_action_hist.fill(0.0)
+            self._latest_decoder_raw_action.fill(0.0)
+            self._latest_decoder_target = self._sonic_default_np.copy()
+            self._left_hand_target.fill(0.0)
+            self._right_hand_target.fill(0.0)
+            return self._sonic_default_np.copy()
         if (
             self._sonic_joint29_mode
             and not self._latest_consumed_new_this_step

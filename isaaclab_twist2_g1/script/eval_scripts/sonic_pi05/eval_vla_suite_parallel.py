@@ -387,6 +387,7 @@ def main() -> int:
     parser.add_argument('--repeats_per_seed', type=int, default=1)
     parser.add_argument('--persistent_sim', type=int, default=0)
     parser.add_argument('--max_steps', type=int, default=300)
+    parser.add_argument('--fixed_horizon', action='store_true')
     parser.add_argument('--video_fps', type=int, default=30)
     parser.add_argument('--post_termination_record_steps', type=int, default=0)
     parser.add_argument('--record_video_every_n', type=int, default=1)

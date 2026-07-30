@@ -107,6 +107,8 @@ parser.add_argument("--sonic_encoder_path", type=str, default="",
                     help="Path to GEAR-SONIC encoder ONNX model")
 parser.add_argument("--sonic_decoder_path", type=str, default="",
                     help="Path to GEAR-SONIC decoder ONNX model")
+parser.add_argument("--sonic_input_timeout_s", type=float, default=0.25,
+                    help="Seconds without a fresh SONIC pose frame before holding the default standing pose; 0 disables the guard")
 
 # VLA-specific arguments
 parser.add_argument("--language_instruction", type=str, default="",
@@ -231,6 +233,18 @@ parser.add_argument(
     default=10,
     help="max queued save jobs before producer blocks",
 )
+parser.add_argument(
+    "--max_steps",
+    type=int,
+    default=0,
+    help="stop after this many main-loop control steps; 0 keeps the legacy infinite loop",
+)
+parser.add_argument(
+    "--eval_video_path",
+    type=str,
+    default="",
+    help="optional mp4 path for a short eval recording from front_camera rgb frames",
+)
 
 # random seed for reproducibility
 parser.add_argument("--seed", type=int, default=None, help="random seed for reproducibility (default: None)")
@@ -352,6 +366,49 @@ from tools.get_stiffness import get_robot_stiffness_from_env
 from tools.get_reward import get_reward_debug_string
 # Use text-based tracker instead of GUI visualizer to avoid matplotlib issues
 from tools.joint_position_tracker import JointPositionTracker
+
+
+def _capture_front_camera_rgb(env):
+    try:
+        if "front_camera" not in env.scene.keys():
+            return None
+        camera = env.scene["front_camera"]
+        rgb = camera.data.output.get("rgb")
+        if rgb is None:
+            return None
+        frame = rgb[0].detach().cpu().numpy()
+        if frame.ndim != 3:
+            return None
+        if frame.shape[-1] == 4:
+            frame = frame[..., :3]
+        if frame.dtype != np.uint8:
+            frame = np.clip(frame, 0, 255).astype(np.uint8)
+        return frame
+    except Exception:
+        return None
+
+
+class _EvalVideoWriter:
+    def __init__(self, path: str, fps: int):
+        self.path = Path(path).expanduser()
+        self.fps = int(fps)
+        self.frames = []
+
+    def add(self, frame):
+        if frame is not None:
+            self.frames.append(frame.copy())
+
+    def close(self):
+        if not self.path or not self.frames:
+            return ""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            import imageio.v2 as imageio
+            imageio.mimsave(str(self.path), self.frames, fps=self.fps)
+            return str(self.path)
+        except Exception as exc:
+            print(f"[eval_video] failed to save {self.path}: {exc}")
+            return ""
 
 
 def _normalize_control_routing(args_cli):
@@ -1338,6 +1395,7 @@ def main():
                 print("[sim_main] Camera shared-memory refresh enabled in main loop")
             except Exception as exc:
                 print(f"[sim_main] Camera shared-memory refresh unavailable: {exc}")
+        eval_video = _EvalVideoWriter(args_cli.eval_video_path, args_cli.video_fps) if args_cli.eval_video_path else None
 
         # use torch.inference_mode() and handle KeyboardInterrupt
         try:
@@ -1482,6 +1540,15 @@ def main():
                             if loop_count % 300 == 0:
                                 print(f"[sim_main] Camera shared-memory refresh failed: {exc}")
 
+                    if eval_video is not None:
+                        eval_video.add(_capture_front_camera_rgb(env))
+
+                    max_steps = int(getattr(args_cli, "max_steps", 0) or 0)
+                    if max_steps > 0 and loop_count >= max_steps:
+                        print(f"[sim_main] max_steps={max_steps} reached; stopping controller")
+                        controller.stop()
+                        break
+
                     if _should_exit_after_replay_complete(action_provider, args_cli):
                         print("[sim_main] Replay reached EOF and requested exit; stopping controller")
                         controller.stop()
@@ -1562,6 +1629,12 @@ def main():
     finally:
         # clean up resources
         print("\nclean up resources...")
+        if "eval_video" in locals() and eval_video is not None:
+            saved_video = eval_video.close()
+            if saved_video:
+                print(f"[eval_video] saved {saved_video} frames={len(eval_video.frames)}")
+            else:
+                print(f"[eval_video] no video saved frames={len(eval_video.frames)}")
         _close_image_servers(image_servers)
         controller.cleanup()
         env.close()

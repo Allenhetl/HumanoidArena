@@ -1,0 +1,54 @@
+name: real_scene_ipark_football_sonic
+description: Ipark real-scene background with only the football interaction object loaded; ball fixed in the robot front camera view.
+task_name: Isaac-Move-Football-Single-G129-Dex3-Wholebody
+backend: sonic
+
+overrides:
+  sim:
+    dt: 0.005
+  decimation: 4
+
+  # Keep the football object deterministic and in view.
+  object_reset_seed_source: env_seed
+  deterministic_object_resets:
+    - record_name: football
+      scene_keys: [object, football]
+      pose_range:
+        x: [-3.239, -3.239]
+        y: [-3.225, -3.225]
+        z: [-1.014, -1.014]
+      zero_velocity_on_reset: true
+
+  scene:
+    room:
+      spawn:
+        usd_path: ${PROJECT_ROOT}/assets/objects/real_scene/ipark_t2_505_20260721_gauss_ccm1.usda
+      init_state:
+        pos: [0.0, 0.0, 0.0]
+        rot: [1.0, 0.0, 0.0, 0.0]
+
+    robot:
+      init_state:
+        pos: [-3.239, -4.425, -0.335]
+        rot: [0.7071, 0.0, 0.0, 0.7071]
+
+    # Only load football: about 1.2 m ahead of the rot90 robot (+Y), on the ipark floor.
+    object:
+      init_state:
+        pos: [-3.239, -3.225, -1.014]
+        rot: [1.0, 0.0, 0.0, 0.0]
+
+    # Disable football task's default extra interaction assets for this variant.
+    ground: null
+    goal_net: null
+    goal_backdrop_1: null
+    goal_backdrop_2: null
+    goal_backdrop_3: null
+    goal_backdrop_4: null
+
+    light:
+      spawn:
+        intensity: 8000.0
+
+    # Disable separate soft fill/key light; this run uses the 12 former tube positions as SphereLight keylights.
+    robot_key_light: null
