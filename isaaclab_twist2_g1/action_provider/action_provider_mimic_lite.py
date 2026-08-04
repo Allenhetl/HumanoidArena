@@ -270,8 +270,18 @@ def _organize_mimic_lite_episode(
         "action_body_effort_target": _stack(("action", "body_effort_target"), np.float32),
         "action_hand_action_left": _stack(("action", "hand_action_left"), np.float32),
         "action_hand_action_right": _stack(("action", "hand_action_right"), np.float32),
+        "inspire_raw_hand_left": _stack(("human_raw", "inspire_raw_hand_left"), np.float32),
+        "inspire_raw_hand_right": _stack(("human_raw", "inspire_raw_hand_right"), np.float32),
+        "inspire_a_hw_left": _stack(("action", "inspire_a_hw_left"), np.float32),
+        "inspire_a_hw_right": _stack(("action", "inspire_a_hw_right"), np.float32),
+        "inspire_q12_left": _stack(("action", "inspire_q12_left"), np.float32),
+        "inspire_q12_right": _stack(("action", "inspire_q12_right"), np.float32),
         "env": {},
     }
+    # Mark inspire-aware episodes with a dedicated schema version.
+    if "inspire_q12_right" in organized and organized["inspire_q12_right"].size:
+        if np.abs(organized["inspire_q12_right"]).sum() > 1e-6 or np.abs(organized["inspire_q12_left"]).sum() > 1e-6:
+            organized["schema_version"] = np.array("mimic_lite_episode_v3_inspire")
     # Vision: extract per-frame camera data and encode RGB as MP4 video files.
     front_rgb_frames = []
     front_depth_frames = []
@@ -1824,6 +1834,37 @@ class MimicLiteActionProvider(ActionProvider):
         seed_info = get_current_episode_object_seed_info(self.env.cfg)
         left_hand_arr = np.asarray(left_hand, dtype=np.float32).reshape(-1) if left_hand is not None else np.zeros((7,), dtype=np.float32)
         right_hand_arr = np.asarray(right_hand, dtype=np.float32).reshape(-1) if right_hand is not None else np.zeros((7,), dtype=np.float32)
+
+        # Inspire-specific fields (a_hw_6 + q_sim_12 per hand + raw 26x7 tracking).
+        inspire_a_hw_left = None
+        inspire_a_hw_right = None
+        inspire_q12_left = None
+        inspire_q12_right = None
+        if self.enable_inspire:
+            l_raw = getattr(self, "_raw_hand_left", None)
+            r_raw = getattr(self, "_raw_hand_right", None)
+            if self.inspire_hand_source == "synthetic" or l_raw is None or r_raw is None:
+                a_l = self._synthetic_inspire_a_hw()
+                a_r = self._synthetic_inspire_a_hw()
+            else:
+                a_l = hand_keypoints_to_a_hw(l_raw)
+                a_r = hand_keypoints_to_a_hw(r_raw)
+            ql = expand_a_hw_to_q_sim(a_l, side=LEFT, unit="rad")
+            qr = expand_a_hw_to_q_sim(a_r, side=RIGHT, unit="rad")
+            inspire_a_hw_left = np.asarray(a_l, dtype=np.float32)
+            inspire_a_hw_right = np.asarray(a_r, dtype=np.float32)
+            inspire_q12_left = np.asarray([ql[n] for n in q_sim_joint_names(LEFT)], dtype=np.float32)
+            inspire_q12_right = np.asarray([qr[n] for n in q_sim_joint_names(RIGHT)], dtype=np.float32)
+        raw_hand_left_arr = (
+            np.asarray(getattr(self, "_raw_hand_left", None), dtype=np.float32).reshape(-1)
+            if getattr(self, "_raw_hand_left", None) is not None
+            else np.zeros((26 * 7,), dtype=np.float32)
+        )
+        raw_hand_right_arr = (
+            np.asarray(getattr(self, "_raw_hand_right", None), dtype=np.float32).reshape(-1)
+            if getattr(self, "_raw_hand_right", None) is not None
+            else np.zeros((26 * 7,), dtype=np.float32)
+        )
         return {
             "meta": {
                 "task": self.task_name,
@@ -1852,6 +1893,8 @@ class MimicLiteActionProvider(ActionProvider):
             "human_raw": {
                 "left_hand": left_hand_arr.copy(),
                 "right_hand": right_hand_arr.copy(),
+                "inspire_raw_hand_left": raw_hand_left_arr.copy(),
+                "inspire_raw_hand_right": raw_hand_right_arr.copy(),
                 "controller_data": self._raw_controller_data,
                 "recording_control": self._latest_recording_control,
                 "body_quat_w": self._last_ref_body_quat.copy(),
@@ -1881,6 +1924,18 @@ class MimicLiteActionProvider(ActionProvider):
                 "body_effort_target": body_effort_target.astype(np.float32).copy(),
                 "hand_action_left": left_hand_arr.copy(),
                 "hand_action_right": right_hand_arr.copy(),
+                "inspire_a_hw_left": (
+                    inspire_a_hw_left.copy() if inspire_a_hw_left is not None else np.zeros((6,), dtype=np.float32)
+                ),
+                "inspire_a_hw_right": (
+                    inspire_a_hw_right.copy() if inspire_a_hw_right is not None else np.zeros((6,), dtype=np.float32)
+                ),
+                "inspire_q12_left": (
+                    inspire_q12_left.copy() if inspire_q12_left is not None else np.zeros((12,), dtype=np.float32)
+                ),
+                "inspire_q12_right": (
+                    inspire_q12_right.copy() if inspire_q12_right is not None else np.zeros((12,), dtype=np.float32)
+                ),
             },
             "env": {
                 **self._collect_env_state(),
