@@ -93,6 +93,14 @@ from data_utils.fps_monitor import FPSMonitor
 from pico_server.sonic_tools.trl.utils.torch_transform import angle_axis_to_quaternion
 from pico_server.sonic_tools.isaac_utils.rotations import remove_smpl_base_rot, smpl_root_ytoz_up
 
+# Optional XRoboToolkit SDK access for raw 26-joint hand + 24-joint body tracking.
+# This publisher runs under the GMR env where xrobotoolkit_sdk is installed; when it is
+# missing (e.g. camera/synthetic-only hosts) we degrade to not publishing raw tracking.
+try:
+    import xrobotoolkit_sdk as _xrt
+except Exception:  # noqa: BLE001 - SDK optional
+    _xrt = None
+
 
 TWIST2_MUJOCO_JOINT_ORDER = [
     "left_hip_pitch_joint",
@@ -669,6 +677,7 @@ class XRobotTeleopToRobot:
         self._missing_ready_key_logged = False
         self._recording_control_sequence = 0
         self._last_recording_command_sent = "none"
+        self._raw_tracking_publish_failed_logged = False
         self._last_sent_gmr_qpos = None
         self._last_sent_gmr_time = None
         self._last_sent_body_quat_w = None
@@ -1196,6 +1205,48 @@ class XRobotTeleopToRobot:
             hand_left_pose, hand_right_pose = self.state_machine.get_hand_pose(self.robot_name)
             self.redis_pipeline.set("action_hand_left_unitree_g1_with_hands", json.dumps(hand_left_pose.tolist()))
             self.redis_pipeline.set("action_hand_right_unitree_g1_with_hands", json.dumps(hand_right_pose.tolist()))
+
+        # Send raw hand (26x7, OpenXR order) + body (24x7) tracking to redis for
+        # downstream Inspire dexterous-hand retargeting. Keeps Palm=0/Wrist=1 order
+        # and quat xyzw exactly as delivered by the SDK (not the xrobot_utils dict).
+        if self.redis_client is not None and _xrt is not None:
+            try:
+                left_state = np.asarray(_xrt.get_left_hand_tracking_state(), dtype=np.float64).reshape(26, 7)
+                right_state = np.asarray(_xrt.get_right_hand_tracking_state(), dtype=np.float64).reshape(26, 7)
+                left_active = int(_xrt.get_left_hand_is_active())
+                right_active = int(_xrt.get_right_hand_is_active())
+                self.redis_pipeline.set(
+                    "hand_tracking_left_unitree_g1_with_hands",
+                    json.dumps({
+                        "pose": left_state.tolist(),
+                        "is_active": left_active,
+                        "quat_order": "xyzw",
+                        "joint_order": "openxr_26_palm_wrist_thumb_mc...",
+                    }),
+                )
+                self.redis_pipeline.set(
+                    "hand_tracking_right_unitree_g1_with_hands",
+                    json.dumps({
+                        "pose": right_state.tolist(),
+                        "is_active": right_active,
+                        "quat_order": "xyzw",
+                        "joint_order": "openxr_26_palm_wrist_thumb_mc...",
+                    }),
+                )
+                if _xrt.is_body_data_available():
+                    body_state = np.asarray(_xrt.get_body_joints_pose(), dtype=np.float64).reshape(24, 7)
+                    self.redis_pipeline.set(
+                        "body_tracking_unitree_g1_with_hands",
+                        json.dumps({
+                            "pose": body_state.tolist(),
+                            "quat_order": "xyzw",
+                            "joint_order": "body_tracker_role_24_pelvis0_wrist20_21_hand22_23",
+                        }),
+                    )
+            except Exception as exc:
+                if not getattr(self, "_raw_tracking_publish_failed_logged", False):
+                    print(f"[SEND_TO_REDIS] raw tracking publish failed: {exc}")
+                    self._raw_tracking_publish_failed_logged = True
 
         # Send neck data to redis
         if neck_data is not None:
