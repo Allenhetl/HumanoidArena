@@ -62,6 +62,13 @@ from action_provider.vla_smpl_runtime import (
 )
 from pico_server.data_utils.params import DEFAULT_HAND_POSE
 from action_provider.action_provider_sonic import SONIC_HAND_POSE_ROBOT_NAME
+from action_provider.inspire_mapping import (
+    A_HW_6_NAMES,
+    LEFT,
+    RIGHT,
+    expand_a_hw_to_q_sim,
+    q_sim_joint_names,
+)
 
 
 PROJECT_ROOT = Path(os.environ.get("PROJECT_ROOT", Path(__file__).resolve().parents[1]))
@@ -79,6 +86,62 @@ def _decode_json_array(raw_value, dtype=np.float32):
 
 def _json_string(obj):
     return json.dumps(obj, ensure_ascii=False)
+
+
+# --- Inspire hand tracking -> a_hw_6 geometric helpers -------------------------
+# PICO / OpenXR 26-joint hand order (index into the 26x7 pose rows):
+#   0 Palm, 1 Wrist, 2 Thumb_MC, 3 Thumb_Prox, 4 Thumb_Dist, 5 Thumb_Tip,
+#   6 Index_MC ... 10 Index_Tip, 11 Middle_MC ... 15 Middle_Tip,
+#   16 Ring_MC ... 20 Ring_Tip, 21 Little_MC ... 25 Little_Tip
+_INSPIRE_FINGER_IDX = {
+    "index": (6, 7, 8, 9, 10),
+    "middle": (11, 12, 13, 14, 15),
+    "ring": (16, 17, 18, 19, 20),
+    "pinky": (21, 22, 23, 24, 25),
+}
+_INSPIRE_THUMB_IDX = (2, 3, 4, 5)
+
+
+def _inspire_angle(a, b, c):
+    """Three-point angle at b (rad)."""
+    v1 = a - b
+    v2 = c - b
+    n1 = float(np.linalg.norm(v1))
+    n2 = float(np.linalg.norm(v2))
+    if n1 < 1e-8 or n2 < 1e-8:
+        return 0.0
+    cos = float(np.clip(np.dot(v1, v2) / (n1 * n2), -1.0, 1.0))
+    return float(np.arccos(cos))
+
+
+def hand_keypoints_to_a_hw(keypoints_26x7: np.ndarray) -> np.ndarray:
+    """Convert one 26x7 hand pose to a length-6 a_hw_6 angle vector (rad).
+
+    Uses a bend convention: straight finger -> 0, curled -> grows toward pi,
+    matching the inspire joint limit convention [0, 1.7] rad.
+    """
+    kp = np.asarray(keypoints_26x7, dtype=np.float64).reshape(26, 7)[:, :3]
+    palm = kp[0]
+    out = np.zeros(6, dtype=np.float64)
+    for fname, a_name in zip(_INSPIRE_FINGER_IDX, ("index_flex", "middle_flex", "ring_flex", "pinky_flex")):
+        mc, pr, it, _d, _t = _INSPIRE_FINGER_IDX[fname]
+        out[A_HW_6_NAMES.index(a_name)] = np.pi - _inspire_angle(kp[mc], kp[pr], kp[it])
+    # thumb pitch: bend at thumb proximal between metacarpal and distal
+    out[A_HW_6_NAMES.index("thumb_flex")] = np.pi - _inspire_angle(
+        kp[_INSPIRE_THUMB_IDX[0]], kp[_INSPIRE_THUMB_IDX[1]], kp[_INSPIRE_THUMB_IDX[3]]
+    )
+    # thumb rotation: XZ-plane angle between palm->thumb_mc and palm->middle_mc
+    vt = kp[_INSPIRE_THUMB_IDX[0]] - palm
+    vm = kp[_INSPIRE_FINGER_IDX["middle"][0]] - palm
+    vtx = np.array([vt[0], vt[2]])
+    vmx = np.array([vm[0], vm[2]])
+    n1 = float(np.linalg.norm(vtx))
+    n2 = float(np.linalg.norm(vmx))
+    if n1 > 1e-8 and n2 > 1e-8:
+        out[A_HW_6_NAMES.index("thumb_rotation")] = float(
+            np.arccos(np.clip(np.dot(vtx, vmx) / (n1 * n2), -1.0, 1.0))
+        )
+    return out
 
 
 def _reward_scalar(env) -> float:
@@ -343,6 +406,13 @@ class MimicLiteActionProvider(ActionProvider):
         self.redis_port = int(getattr(args_cli, "mimic_lite_redis_port", 6379))
         self.enable_dex3 = bool(getattr(args_cli, "enable_dex3_dds", False))
         self.enable_gripper = bool(getattr(args_cli, "enable_dex1_dds", False))
+        self.enable_inspire = bool(getattr(args_cli, "enable_inspire_dds", False))
+        # Hand tracking source for Inspire: "redis" reads raw 26x7 hand tracking keys
+        # published by twist2_teleop_server (hand_tracking_left/right_unitree_g1_with_hands).
+        # "synthetic" uses a simple curl oscillation for headless smoke. "none" disables.
+        self.inspire_hand_source = getattr(args_cli, "inspire_hand_source", "") or (
+            "redis" if self.enable_inspire else "none"
+        )
         self._debug = bool(int(os.environ.get("MIMIC_LITE_DEBUG", "0") or "0"))
         self._log_every = int(os.environ.get("MIMIC_LITE_LOG_EVERY", "100") or 100)
         self._startup_blend_sec = float(os.environ.get("MIMIC_LITE_STARTUP_BLEND_SEC", "0") or 0.0)
@@ -422,6 +492,9 @@ class MimicLiteActionProvider(ActionProvider):
         self._right_hand_target = np.zeros(7, dtype=np.float32)
         self._left_hand_binary_state = False
         self._right_hand_binary_state = False
+        self._raw_hand_left = None
+        self._raw_hand_right = None
+        self._raw_body = None
         self._last_ref_joint_pos = self.runtime.default_joint_pos.copy()
         self._last_ref_joint_vel = np.zeros((29,), dtype=np.float32)
         robot = self.env.scene["robot"].data
@@ -616,6 +689,27 @@ class MimicLiteActionProvider(ActionProvider):
                 self._gripper_target_idx.append(idx_map[name])
                 self._gripper_source_idx.append(source_idx)
         self._gripper_target_idx_t = torch.tensor(self._gripper_target_idx, dtype=torch.long, device=self.device)
+
+        # --- Inspire (因时) 12-DoF per hand: 6 drive + 6 mimic ---
+        self._inspire_right_target_idx = []
+        self._inspire_left_target_idx = []
+        if self.enable_inspire:
+            for name in q_sim_joint_names(RIGHT):
+                if name in idx_map:
+                    self._inspire_right_target_idx.append(idx_map[name])
+            for name in q_sim_joint_names(LEFT):
+                if name in idx_map:
+                    self._inspire_left_target_idx.append(idx_map[name])
+            self._inspire_right_target_idx_t = torch.tensor(
+                self._inspire_right_target_idx, dtype=torch.long, device=self.device
+            )
+            self._inspire_left_target_idx_t = torch.tensor(
+                self._inspire_left_target_idx, dtype=torch.long, device=self.device
+            )
+            print(
+                f"[MimicLiteActionProvider] inspire enabled: source={self.inspire_hand_source} "
+                f"right_joints={len(self._inspire_right_target_idx)} left_joints={len(self._inspire_left_target_idx)}"
+            )
 
     def _resolve_effort_limits(self):
         robot_data = self.env.scene["robot"].data
@@ -1520,6 +1614,24 @@ class MimicLiteActionProvider(ActionProvider):
                     + " ".join(parts)
                 )
 
+    def _decode_tracking_payload(self, raw_value) -> Optional[np.ndarray]:
+        """Decode the JSON payload published by twist2_teleop_server.
+
+        Payload shape: {"pose": [[...26x7...]], "is_active": int, ...}
+        Returns the 26x7 (or 24x7) pose array, or None when missing/invalid.
+        """
+        if raw_value is None:
+            return None
+        try:
+            payload = raw_value.decode("utf-8") if isinstance(raw_value, bytes) else raw_value
+            data = json.loads(payload)
+            pose = np.asarray(data["pose"], dtype=np.float64)
+            if pose.ndim != 2 or pose.shape[1] != 7:
+                return None
+            return pose.astype(np.float32, copy=True)
+        except Exception:
+            return None
+
     def _read_reference(self):
         raw = self._redis_client.mget(
             [
@@ -1535,6 +1647,9 @@ class MimicLiteActionProvider(ActionProvider):
                 "recording_control_unitree_g1_with_hands",
                 "controller_data",
                 MIMIC_LITE_INPUT_READY_KEY,
+                "hand_tracking_left_unitree_g1_with_hands",
+                "hand_tracking_right_unitree_g1_with_hands",
+                "body_tracking_unitree_g1_with_hands",
             ]
         )
         joint_pos = _decode_json_array(raw[0], dtype=np.float32)
@@ -1555,6 +1670,11 @@ class MimicLiteActionProvider(ActionProvider):
         recording_control_raw = raw[9]
         controller_data_raw = raw[10]
         input_ready_raw = raw[11]
+
+        # Raw inspire hand tracking (26x7 per hand, OpenXR order) + optional body tracking.
+        self._raw_hand_left = self._decode_tracking_payload(raw[12])
+        self._raw_hand_right = self._decode_tracking_payload(raw[13])
+        self._raw_body = self._decode_tracking_payload(raw[14])
 
         self._update_input_ready_guard(input_ready_raw)
 
@@ -1626,7 +1746,37 @@ class MimicLiteActionProvider(ActionProvider):
                 self._last_ref_body_quat = body_quat.astype(np.float32, copy=True)
         return left_hand, right_hand, timestamp_ns
 
+    def _synthetic_inspire_a_hw(self) -> np.ndarray:
+        """Synthetic a_hw_6 (rad) oscillating open<->fist for headless smoke tests."""
+        if not hasattr(self, "_synth_hand_t0"):
+            self._synth_hand_t0 = time.time()
+        t = time.time() - self._synth_hand_t0
+        curl = 0.5 * (1.0 - np.cos(2.0 * np.pi * t / 4.0))  # 0..1 over 4s
+        a_hw = np.zeros(6, dtype=np.float64)
+        a_hw[:4] = curl * 1.6  # fingers to ~1.6 rad
+        a_hw[4] = curl * 0.45  # thumb pitch within [0, 0.5]
+        a_hw[5] = 0.3 + 0.3 * curl  # thumb rotation
+        return a_hw
+
     def _apply_hands(self, full_action: torch.Tensor, left_hand, right_hand):
+        # Inspire 12-DoF per hand from raw 26x7 hand tracking (OpenXR order).
+        if self.enable_inspire and len(self._inspire_right_target_idx) and len(self._inspire_left_target_idx):
+            l_raw = getattr(self, "_raw_hand_left", None)
+            r_raw = getattr(self, "_raw_hand_right", None)
+            if self.inspire_hand_source == "synthetic" or l_raw is None or r_raw is None:
+                a_hw_r = self._synthetic_inspire_a_hw()
+                a_hw_l = self._synthetic_inspire_a_hw()
+            else:
+                a_hw_r = hand_keypoints_to_a_hw(r_raw)
+                a_hw_l = hand_keypoints_to_a_hw(l_raw)
+            qr = expand_a_hw_to_q_sim(a_hw_r, side=RIGHT, unit="rad")
+            ql = expand_a_hw_to_q_sim(a_hw_l, side=LEFT, unit="rad")
+            r_vals = torch.tensor([qr[n] for n in q_sim_joint_names(RIGHT)], dtype=torch.float32, device=self.device)
+            l_vals = torch.tensor([ql[n] for n in q_sim_joint_names(LEFT)], dtype=torch.float32, device=self.device)
+            full_action.index_copy_(0, self._inspire_right_target_idx_t, r_vals)
+            full_action.index_copy_(0, self._inspire_left_target_idx_t, l_vals)
+            return
+
         if self.enable_dex3 and left_hand is not None and right_hand is not None:
             if len(self._left_hand_target_idx) and len(self._right_hand_target_idx):
                 left = np.asarray(left_hand, dtype=np.float32).reshape(-1)
