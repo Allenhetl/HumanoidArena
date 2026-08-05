@@ -31,11 +31,10 @@ from scipy.spatial.transform import Rotation as R
 
 # URDF fixed joint origin for hand base -> wrist_yaw_link (from dex-retarget URDF)
 # Hand base -> wrist_yaw_link transforms (per side, URDFs are mirror images).
-# GMR's own g1_mocap_29dof_with_hands.xml places the palm directly along wrist +x.
-# Left URDF: fingers along -y; z+90 maps -y -> +x, palm (URDF -z) stays down.
-# Right URDF: fingers along +y (mirror); y+180 then z-90 maps +y -> +x, palm down.
-_BASE_RPY_LEFT = (0.0, 0.0, np.pi / 2.0)       # z +90deg
-_BASE_RPY_RIGHT = (0.0, np.pi, -np.pi / 2.0)   # y +180deg, z -90deg
+# Left: z+90 (verified correct). Right: v2 quat [0, .707, -.707, 0] — the only
+# candidate whose palm_x mirrors the left ([0,-1,0] vs [0,1,0]).
+_BASE_RPY_LEFT = (0.0, 0.0, np.pi / 2.0)                # z +90deg
+_BASE_QUAT_RIGHT = np.array([0.0, 0.70710678, -0.70710678, 0.0])  # wxyz
 _URDF_NS = {"u": "http://www.robot.http://www.robot.com"}
 
 
@@ -308,9 +307,9 @@ def main():
     left_meshes, left_body = build_hand_mjcf("left", Path(args.urdf_left), meshdir)
 
     # insert both hands with per-side base transforms (URDFs are mirror images).
-    # Left: z+90 (fingers +x, palm down). Right: y+180 then z-90 (fingers +x, palm down).
+    # Left: z+90. Right: v2 quat (palm_x mirrors left: [0,-1,0]).
     q_base_left = rpy_to_quat_wxyz(_BASE_RPY_LEFT)
-    q_base_right = rpy_to_quat_wxyz(_BASE_RPY_RIGHT)
+    q_base_right = _BASE_QUAT_RIGHT
     base_xml = insert_hands_into_wrist(base_xml, left_body, right_body, q_base_left, q_base_right)
 
     # add mesh assets for hands into the <asset><mesh> section
