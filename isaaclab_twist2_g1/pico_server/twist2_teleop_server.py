@@ -11,6 +11,14 @@ State Machine Controls:
 - Right controller axis: Fine-tune root xy velocity and yaw velocity
 - Auto-transition: idle -> teleop when motion data is available
 
+PC Keyboard Controls (stdin + MuJoCo window; overrides controller):
+- A: Cycle through idle -> teleop -> pause -> teleop...
+- S: Save recording and trigger complete reset
+- D: Discard recording and trigger complete reset
+- E: Emergency stop / cancel recording
+- Q: Exit program
+- (--no_auto_teleop disables the automatic idle -> teleop transition)
+
 States:
 - idle: Waiting for input or data
 - teleop: Processing motion retargeting with velocity control
@@ -26,9 +34,14 @@ import argparse
 import json
 import pathlib
 import os
+import queue
+import select
 import subprocess
 import sys
+import termios
+import threading
 import time
+import tty
 
 def _prefer_workspace_gmr():
     """Prefer the checked-out GMR package when the installed egg misses assets."""
@@ -100,6 +113,122 @@ try:
     import xrobotoolkit_sdk as _xrt
 except Exception:  # noqa: BLE001 - SDK optional
     _xrt = None
+
+
+class _KeyboardEvents:
+    """Edge-triggered keyboard events feeding the teleop state machine.
+
+    The state machine is driven by Pico controller events. During hand-tracking
+    recording the user is not holding a controller, so toggling state (A) and
+    save/reset (S/D) require putting the controller down. Two keyboard paths
+    overlay the controller data (both optional, single-frame pulses so the
+    existing StateMachine edge detection keeps working unchanged):
+
+      1. MuJoCo viewer window keys  (works while the viewer has focus)
+      2. raw-mode terminal keys     (works without any window focus)
+
+    Hand open/close stays on the physical controller triggers/grips (analog);
+    keyboard cannot reproduce continuous values.
+
+    Key mapping:
+      A  toggle idle <-> teleop <-> pause   (RightController.key_one)
+      S  save recording + complete reset    (LeftController.key_one)
+      D  discard recording + complete reset (LeftController.key_two)
+      E  emergency stop / cancel recording  (LeftController.axis_click)
+      Q  exit (sets state machine to exit)
+    """
+
+    KEY_TO_CTRL = {
+        "a": ("RightController", "key_one"),
+        "s": ("LeftController", "key_one"),
+        "d": ("LeftController", "key_two"),
+        "e": ("LeftController", "axis_click"),
+    }
+
+    def __init__(self):
+        self._events = queue.Queue()
+        self._quit_requested = False
+        self._stdin_thread = None
+
+    # ---- event sources ---------------------------------------------------
+
+    def on_viewer_key(self, keycode: int) -> None:
+        """GLFW key callback used by mujoco.viewer.launch_passive."""
+        key = self._keycode_to_name(keycode)
+        if key:
+            self._push(key)
+
+    def _keycode_to_name(self, keycode: int):
+        if isinstance(keycode, int) and 65 <= keycode <= 90:
+            return chr(keycode).lower()
+        try:
+            import glfw
+            name = glfw.get_key_name(keycode, 0)
+        except Exception:
+            return None
+        if name and len(name) == 1:
+            return name.lower()
+        return None
+
+    def start_stdin_reader(self) -> None:
+        """Start a raw-mode stdin reader thread (no window focus needed)."""
+        if self._stdin_thread is not None:
+            return
+        self._stdin_thread = threading.Thread(
+            target=self._stdin_loop, daemon=True, name="keyboard-stdin"
+        )
+        self._stdin_thread.start()
+
+    def _stdin_loop(self) -> None:
+        old = None
+        try:
+            old = termios.tcgetattr(sys.stdin.fileno())
+            tty.setraw(sys.stdin.fileno())
+        except Exception:
+            return
+        try:
+            while True:
+                try:
+                    ready, _, _ = select.select([sys.stdin], [], [], 0.2)
+                except (OSError, ValueError):
+                    break
+                if not ready:
+                    continue
+                try:
+                    ch = sys.stdin.read(1)
+                except (OSError, ValueError):
+                    break
+                if not ch:
+                    continue
+                key = ch.lower()
+                if key in self.KEY_TO_CTRL or key == "q" or key == "\x03" or key == "\x1b":
+                    self._push("q" if key in ("\x03", "\x1b") else key)
+                    if key == "q" or key in ("\x03", "\x1b"):
+                        break
+        finally:
+            try:
+                termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old)
+            except Exception:
+                pass
+
+    def _push(self, key: str) -> None:
+        self._events.put(key)
+        if key == "q":
+            self._quit_requested = True
+
+    # ---- consumption -----------------------------------------------------
+
+    def drain(self):
+        pending = set()
+        try:
+            while True:
+                pending.add(self._events.get_nowait())
+        except queue.Empty:
+            pass
+        return pending
+
+    def quit_requested(self) -> bool:
+        return self._quit_requested
 
 
 TWIST2_MUJOCO_JOINT_ORDER = [
@@ -678,6 +807,11 @@ class XRobotTeleopToRobot:
         self._recording_control_sequence = 0
         self._last_recording_command_sent = "none"
         self._raw_tracking_publish_failed_logged = False
+        self._keyboard = _KeyboardEvents()
+        self.auto_teleop = bool(getattr(args, "auto_teleop", True))
+        self._auto_teleop_frames = 0
+        self._auto_teleop_triggered = False
+        self._last_epoch_change_monotonic = 0.0
         self._last_sent_gmr_qpos = None
         self._last_sent_gmr_time = None
         self._last_sent_body_quat_w = None
@@ -809,6 +943,7 @@ class XRobotTeleopToRobot:
             self._sonic_joint29_prev_body_quat_w = None
             self._sonic_joint29_next_target_ns = None
             self._last_recording_command_sent = "none"
+            self._last_epoch_change_monotonic = time.monotonic()
             print(f"[TWIST2_PICO] Input ready epoch updated: {epoch_id}")
             return False
         return self._ready_for_live_stream
@@ -1439,16 +1574,58 @@ class XRobotTeleopToRobot:
 
         print("Ready to receive teleop data.")
 
+    _EMPTY_CONTROLLER = {
+        "LeftController": {
+            "index_trig": False, "grip": False, "key_one": False,
+            "key_two": False, "axis": [0.0, 0.0], "axis_click": False,
+        },
+        "RightController": {
+            "index_trig": False, "grip": False, "key_one": False,
+            "key_two": False, "axis": [0.0, 0.0], "axis_click": False,
+        },
+    }
+
+    def _merge_keyboard_controller(self, controller_data, keyboard_pending, extra_press=None):
+        """Overlay keyboard press pulses onto the (possibly None) controller data.
+
+        Returns a controller dict suitable for StateMachine.update(). When no
+        keyboard event and no extra press are present, the real controller data
+        is returned unchanged (or None when no controller is connected).
+        """
+        if not keyboard_pending and extra_press is None and controller_data is not None:
+            return controller_data
+        base = {}
+        if controller_data is not None:
+            base = {k: (dict(v) if isinstance(v, dict) else v) for k, v in controller_data.items()}
+        base.setdefault("LeftController", dict(self._EMPTY_CONTROLLER["LeftController"]))
+        base.setdefault("RightController", dict(self._EMPTY_CONTROLLER["RightController"]))
+        for key in keyboard_pending:
+            mapped = _KeyboardEvents.KEY_TO_CTRL.get(key)
+            if mapped:
+                side, field = mapped
+                base[side][field] = True
+        if extra_press is not None:
+            side, field = extra_press
+            base[side][field] = True
+        return base
+
     def run(self):
         """Main execution loop"""
         self.initialize_all_systems()
+        self._keyboard.start_stdin_reader()
+        print("[Keyboard] PC key controls (stdin + MuJoCo window): A=toggle state, S=save_and_reset, D=discard_and_reset, E=emergency stop/cancel, Q=exit")
+        if self.auto_teleop:
+            print("[Keyboard] Auto-teleop ENABLED: idle -> teleop when live motion data is present (use --no_auto_teleop to disable)")
+        else:
+            print("[Keyboard] Auto-teleop DISABLED (manual A key / controller toggling)")
 
         # Start the viewer
         with mjv.launch_passive(
             model=self.model,
             data=self.data,
             show_left_ui=False,
-            show_right_ui=False
+            show_right_ui=False,
+            key_callback=self._keyboard.on_viewer_key,
         ) as viewer:
             viewer.opt.flags[mj.mjtVisFlag.mjVIS_TRANSPARENT] = 1
 
@@ -1457,10 +1634,39 @@ class XRobotTeleopToRobot:
                 smplx_data, left_hand_data, right_hand_data, controller_data, headset_data = self.get_teleop_data()
                 ready_for_live_stream = self._refresh_input_ready_epoch()
 
+                # Keyboard events + auto-teleop overlay
+                keyboard_pending = self._keyboard.drain()
+                extra_press = None
+                if self.auto_teleop:
+                    current_state = self.state_machine.get_current_state()
+                    if (
+                        current_state == "idle"
+                        and smplx_data is not None
+                        and time.monotonic() - self._last_epoch_change_monotonic > 1.0
+                    ):
+                        self._auto_teleop_frames += 1
+                    else:
+                        self._auto_teleop_frames = 0
+                    if self._auto_teleop_frames >= 15:
+                        self._auto_teleop_frames = 0
+                        extra_press = ("RightController", "key_one")
+                        if not self._auto_teleop_triggered:
+                            print("[AutoTeleop] live motion data available -> entering teleop (press A to pause/toggle)")
+                            self._auto_teleop_triggered = True
+                    if current_state != "idle":
+                        self._auto_teleop_triggered = False
+                if self._keyboard.quit_requested():
+                    self.state_machine.state = "exit"
+
+                merged_controller = self._merge_keyboard_controller(
+                    controller_data, keyboard_pending, extra_press
+                )
+
                 # Update state machine
-                if ready_for_live_stream and controller_data is not None:
-                    self.state_machine.update(controller_data)
-                    self.send_controller_data_to_redis(controller_data)
+                if ready_for_live_stream and merged_controller is not None:
+                    self.state_machine.update(merged_controller)
+                    if controller_data is not None:
+                        self.send_controller_data_to_redis(controller_data)
 
                 # Check if we should exit
                 if self.state_machine.should_exit():
@@ -1590,6 +1796,19 @@ def parse_arguments():
         choices=["twist2", "sonic_joint29", "mimic_lite"],
         default="twist2",
         help="Select which Isaac input-ready/backend route this teleop publisher should target.",
+    )
+    parser.add_argument(
+        "--auto_teleop",
+        dest="auto_teleop",
+        action="store_true",
+        default=True,
+        help="Automatically enter teleop when live motion data is available (default: enabled).",
+    )
+    parser.add_argument(
+        "--no_auto_teleop",
+        dest="auto_teleop",
+        action="store_false",
+        help="Disable the automatic idle -> teleop transition (manual A key / controller toggling).",
     )
     return parser.parse_args()
 

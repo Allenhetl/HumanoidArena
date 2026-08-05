@@ -21,7 +21,12 @@ if [[ -d "${GMR_ROOT}/general_motion_retargeting" ]]; then
   export PYTHONPATH="${GMR_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 fi
 
-# --target_backend sonic_joint29 \ # twist2 / sonic_joint29
+# --target_backend sonic_joint29 \ # twist2 / sonic_joint29 / mimic_lite
+# PC keyboard controls (stdin + MuJoCo window):
+#   A = toggle idle/teleop/pause, S = save_and_reset, D = discard_and_reset,
+#   E = emergency stop/cancel, Q = exit.
+# Auto-teleop (idle -> teleop on live motion data) is ON by default;
+# pass --no_auto_teleop to disable.
 cd "${SCRIPT_DIR}"
 "${GMR_PYTHON}" pico_server/twist2_teleop_server.py \
   --robot unitree_g1 \
