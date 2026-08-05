@@ -1,0 +1,39 @@
+name: real_scene_ipark_drink_inspire_mimic_lite
+description: >
+  Ipark real-scene (gauss) + drink101 bottle on a table for the Inspire mimic-lite
+  wholebody teleop task. Bottle body is dynamic (placed on the table), cap is a
+  separate dynamic rigid body connected to the body by a breakable revolute joint
+  (one full turn then pull-up breaks it, cap comes off independently).
+task_name: Isaac-Move-Real-Scene-Drink-G129-Inspire-Wholedoby
+backend: mimic_lite
+
+overrides:
+  sim:
+    dt: 0.005
+  decimation: 4
+  scene:
+    room:
+      spawn:
+        usd_path: "${PROJECT_ROOT}/assets/objects/real_scene/ipark_t2_505_20260721_gauss_ccm1.usda"
+    robot:
+      init_state:
+        pos: [-3.239, -4.425, -0.335]
+        # quaternion order: (w, x, y, z); rotate 90 deg around Z -> faces +Y
+        rot: [0.7071, 0.0, 0.0, 0.7071]
+    robot_key_light:
+      init_state:
+        pos: [-3.239, -4.425, 1.4]
+    # SAM3D desk (desk0.usd) ~1.2 m ahead of the robot (+Y). Desk local origin
+    # = table base; tabletop 1.0 m above ipark floor (-1.124) => tabletop z=-0.124.
+    table:
+      init_state:
+        pos: [-3.239, -3.2, -0.624]
+        rot: [1.0, 0.0, 0.0, 0.0]
+    drink_body:
+      init_state:
+        pos: [-3.239, -3.2, -0.127]
+        rot: [1.0, 0.0, 0.0, 0.0]
+    drink_cap:
+      init_state:
+        pos: [-3.239, -3.2, 0.1379]
+        rot: [1.0, 0.0, 0.0, 0.0]

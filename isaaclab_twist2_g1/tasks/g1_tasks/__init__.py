@@ -10,6 +10,7 @@ from . import move_open_door_g1_29dof_dex3_wholebody
 from . import move_sit_sofa_g1_29dof_dex3_wholebody
 from . import move_small_warehouse_vision_navigation_g1_29dof_dex3_wholebody
 from . import move_real_scene_lab_g1_29dof_dex3_wholebody
+from . import move_real_scene_drink_inspire_wholedoby
 
 from . import push_t_g1_29dof_dex3_wholebody
 from . import move_three_step_platform_g1_29dof_dex3_wholebody
@@ -26,6 +27,7 @@ __all__ = [
     "move_sit_sofa_g1_29dof_dex3_wholebody",
     "move_small_warehouse_vision_navigation_g1_29dof_dex3_wholebody",
     "move_real_scene_lab_g1_29dof_dex3_wholebody",
+    "move_real_scene_drink_inspire_wholedoby",
     "push_t_g1_29dof_dex3_wholebody",
     "move_three_step_platform_g1_29dof_dex3_wholebody",
     "move_pickplace_small_trolley_g1_29dof_dex3_wholebody",

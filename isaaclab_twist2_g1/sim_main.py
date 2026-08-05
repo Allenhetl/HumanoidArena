@@ -374,6 +374,29 @@ from tools.get_reward import get_reward_debug_string
 # Use text-based tracker instead of GUI visualizer to avoid matplotlib issues
 from tools.joint_position_tracker import JointPositionTracker
 
+_drink_state_module = None
+
+
+def _update_drink_state(env):
+    """Track drink101 cap twist/break state (no-op unless the drink scene is loaded)."""
+    global _drink_state_module
+    if "drink_cap" not in env.scene.keys():
+        return
+    if _drink_state_module is None:
+        try:
+            from tasks.common_observations import drink_state as _drink_state_module
+        except Exception as exc:
+            print(f"[drink] drink_state import failed: {exc}")
+            _drink_state_module = False
+    if _drink_state_module:
+        try:
+            _drink_state_module.update_drink_state(env)
+        except Exception as exc:
+            if not getattr(_update_drink_state, "_logged", False):
+                print(f"[drink] update_drink_state failed: {exc}")
+                _update_drink_state._logged = True
+
+
 
 def _capture_front_camera_rgb(env):
     try:
@@ -1550,6 +1573,9 @@ def main():
                         print(f"[sim_main] {exc}")
                         controller.stop()
                         break
+
+                    # drink101 cap twist/break monitor (no-op unless drink scene)
+                    _update_drink_state(env)
 
                     if camera_update_fn is not None and loop_count % 3 == 0:
                         try:
