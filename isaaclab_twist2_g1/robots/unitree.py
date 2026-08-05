@@ -2810,9 +2810,56 @@ G129_CFG_MIMIC_LITE = ArticulationCfg(
         # dex3 hands: keep HA high stiffness (not part of MimicLite 29-DoF body)
         "hands": ImplicitActuatorCfg(
             joint_names_expr=[
+                # dex3 hands
                 ".*_hand_index_.*_joint",
                 ".*_hand_middle_.*_joint",
                 ".*_hand_thumb_.*_joint",
+                # inspire (因时) hands: 6 drive + 6 mimic per hand
+                ".*_index_proximal_joint",
+                ".*_index_intermediate_joint",
+                ".*_middle_proximal_joint",
+                ".*_middle_intermediate_joint",
+                ".*_pinky_proximal_joint",
+                ".*_pinky_intermediate_joint",
+                ".*_ring_proximal_joint",
+                ".*_ring_intermediate_joint",
+                ".*_thumb_proximal_yaw_joint",
+                ".*_thumb_proximal_pitch_joint",
+                ".*_thumb_intermediate_joint",
+                ".*_thumb_distal_joint",
+            ],
+            effort_limit=300,
+            velocity_limit=100.0,
+            stiffness={".*": 100.0},
+            damping={".*": 10.0},
+            armature={".*": 0.1},
+        ),
+    },
+)
+
+
+# Inspire-hand variant of the BeyondMimic-aligned MimicLite PD config.
+# Same body PD as G129_CFG_MIMIC_LITE, but the hands actuator only matches
+# the inspire (因时) 6-drive/6-mimic joint naming (R/L_*_proximal_joint etc.)
+# so it validates against the g1-29dof_wholebody_inspire USD (no dex3 joints).
+# (isaaclab requires every joint_names_expr to match >=1 joint in the USD.)
+G129_CFG_MIMIC_LITE_INSPIRE = G129_CFG_MIMIC_LITE.replace(
+    actuators={
+        **G129_CFG_MIMIC_LITE.actuators,
+        "hands": ImplicitActuatorCfg(
+            joint_names_expr=[
+                ".*_index_proximal_joint",
+                ".*_index_intermediate_joint",
+                ".*_middle_proximal_joint",
+                ".*_middle_intermediate_joint",
+                ".*_pinky_proximal_joint",
+                ".*_pinky_intermediate_joint",
+                ".*_ring_proximal_joint",
+                ".*_ring_intermediate_joint",
+                ".*_thumb_proximal_yaw_joint",
+                ".*_thumb_proximal_pitch_joint",
+                ".*_thumb_intermediate_joint",
+                ".*_thumb_distal_joint",
             ],
             effort_limit=300,
             velocity_limit=100.0,

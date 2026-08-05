@@ -86,15 +86,19 @@ def get_robot_inspire_joint_states(
     joint_pos = env.scene["robot"].data.joint_pos
     joint_vel = env.scene["robot"].data.joint_vel  
     joint_torque = env.scene["robot"].data.applied_torque
-    
-    # get the gripper joint indices (last 2 joints)
-    # gripper_joint_names = get_robot_girl_joint_names()
-    # all_joint_names = env.scene["robot"].data.joint_names
-    # # print(f"all_joint_names: {all_joint_names}")
-    # gripper_joint_indices = [all_joint_names.index(name) for name in gripper_joint_names if name in all_joint_names]
-    # print(f"gripper_joint_indices: {gripper_joint_indices}")
-    inspire_joint_indices = [36, 37, 35, 34, 48, 38, 31, 32, 30, 29, 43, 33]
-    if len(inspire_joint_indices) >= 12:
+
+    # Resolve inspire hand joint indices by NAME (robust across USD joint ordering).
+    all_joint_names = env.scene["robot"].data.joint_names
+    inspire_joint_names = get_robot_girl_joint_names()
+    inspire_joint_indices = []
+    missing = []
+    for name in inspire_joint_names:
+        if name in all_joint_names:
+            inspire_joint_indices.append(all_joint_names.index(name))
+        else:
+            missing.append(name)
+
+    if len(inspire_joint_indices) >= 12 and not missing:
         # extract the gripper joint states in the specified order
         inspire_positions = joint_pos[:, inspire_joint_indices]
         inspire_velocities = joint_vel[:, inspire_joint_indices]  
@@ -116,8 +120,5 @@ def get_robot_inspire_joint_states(
         return inspire_positions
     else:
         # if the gripper joints are not found, return a zero tensor
-        # print(f"[gripper_state] Warning: no gripper joints found, expected: {gripper_joint_names}, available: {all_joint_names}")
-        print(f"[gripper_state] Warning: no gripper joints found")
-        return torch.zeros((joint_pos.shape[0], 2))
-
-
+        print(f"[gripper_state] Warning: inspire joints missing: {missing}")
+        return torch.zeros((joint_pos.shape[0], 12))

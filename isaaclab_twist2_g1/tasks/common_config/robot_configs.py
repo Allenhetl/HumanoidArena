@@ -11,7 +11,8 @@ import os
 from isaaclab.assets import ArticulationCfg
 from isaaclab.utils import configclass
 from robots.unitree import G129_CFG_WITH_DEX1_BASE_FIX, G129_CFG_WITH_DEX3_BASE_FIX, G129_CFG_WITH_INSPIRE_HAND, \
-    G129_CFG_WITH_DEX1_WHOLEBODY, G129_CFG_WITH_DEX3_WHOLEBODY, G129_CFG_WITH_INSPIRE_WHOLEBODY, G129_CFG_MIMIC_LITE
+    G129_CFG_WITH_DEX1_WHOLEBODY, G129_CFG_WITH_DEX3_WHOLEBODY, G129_CFG_WITH_INSPIRE_WHOLEBODY, G129_CFG_MIMIC_LITE, \
+    G129_CFG_MIMIC_LITE_INSPIRE
 from typing import Optional, Dict, Tuple, Literal
 
 
@@ -206,7 +207,12 @@ class G129dofRobotBaseCfg:
         # MimicLite-only: switch to BeyondMimic-aligned PD cfg when explicitly requested.
         # This keeps SONIC/TWIST2 defaults untouched.
         if os.environ.get("MIMIC_LITE_ROBOT_CFG", "0") == "1":
-            base_config = G129_CFG_MIMIC_LITE
+            # Use the inspire-hand actuator variant when the target USD has inspire joints.
+            _usd = str(getattr(base_config.spawn, "usd_path", "")).lower()
+            if "inspire" in _usd:
+                base_config = G129_CFG_MIMIC_LITE_INSPIRE
+            else:
+                base_config = G129_CFG_MIMIC_LITE
 
         robot_usd_override = os.environ.get("ROBOT_USD_OVERRIDE")
         if robot_usd_override:
@@ -387,7 +393,8 @@ class G1RobotPresets:
             init_pos=init_pos,
             init_rot=init_rot,
             include_waist=True,
-            is_have_hand=False,
+            is_have_hand=True,
+            hand_type="inspire",
             base_config=G129_CFG_WITH_INSPIRE_WHOLEBODY,
             update_default_joint_pos=True,
             use_twist2_defaults=True,
