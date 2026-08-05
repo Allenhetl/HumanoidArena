@@ -1,12 +1,12 @@
-name: real_scene_ipark_sonic_default_rot
-description: SONIC env config for ipark real-scene with default rotation.
+name: real_scene_ipark_twist2
+description: TWIST2 env config for ipark real-scene (ipark_t2_505_20260721 gauss).
 task_name: Isaac-Move-Real-Scene-Lab-G129-Dex3-Wholebody
-backend: sonic
+backend: twist2
 
 overrides:
   sim:
-    dt: 0.005
-  decimation: 4
+    dt: 0.001
+  decimation: 20
   scene:
     room:
       spawn:
@@ -15,8 +15,8 @@ overrides:
       init_state:
         pos: [-3.239, -4.425, -0.335]
         # quaternion order: (w, x, y, z)
-        # default identity: (1, 0, 0, 0), robot faces -X
-        rot: [1.0, 0.0, 0.0, 0.0]
+        # rotate 90 deg around Z: (0.7071, 0, 0, 0.7071)
+        rot: [0.7071, 0.0, 0.0, 0.7071]
     robot_key_light:
       init_state:
         pos: [-3.239, -4.425, 1.4]

@@ -63,3 +63,8 @@ lerobot/scripts/open_aoe_training/
 # Local agent/session guidance
 AGENTS.md
 MEMORY.md
+
+# MANUS research clones / proprietary SDK (never commit)
+/reference/
+/isaaclab_twist2_g1/tools/manus_*.py
+/isaaclab_twist2_g1/docs/MANUS_INTEGRATION_NOTES_20260806.md

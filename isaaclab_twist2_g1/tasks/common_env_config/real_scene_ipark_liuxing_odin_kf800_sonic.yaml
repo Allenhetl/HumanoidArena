@@ -1,0 +1,25 @@
+name: real_scene_ipark_liuxing_odin_kf800_sonic
+description: >
+  SONIC env config for ipark real-scene using the Liuxing Gaussian visual
+  (same source as ipark_t2_505_20260721) plus the MVSAnywhere-estimated
+  Odin KF800 LiDAR collision shell/floor (ipark_liuxing_odin_kf800_collision_scene.usda).
+task_name: Isaac-Move-Real-Scene-Lab-G129-Dex3-Wholebody
+backend: sonic
+
+overrides:
+  sim:
+    dt: 0.005
+  decimation: 4
+  scene:
+    room:
+      spawn:
+        usd_path: "${PROJECT_ROOT}/assets/objects/real_scene/ipark_liuxing_odin_kf800_collision_scene.usda"
+    robot:
+      init_state:
+        pos: [-3.239, -4.425, -0.335]
+        # quaternion order: (w, x, y, z)
+        # rotate 90 deg around Z: (0.7071, 0, 0, 0.7071)
+        rot: [0.7071, 0.0, 0.0, 0.7071]
+    robot_key_light:
+      init_state:
+        pos: [-3.239, -4.425, 1.4]
