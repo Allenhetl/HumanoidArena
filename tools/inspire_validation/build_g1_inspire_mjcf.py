@@ -30,7 +30,11 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 # URDF fixed joint origin for hand base -> wrist_yaw_link (from dex-retarget URDF)
-_BASE_RPY = (-1.5707963267948966, 0.0, 3.141592653589793)  # X -90deg, Z 180deg
+# Hand base -> wrist_yaw_link transform.
+# GMR's own g1_mocap_29dof_with_hands.xml places the palm directly along wrist +x
+# (no rotation, pos along +x). The inspire hand extends fingers along hand_base -y,
+# so a +90deg rotation about z maps -y -> +x to match the GMR convention.
+_BASE_RPY = (0.0, 0.0, np.pi / 2.0)  # z +90deg
 _URDF_NS = {"u": "http://www.robot.http://www.robot.com"}
 
 
@@ -239,8 +243,13 @@ def remove_rubber_hands(base_xml: str) -> str:
     return base_xml
 
 
-def insert_hands_into_wrist(base_xml: str, left_body: str, right_body: str) -> str:
-    """Attach hand bodies under the wrist_yaw_link bodies."""
+def insert_hands_into_wrist(base_xml: str, left_body: str, right_body: str, q_base: np.ndarray) -> str:
+    """Attach hand bodies under the wrist_yaw_link bodies, applying the base transform.
+
+    The inspire hand URDF root (R/L_hand_base_link) is rotated by q_base relative to
+    the G1 wrist_yaw_link body so fingers point along wrist +x (GMR convention).
+    A small +x offset places the palm at the wrist end (matches GMR with_hands palm).
+    """
     for side, body in (("left", left_body), ("right", right_body)):
         marker = f'<body name="{side}_wrist_yaw_link"'
         idx = base_xml.find(marker)
@@ -248,7 +257,12 @@ def insert_hands_into_wrist(base_xml: str, left_body: str, right_body: str) -> s
             raise RuntimeError(f"wrist_yaw_link body not found for {side}")
         # insert after the opening tag's first '>'
         gt = base_xml.find(">", idx)
-        base_xml = base_xml[: gt + 1] + "\n" + body + base_xml[gt + 1:]
+        wrapped = (
+            f'\n  <body name="inspire_{side}_hand_attach" '
+            f'pos="0.0415 0 0" quat="{" ".join(f"{v:.9g}" for v in q_base)}">\n'
+            f"{body}\n  </body>"
+        )
+        base_xml = base_xml[: gt + 1] + wrapped + base_xml[gt + 1:]
     return base_xml
 
 
@@ -292,17 +306,9 @@ def main():
     right_meshes, right_body = build_hand_mjcf("right", Path(args.urdf_right), meshdir)
     left_meshes, left_body = build_hand_mjcf("left", Path(args.urdf_left), meshdir)
 
-    # attach base transform: hand base body gets pos=0 quat=base_rpy relative to wrist body
-    # We wrap the hand subtree in a transform body under the wrist.
+    # insert both hands: right under right_wrist, left under left_wrist, applying base transform
     q_base = rpy_to_quat_wxyz(_BASE_RPY)
-    transform_wrap = (
-        f'  <body name="inspire_hand_attach" '
-        f'pos="0 0 0" quat="{" ".join(f"{v:.9g}" for v in q_base)}">\n'
-        f"{right_body}\n  </body>"
-    )
-
-    # insert both hands: right under right_wrist, left under left_wrist
-    base_xml = insert_hands_into_wrist(base_xml, left_body, right_body)
+    base_xml = insert_hands_into_wrist(base_xml, left_body, right_body, q_base)
 
     # add mesh assets for hands into the <asset><mesh> section
     # find closing </asset>

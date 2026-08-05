@@ -283,14 +283,19 @@ def render_video(model, full_qpos, q12_r, q12_l, a_hw_r, a_hw_l, left, right, la
                 if np.abs(p).sum() < 1e-6:
                     continue
                 pos_map[name] = p.copy()
+            # Ground the human reference the same way GMR offset_human_data_to_ground does:
+            # lowest Foot z -> 0.1, so it aligns with the grounded G1.
+            foot_z = [pos_map[n][2] for n in pos_map if "Foot" in n or "foot" in n]
+            ground_dz = (min(foot_z) - 0.1) if foot_z else 0.0
             off = np.array([0.9, 0.0, 0.0])
             for a, bname in BODY_CHAIN:
                 if a in pos_map and bname in pos_map and scn.ngeom + 2 < scn.maxgeom:
                     for p in (pos_map[a], pos_map[bname]):
+                        pz = np.array([p[0], p[1], p[2] - ground_dz])
                         geom = scn.geoms[scn.ngeom]
                         mj.mjv_initGeom(
                             geom, type=mj.mjtGeom.mjGEOM_SPHERE, size=[0.03, 0, 0],
-                            pos=p + off, mat=np.eye(3).flatten(), rgba=[0.0, 1.0, 1.0, 1.0],
+                            pos=pz + off, mat=np.eye(3).flatten(), rgba=[0.0, 1.0, 1.0, 1.0],
                         )
                         scn.ngeom += 1
         img3d = ren.render()
