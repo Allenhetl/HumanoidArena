@@ -30,11 +30,12 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 # URDF fixed joint origin for hand base -> wrist_yaw_link (from dex-retarget URDF)
-# Hand base -> wrist_yaw_link transform.
-# GMR's own g1_mocap_29dof_with_hands.xml places the palm directly along wrist +x
-# (no rotation, pos along +x). The inspire hand extends fingers along hand_base -y,
-# so a +90deg rotation about z maps -y -> +x to match the GMR convention.
-_BASE_RPY = (0.0, 0.0, np.pi / 2.0)  # z +90deg
+# Hand base -> wrist_yaw_link transforms (per side, URDFs are mirror images).
+# GMR's own g1_mocap_29dof_with_hands.xml places the palm directly along wrist +x.
+# Left URDF: fingers along -y; z+90 maps -y -> +x, palm (URDF -z) stays down.
+# Right URDF: fingers along +y (mirror); y+180 then z-90 maps +y -> +x, palm down.
+_BASE_RPY_LEFT = (0.0, 0.0, np.pi / 2.0)       # z +90deg
+_BASE_RPY_RIGHT = (0.0, np.pi, -np.pi / 2.0)   # y +180deg, z -90deg
 _URDF_NS = {"u": "http://www.robot.http://www.robot.com"}
 
 
@@ -243,14 +244,14 @@ def remove_rubber_hands(base_xml: str) -> str:
     return base_xml
 
 
-def insert_hands_into_wrist(base_xml: str, left_body: str, right_body: str, q_base: np.ndarray) -> str:
-    """Attach hand bodies under the wrist_yaw_link bodies, applying the base transform.
+def insert_hands_into_wrist(base_xml: str, left_body: str, right_body: str, q_base_left: np.ndarray, q_base_right: np.ndarray) -> str:
+    """Attach hand bodies under the wrist_yaw_link bodies, applying per-side base transforms.
 
-    The inspire hand URDF root (R/L_hand_base_link) is rotated by q_base relative to
-    the G1 wrist_yaw_link body so fingers point along wrist +x (GMR convention).
-    A small +x offset places the palm at the wrist end (matches GMR with_hands palm).
+    The inspire hand URDFs are mirror images (left finger -y, right finger +y), so they
+    need different base rotations to both end up fingers-forward (+x) palm-down (-z).
+    A +x offset seats the palm at the wrist end (matches GMR with_hands palm).
     """
-    for side, body in (("left", left_body), ("right", right_body)):
+    for side, body, q_base in (("left", left_body, q_base_left), ("right", right_body, q_base_right)):
         marker = f'<body name="{side}_wrist_yaw_link"'
         idx = base_xml.find(marker)
         if idx == -1:
@@ -306,9 +307,11 @@ def main():
     right_meshes, right_body = build_hand_mjcf("right", Path(args.urdf_right), meshdir)
     left_meshes, left_body = build_hand_mjcf("left", Path(args.urdf_left), meshdir)
 
-    # insert both hands: right under right_wrist, left under left_wrist, applying base transform
-    q_base = rpy_to_quat_wxyz(_BASE_RPY)
-    base_xml = insert_hands_into_wrist(base_xml, left_body, right_body, q_base)
+    # insert both hands with per-side base transforms (URDFs are mirror images).
+    # Left: z+90 (fingers +x, palm down). Right: y+180 then z-90 (fingers +x, palm down).
+    q_base_left = rpy_to_quat_wxyz(_BASE_RPY_LEFT)
+    q_base_right = rpy_to_quat_wxyz(_BASE_RPY_RIGHT)
+    base_xml = insert_hands_into_wrist(base_xml, left_body, right_body, q_base_left, q_base_right)
 
     # add mesh assets for hands into the <asset><mesh> section
     # find closing </asset>
