@@ -505,6 +505,8 @@ class MimicLiteActionProvider(ActionProvider):
         self._raw_hand_left = None
         self._raw_hand_right = None
         self._raw_body = None
+        self._inspire_retarget_anydex = None
+        self._inspire_retarget_anydex_warned = False
         self._last_ref_joint_pos = self.runtime.default_joint_pos.copy()
         self._last_ref_joint_vel = np.zeros((29,), dtype=np.float32)
         robot = self.env.scene["robot"].data
@@ -1768,6 +1770,62 @@ class MimicLiteActionProvider(ActionProvider):
         a_hw[5] = 0.3 + 0.3 * curl  # thumb rotation
         return a_hw
 
+    def _get_inspire_retarget_anydex(self):
+        """Lazy-load the AnyDexRetarget Adaptive module for hand retargeting.
+
+        Runs in the `retarget` conda env (pinocchio + nlopt). When unavailable
+        (wrong env / missing deps) falls back to the legacy three-point-angle
+        hand_keypoints_to_a_hw.
+        """
+        if self._inspire_retarget_anydex is not None:
+            return self._inspire_retarget_anydex
+        try:
+            from tools.inspire_retarget_anydex import InspireRetargetAnyDex
+            self._inspire_retarget_anydex = {
+                "right": InspireRetargetAnyDex(side="right"),
+                "left": InspireRetargetAnyDex(side="left"),
+            }
+            print("[MimicLiteActionProvider] AnyDexRetarget hand module enabled")
+        except Exception as exc:
+            if not self._inspire_retarget_anydex_warned:
+                print(f"[MimicLiteActionProvider] AnyDexRetarget unavailable, using legacy three-point-angle: {exc}")
+                self._inspire_retarget_anydex_warned = True
+            self._inspire_retarget_anydex = False
+        return self._inspire_retarget_anydex or None
+
+    @staticmethod
+    def _reorder_a_hw6(a_hw6, side):
+        """AnyDex outputs [index,middle,ring,pinky,thumb_pitch,thumb_yaw];
+        expand_a_hw_to_q_sim expects A_HW_6_NAMES [pinky,ring,middle,index,...].
+        """
+        a = np.asarray(a_hw6, dtype=np.float64).reshape(6)
+        return np.array([a[3], a[2], a[1], a[0], a[4], a[5]], dtype=np.float64)
+
+    def _publish_sim2real_cmd(self):
+        """Publish current policy body+hand targets for the sim2real bridge.
+
+        Writes Redis key `sim2real_cmd`:
+          {body_29: [...rad], inspire_right_12: [...rad], inspire_left_12: [...rad],
+           inspire_a_hw6_right: [...], inspire_a_hw6_left: [...], ts: ns}
+        Bridge script subscribes and converts to rt/lowcmd + rt/inspire/cmd.
+        """
+        try:
+            client = getattr(self, "_redis_client", None)
+            if client is None:
+                return
+            body = self._last_ref_joint_pos if self._last_ref_joint_pos is not None else None
+            payload = {
+                "body_29": np.asarray(body, dtype=np.float32).reshape(-1).tolist() if body is not None else [],
+                "inspire_right_12": list(getattr(self, "_last_inspire_q12_right", []) or []),
+                "inspire_left_12": list(getattr(self, "_last_inspire_q12_left", []) or []),
+                "ts": time.time_ns(),
+            }
+            client.set("sim2real_cmd", json.dumps(payload))
+        except Exception as exc:
+            if not getattr(self, "_sim2real_pub_warned", False):
+                print(f"[MimicLiteActionProvider] sim2real publish failed: {exc}")
+                self._sim2real_pub_warned = True
+
     def _apply_hands(self, full_action: torch.Tensor, left_hand, right_hand):
         # Inspire 12-DoF per hand from raw 26x7 hand tracking (OpenXR order).
         if self.enable_inspire and len(self._inspire_right_target_idx) and len(self._inspire_left_target_idx):
@@ -1777,14 +1835,25 @@ class MimicLiteActionProvider(ActionProvider):
                 a_hw_r = self._synthetic_inspire_a_hw()
                 a_hw_l = self._synthetic_inspire_a_hw()
             else:
-                a_hw_r = hand_keypoints_to_a_hw(r_raw)
-                a_hw_l = hand_keypoints_to_a_hw(l_raw)
+                # Preferred: AnyDexRetarget Adaptive (higher fidelity, no saturation).
+                # Fallback: legacy three-point-angle hand_keypoints_to_a_hw.
+                retargeter = self._get_inspire_retarget_anydex()
+                if retargeter is not None:
+                    a_hw_r = retargeter.retarget_a_hw6(r_raw, apply_filter=False)
+                    a_hw_l = retargeter.retarget_a_hw6(l_raw, apply_filter=False)
+                    a_hw_r = self._reorder_a_hw6(a_hw_r, side="right")
+                    a_hw_l = self._reorder_a_hw6(a_hw_l, side="left")
+                else:
+                    a_hw_r = hand_keypoints_to_a_hw(r_raw)
+                    a_hw_l = hand_keypoints_to_a_hw(l_raw)
             qr = expand_a_hw_to_q_sim(a_hw_r, side=RIGHT, unit="rad")
             ql = expand_a_hw_to_q_sim(a_hw_l, side=LEFT, unit="rad")
             r_vals = torch.tensor([qr[n] for n in q_sim_joint_names(RIGHT)], dtype=torch.float32, device=self.device)
             l_vals = torch.tensor([ql[n] for n in q_sim_joint_names(LEFT)], dtype=torch.float32, device=self.device)
             full_action.index_copy_(0, self._inspire_right_target_idx_t, r_vals)
             full_action.index_copy_(0, self._inspire_left_target_idx_t, l_vals)
+            self._last_inspire_q12_right = [float(qr[n]) for n in q_sim_joint_names(RIGHT)]
+            self._last_inspire_q12_left = [float(ql[n]) for n in q_sim_joint_names(LEFT)]
             return
 
         if self.enable_dex3 and left_hand is not None and right_hand is not None:
@@ -2015,6 +2084,7 @@ class MimicLiteActionProvider(ActionProvider):
         target = torch.tensor(result["target_joint_pos"], dtype=torch.float32, device=self.device)
         full_action.index_copy_(0, self._body_idx, target)
         self._apply_hands(full_action, left_hand, right_hand)
+        self._publish_sim2real_cmd()
 
         if self._debug and (self._frame_count <= 3 or self._frame_count % self._log_every == 0):
             command = result["command"]

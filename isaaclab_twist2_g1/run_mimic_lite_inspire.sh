@@ -9,7 +9,8 @@ cd "${SCRIPT_DIR}" || exit 1
 PYTHON_BIN="${PYTHON_BIN:-${ISAACLAB_PYTHON}}"
 
 # ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-${ISAACLAB_ROOT}/tasks/common_env_config/pickplace_box_inspire_mimic_lite.yaml}"
-ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-${ISAACLAB_ROOT}/tasks/common_env_config/real_scene_ipark_sonic.yaml}"
+# ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-${ISAACLAB_ROOT}/tasks/common_env_config/real_scene_ipark_sonic.yaml}"
+ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-${ISAACLAB_ROOT}/tasks/common_env_config/real_scene_ipark_drink_inspire_mimic_lite.yaml}"
 RUN_DEVICE="${RUN_DEVICE:-cpu}"
 ROBOT_TYPE="${ROBOT_TYPE:-g129}"
 ROBOT_COLLIDER_MODE="${ROBOT_COLLIDER_MODE:-box}"

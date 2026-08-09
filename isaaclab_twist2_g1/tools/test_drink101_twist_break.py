@@ -107,12 +107,16 @@ def main() -> int:
         except Exception:
             pass
         # ground plane at z=-0.5. desk0.usd local origin is the table MID-HEIGHT
-        # (bbox z in [-0.5,+0.497]), so place origin at ground+half-height and put
-        # the bottle on the tabletop (+0.497 above origin).
-        env_cfg.scene.table.init_state.pos = [0.0, 0.0, -0.5 + 0.5]          # origin at 0.0
-        tabletop_z = -0.5 + 0.5 + 0.497
+        # (bbox z in [-0.5,+0.497]); assets are spawned at 0.75x scale, so the
+        # desk is 0.75 m tall: half-height 0.375, tabletop offset +0.37275.
+        # Place the desk origin (mid-height) at ground + half-height, then the
+        # bottle on the tabletop.
+        SCALE = 0.75
+        table_origin_z = -0.5 + 0.5 * SCALE          # -0.125
+        tabletop_z = table_origin_z + 0.497 * SCALE  # 0.24775
+        env_cfg.scene.table.init_state.pos = [0.0, 0.0, table_origin_z]
         env_cfg.scene.drink_body.init_state.pos = [0.0, 0.0, tabletop_z]
-        env_cfg.scene.drink_cap.init_state.pos = [0.0, 0.0, tabletop_z + 0.2649]
+        env_cfg.scene.drink_cap.init_state.pos = [0.0, 0.0, tabletop_z + 0.2649 * SCALE]
         env_cfg.scene.robot.init_state.pos = [0.0, 1.2, 0.3]
         env_cfg.scene.robot.init_state.rot = [0.7071, 0.0, 0.0, 0.7071]
     env = gym.make(TASK_NAME, cfg=env_cfg).unwrapped

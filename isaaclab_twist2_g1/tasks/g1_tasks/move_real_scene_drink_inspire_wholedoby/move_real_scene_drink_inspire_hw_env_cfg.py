@@ -27,13 +27,16 @@ PROJECT_ROOT = os.environ.get("PROJECT_ROOT", "")
 
 # ipark floor: floor_z = -1.124 (robot pelvis spawns at -0.335 = floor + 0.79).
 IPARK_FLOOR_Z = -1.124
-# SAM3D-reconstructed desk asset (desk0.usd): z-up bbox z in [-0.5, +0.497],
-# i.e. local origin = table mid-height (leg base at -0.5, tabletop at +0.497).
+# Uniform scale applied to the SAM3D desk and the drink101 bottle assets.
+# Original desk is 1.0 m tall (desk0.usd z-up bbox z in [-0.5, +0.497], local
+# origin = table mid-height, tabletop at +0.497); scaled by 0.75 it becomes
+# 0.75 m tall (tabletop at +0.37275).
+SCALE = 0.75
 DESK_USD = os.path.join(
     PROJECT_ROOT, "assets", "objects", "desk_rec", "desk0.usd"
 )
-DESK_HALF_HEIGHT = 0.5
-DESK_TOPOFFSET = 0.497  # tabletop local z
+DESK_HALF_HEIGHT = 0.5 * SCALE
+DESK_TOPOFFSET = 0.497 * SCALE  # tabletop local z (scaled)
 TABLE_CENTER_POS = [-3.239, -3.2, IPARK_FLOOR_Z + DESK_HALF_HEIGHT]
 TABLE_TOP_Z = IPARK_FLOOR_Z + DESK_HALF_HEIGHT + DESK_TOPOFFSET
 DRINK_BODY_POS = [-3.239, -3.2, TABLE_TOP_Z]  # bottle bottom on tabletop
@@ -44,7 +47,7 @@ DRINK_BODY_USD = os.path.join(
 DRINK_CAP_USD = os.path.join(
     PROJECT_ROOT, "assets", "objects", "drink101", "drink101_cap.usd"
 )
-DRINK_CAP_OFFSET_Z = 0.2649
+DRINK_CAP_OFFSET_Z = 0.2649 * SCALE
 
 
 @configclass
@@ -71,6 +74,7 @@ class RealSceneDrinkTaskSceneCfg(RealSceneLabSceneCfg):
         ),
         spawn=UsdFileCfg(
             usd_path=DESK_USD,
+            scale=(SCALE, SCALE, SCALE),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=True,
                 disable_gravity=True,
@@ -92,6 +96,7 @@ class RealSceneDrinkTaskSceneCfg(RealSceneLabSceneCfg):
         ),
         spawn=UsdFileCfg(
             usd_path=DRINK_BODY_USD,
+            scale=(SCALE, SCALE, SCALE),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 rigid_body_enabled=True,
                 kinematic_enabled=False,
@@ -116,6 +121,7 @@ class RealSceneDrinkTaskSceneCfg(RealSceneLabSceneCfg):
         ),
         spawn=UsdFileCfg(
             usd_path=DRINK_CAP_USD,
+            scale=(SCALE, SCALE, SCALE),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 rigid_body_enabled=True,
                 kinematic_enabled=False,

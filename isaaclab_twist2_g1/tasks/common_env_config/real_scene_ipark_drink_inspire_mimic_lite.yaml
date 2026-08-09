@@ -23,17 +23,19 @@ overrides:
     robot_key_light:
       init_state:
         pos: [-3.239, -4.425, 1.4]
-    # SAM3D desk (desk0.usd) ~1.2 m ahead of the robot (+Y). Desk local origin
-    # = table base; tabletop 1.0 m above ipark floor (-1.124) => tabletop z=-0.124.
+    # SAM3D desk (desk0.usd) ~1.2 m ahead of the robot (+Y), scaled 0.75x.
+    # Desk local origin = mid-height (leg base -0.375, tabletop +0.37275);
+    # scaled desk is 0.75 m tall above ipark floor (-1.124):
+    #   origin z = -1.124 + 0.375 = -0.749, tabletop z = -0.37625.
     table:
       init_state:
-        pos: [-3.239, -3.2, -0.624]
+        pos: [-3.239, -3.2, -0.749]
         rot: [1.0, 0.0, 0.0, 0.0]
     drink_body:
       init_state:
-        pos: [-3.239, -3.2, -0.127]
+        pos: [-3.239, -3.2, -0.37625]
         rot: [1.0, 0.0, 0.0, 0.0]
     drink_cap:
       init_state:
-        pos: [-3.239, -3.2, 0.1379]
+        pos: [-3.239, -3.2, -0.177575]
         rot: [1.0, 0.0, 0.0, 0.0]
