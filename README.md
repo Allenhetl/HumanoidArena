@@ -146,7 +146,23 @@ TWIST2/assets/ckpts/twist2_1017_25k.onnx
 
 ## Evaluation
 
+Batch evaluation entrypoints include:
+
+```text
+isaaclab_twist2_g1/batch_test_scripts/batch_1_test_v31_sonic.sh
+isaaclab_twist2_g1/batch_test_scripts/batch_1_test_v31_twist2.sh
+isaaclab_twist2_g1/batch_test_scripts/batch_1_test_v31_merage.sh
+isaaclab_twist2_g1/batch_test_scripts/batch_pi05_v31_sonic.sh
+isaaclab_twist2_g1/batch_test_scripts/batch_pi05_v31_twist2.sh
+```
+
+Batch/parallel evaluation reuses one Isaac Sim process per `(model, seed)` group across its repeats by default to speed up testing (`persist_sim=1`, from `test_defaults.persistent_sim: true` in `common_test_config`; override with `PERSISTENT_SIM` in the shell wrappers, or `--persistent_sim` when invoking the Python evaluator directly). Set `PERSISTENT_SIM=0` to restart Isaac Lab for every episode: slower, but each test starts from a clean environment and may perform better. See [Evaluation](docs/03_evaluation.md) for details.
+
+The batch scripts above are the consistent entrypoints used for the eval experiments reported in the paper.
+
 Single-checkpoint VLA evaluation:
+
+> **Note:** The single-task scripts are mainly for debugging and quick effect checks of a single checkpoint. `persist_sim` is **not enabled** here: `run_vla_eval.sh` does not pass `--persistent_sim`, so Isaac Lab is restarted for every episode. Use the batch scripts above for evaluation experiments.
 
 ```bash
 MODEL_PATH=/path/to/checkpoint/pretrained_model \
@@ -159,16 +175,6 @@ bash isaaclab_twist2_g1/script/eval_scripts/twist2/run_vla_eval.sh
 ```
 
 `MODEL_PATH` may also point to a checkpoint directory that contains `pretrained_model/`. For PI0.5 checkpoints, use the matching scripts under `script/eval_scripts/sonic_pi05/` or `script/eval_scripts/twist2_pi05/`.
-
-Batch evaluation entrypoints include:
-
-```text
-isaaclab_twist2_g1/batch_test_scripts/batch_1_test_v31_sonic.sh
-isaaclab_twist2_g1/batch_test_scripts/batch_1_test_v31_twist2.sh
-isaaclab_twist2_g1/batch_test_scripts/batch_1_test_v31_merage.sh
-isaaclab_twist2_g1/batch_test_scripts/batch_pi05_v31_sonic.sh
-isaaclab_twist2_g1/batch_test_scripts/batch_pi05_v31_twist2.sh
-```
 
 See [Evaluation](docs/03_evaluation.md) for vision execution, semantic evaluation, and batch launch examples.
 
