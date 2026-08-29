@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.util
 import math
 import sys
@@ -548,7 +549,7 @@ def test_runtime_extractor_rejects_unproven_pairwise_contact_bindings(telemetry)
     assert "right_box_pairwise_contact" in exc_info.value.missing_capabilities
 
 
-def _complete_runtime_env(telemetry):
+def _complete_runtime_env(telemetry, *, include_contact_mapping_proofs: bool = True):
     box_root_state = torch.zeros(1, 13, dtype=torch.float64)
     box_root_state[0, 0:3] = torch.tensor([0.0, 0.0, 0.505], dtype=torch.float64)
     box_root_state[0, 3] = 1.0
@@ -622,7 +623,7 @@ def _complete_runtime_env(telemetry):
                     force_matrix_w=torch.tensor([[[force]]], dtype=torch.float64)
                 ),
             )
-    return SimpleNamespace(
+    env = SimpleNamespace(
         num_envs=1,
         device="cpu",
         scene=scene,
@@ -637,6 +638,46 @@ def _complete_runtime_env(telemetry):
         max_episode_length=100,
         recovery_terminal_contexts=(_driver_terminal_context(telemetry),),
     )
+    if include_contact_mapping_proofs:
+        return _attach_valid_contact_mapping_proofs(telemetry, env)
+    return env
+
+
+def _attach_valid_contact_mapping_proofs(telemetry, env):
+    runtime_identity_digest = hashlib.sha256(b"pp-box-runtime-identity").hexdigest()
+    target_prim_paths = tuple(env.scene["box"].root_physx_view.prim_paths)
+    proofs = {}
+    for hand in telemetry.default_hand_contact_bindings().values():
+        for sensor in hand.sensors:
+            proofs[sensor.sensor_scene_key] = telemetry.build_empirical_contact_mapping_proof(
+                sensor_scene_key=sensor.sensor_scene_key,
+                sensor_body_name=sensor.sensor_body_name,
+                target_asset_scene_key="box",
+                target_prim_paths=target_prim_paths,
+                baseline_force_w=torch.zeros(env.num_envs, 3, dtype=torch.float64),
+                target_touch_force_w=torch.tensor(
+                    [[0.0, 0.0, 2.0]] * env.num_envs,
+                    dtype=torch.float64,
+                ),
+                target_removed_force_w=torch.zeros(
+                    env.num_envs,
+                    3,
+                    dtype=torch.float64,
+                ),
+                baseline_state_digest=hashlib.sha256(
+                    f"{sensor.sensor_scene_key}:baseline".encode()
+                ).hexdigest(),
+                target_touch_state_digest=hashlib.sha256(
+                    f"{sensor.sensor_scene_key}:touch".encode()
+                ).hexdigest(),
+                target_removed_state_digest=hashlib.sha256(
+                    f"{sensor.sensor_scene_key}:removed".encode()
+                ).hexdigest(),
+                runtime_identity_digest=runtime_identity_digest,
+            )
+    env.recovery_runtime_identity_digest = runtime_identity_digest
+    env.recovery_contact_mapping_proofs = proofs
+    return env
 
 
 def test_live_fall_candidate_producer_reuses_instantaneous_root_and_contact_truth(
@@ -664,6 +705,190 @@ def test_live_fall_candidate_producer_reuses_instantaneous_root_and_contact_trut
     assert telemetry.compute_live_fall_candidates(env) == (True,)
 
 
+def test_runtime_contact_validator_rejects_complete_but_wrong_env_namespace(
+    telemetry,
+) -> None:
+    env = _complete_runtime_env(telemetry)
+    env.scene["box"].root_physx_view.prim_paths = ["/World/envs/env_7/Box"]
+    for hand in telemetry.default_hand_contact_bindings().values():
+        for binding in hand.sensors:
+            env.scene[binding.sensor_scene_key].body_physx_view.prim_paths = [
+                f"/World/envs/env_7/Robot/{binding.sensor_body_name}"
+            ]
+
+    with pytest.raises(telemetry.RecoveryTelemetryIncompleteError) as exc_info:
+        telemetry.validate_runtime_hand_contact_sensors(env)
+
+    assert "runtime_contact_filter_asset" in exc_info.value.missing_capabilities
+
+
+def test_runtime_contact_validator_rejects_candidate_only_filter_identity(
+    telemetry,
+) -> None:
+    env = _complete_runtime_env(
+        telemetry,
+        include_contact_mapping_proofs=False,
+    )
+
+    with pytest.raises(telemetry.RecoveryTelemetryIncompleteError) as exc_info:
+        telemetry.validate_runtime_hand_contact_sensors(env)
+
+    assert (
+        "runtime_contact_mapping_proof:left_box_contact_palm"
+        in exc_info.value.missing_capabilities
+    )
+
+
+def test_empirical_contact_mapping_proof_digest_binds_actual_measurements(
+    telemetry,
+) -> None:
+    env = _attach_valid_contact_mapping_proofs(
+        telemetry,
+        _complete_runtime_env(telemetry),
+    )
+    proof = env.recovery_contact_mapping_proofs["left_box_contact_palm"]
+
+    assert (
+        proof.schema_version
+        == telemetry.RUNTIME_CONTACT_MAPPING_PROOF_SCHEMA_VERSION
+        == 1
+    )
+    assert proof.proof_digest == telemetry.empirical_contact_mapping_proof_digest(proof)
+    assert len(proof.proof_digest) == 64
+    assert proof.baseline_force_w == ((0.0, 0.0, 0.0),)
+    assert proof.target_touch_force_w == ((0.0, 0.0, 2.0),)
+    assert proof.target_removed_force_w == ((0.0, 0.0, 0.0),)
+
+    tampered = replace(
+        proof,
+        target_touch_force_w=((0.0, 0.0, 3.0),),
+    )
+    env.recovery_contact_mapping_proofs[proof.sensor_scene_key] = tampered
+    with pytest.raises(telemetry.RecoveryTelemetryIncompleteError) as exc_info:
+        telemetry.validate_runtime_hand_contact_sensors(env)
+    assert (
+        f"runtime_contact_mapping_proof:{proof.sensor_scene_key}"
+        in exc_info.value.missing_capabilities
+    )
+
+
+def test_runtime_contact_validator_rejects_digest_valid_miswired_mapping(
+    telemetry,
+) -> None:
+    env = _attach_valid_contact_mapping_proofs(
+        telemetry,
+        _complete_runtime_env(telemetry),
+    )
+    sensor_key = "right_box_contact_thumb_2"
+    valid = env.recovery_contact_mapping_proofs[sensor_key]
+    env.recovery_contact_mapping_proofs[sensor_key] = (
+        telemetry.build_empirical_contact_mapping_proof(
+            sensor_scene_key=valid.sensor_scene_key,
+            sensor_body_name=valid.sensor_body_name,
+            target_asset_scene_key="shelf",
+            target_prim_paths=("/World/envs/env_0/Shelf",),
+            baseline_force_w=valid.baseline_force_w,
+            target_touch_force_w=valid.target_touch_force_w,
+            target_removed_force_w=valid.target_removed_force_w,
+            baseline_state_digest=valid.baseline_state_digest,
+            target_touch_state_digest=valid.target_touch_state_digest,
+            target_removed_state_digest=valid.target_removed_state_digest,
+            runtime_identity_digest=valid.runtime_identity_digest,
+        )
+    )
+
+    with pytest.raises(telemetry.RecoveryTelemetryIncompleteError) as exc_info:
+        telemetry.validate_runtime_hand_contact_sensors(env)
+
+    assert (
+        f"runtime_contact_mapping_proof:{sensor_key}"
+        in exc_info.value.missing_capabilities
+    )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "forces"),
+    [
+        ("baseline_force_w", ((0.0, 0.0, 2.0),)),
+        ("target_touch_force_w", ((0.0, 0.0, 0.0),)),
+        ("target_removed_force_w", ((0.0, 0.0, 2.0),)),
+    ],
+)
+def test_runtime_contact_validator_rejects_digest_valid_noncausal_measurements(
+    telemetry,
+    field_name: str,
+    forces: tuple[tuple[float, float, float], ...],
+) -> None:
+    env = _complete_runtime_env(telemetry)
+    sensor_key = "left_box_contact_index_0"
+    proof = env.recovery_contact_mapping_proofs[sensor_key]
+    changed = replace(proof, **{field_name: forces})
+    changed = replace(
+        changed,
+        proof_digest=telemetry.empirical_contact_mapping_proof_digest(changed),
+    )
+    env.recovery_contact_mapping_proofs[sensor_key] = changed
+
+    with pytest.raises(telemetry.RecoveryTelemetryIncompleteError) as exc_info:
+        telemetry.validate_runtime_hand_contact_sensors(env)
+
+    assert (
+        f"runtime_contact_mapping_proof:{sensor_key}"
+        in exc_info.value.missing_capabilities
+    )
+
+
+def test_runtime_contact_validator_requires_exact_complete_proof_set(telemetry) -> None:
+    env = _complete_runtime_env(telemetry)
+    missing_key = "right_box_contact_middle_1"
+    env.recovery_contact_mapping_proofs.pop(missing_key)
+
+    with pytest.raises(telemetry.RecoveryTelemetryIncompleteError) as exc_info:
+        telemetry.validate_runtime_hand_contact_sensors(env)
+
+    assert (
+        f"runtime_contact_mapping_proof:{missing_key}"
+        in exc_info.value.missing_capabilities
+    )
+
+
+def test_runtime_contact_validator_binds_proofs_to_runtime_identity(telemetry) -> None:
+    env = _complete_runtime_env(telemetry)
+    env.recovery_runtime_identity_digest = hashlib.sha256(
+        b"different-runtime-identity"
+    ).hexdigest()
+
+    with pytest.raises(telemetry.RecoveryTelemetryIncompleteError) as exc_info:
+        telemetry.validate_runtime_hand_contact_sensors(env)
+
+    assert (
+        "runtime_contact_mapping_proof:left_box_contact_palm"
+        in exc_info.value.missing_capabilities
+    )
+
+
+def test_runtime_contact_validator_rejects_boolean_proof_schema(telemetry) -> None:
+    env = _complete_runtime_env(telemetry)
+    sensor_key = "left_box_contact_palm"
+    proof = replace(
+        env.recovery_contact_mapping_proofs[sensor_key],
+        schema_version=True,
+    )
+    proof = replace(
+        proof,
+        proof_digest=telemetry.empirical_contact_mapping_proof_digest(proof),
+    )
+    env.recovery_contact_mapping_proofs[sensor_key] = proof
+
+    with pytest.raises(telemetry.RecoveryTelemetryIncompleteError) as exc_info:
+        telemetry.validate_runtime_hand_contact_sensors(env)
+
+    assert (
+        f"runtime_contact_mapping_proof:{sensor_key}"
+        in exc_info.value.missing_capabilities
+    )
+
+
 def test_runtime_contact_sensor_report_records_all_materialized_identities(
     telemetry,
 ) -> None:
@@ -681,7 +906,7 @@ def test_runtime_contact_sensor_report_records_all_materialized_identities(
     assert (
         palm.schema_version
         == telemetry.RUNTIME_CONTACT_SENSOR_REPORT_SCHEMA_VERSION
-        == 1
+        == 2
     )
     assert palm.side == "left"
     assert palm.sensor_scene_key == "left_box_contact_palm"
@@ -692,10 +917,17 @@ def test_runtime_contact_sensor_report_records_all_materialized_identities(
         "/World/envs/env_0/Robot/left_hand_palm_link",
     )
     assert palm.resolved_sensor_body_names == ("left_hand_palm_link",)
-    assert palm.filter_prim_path_expressions == ("{ENV_REGEX_NS}/Box",)
-    assert palm.filtered_asset_scene_key == "box"
-    assert palm.resolved_filter_prim_paths == ("/World/envs/env_0/Box",)
-    assert palm.resolved_filter_body_name == "Box"
+    assert palm.configured_filter_prim_path_expressions == ("{ENV_REGEX_NS}/Box",)
+    assert palm.candidate_filter_asset_scene_key == "box"
+    assert palm.candidate_filter_asset_prim_path_expression == "{ENV_REGEX_NS}/Box"
+    assert palm.candidate_filter_asset_prim_paths == ("/World/envs/env_0/Box",)
+    assert palm.proven_filter_prim_paths == ("/World/envs/env_0/Box",)
+    assert palm.proven_filter_body_name == "Box"
+    assert palm.filter_mapping_proof_schema_version == 1
+    assert palm.filter_mapping_proof_source == "empirical_baseline_touch_removed"
+    assert palm.filter_mapping_proof_digest == (
+        env.recovery_contact_mapping_proofs["left_box_contact_palm"].proof_digest
+    )
     assert palm.num_bodies == 1
     assert palm.filter_count == 1
     assert palm.force_matrix_shape == (1, 1, 1, 3)

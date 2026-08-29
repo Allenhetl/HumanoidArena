@@ -7,16 +7,19 @@ manager while pure tests exercise the same predicates.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 from typing import Any, Literal
 
 import torch
 
 RECOVERY_TELEMETRY_SCHEMA_VERSION = 1
-RUNTIME_CONTACT_SENSOR_REPORT_SCHEMA_VERSION = 1
+RUNTIME_CONTACT_MAPPING_PROOF_SCHEMA_VERSION = 1
+RUNTIME_CONTACT_SENSOR_REPORT_SCHEMA_VERSION = 2
 PP_BOX_TASK_IDENTITY = "Isaac-Move-PickPlace-Box-G129-Dex3-Wholedoby"
 
 DEFAULT_CONTACT_FORCE_THRESHOLD_N = 1.0
@@ -24,6 +27,8 @@ DEFAULT_MAX_EE_BOX_DISTANCE_M = 0.3
 SOFT_FALL_UP_ALIGNMENT = math.cos(math.radians(60.0))
 HARD_FALL_UP_ALIGNMENT = math.cos(math.radians(75.0))
 CRITICAL_BODY_CONTACT_THRESHOLD_N = 50.0
+EMPIRICAL_CONTACT_QUIET_MAX_N = 0.05
+EMPIRICAL_CONTACT_TOUCH_MIN_N = 1.0
 
 _HAND_CONTACT_LINK_TOKENS = (
     "palm",
@@ -227,8 +232,63 @@ class HandContactBinding:
 
 
 @dataclass(frozen=True)
+class EmpiricalContactMappingProof:
+    """Immutable baseline/touch/removed evidence for one pairwise filter."""
+
+    schema_version: int
+    task_identity: str
+    sensor_scene_key: str
+    sensor_body_name: str
+    target_asset_scene_key: str
+    target_prim_paths: tuple[str, ...]
+    baseline_force_w: tuple[tuple[float, float, float], ...]
+    target_touch_force_w: tuple[tuple[float, float, float], ...]
+    target_removed_force_w: tuple[tuple[float, float, float], ...]
+    baseline_state_digest: str
+    target_touch_state_digest: str
+    target_removed_state_digest: str
+    runtime_identity_digest: str
+    proof_digest: str
+
+    @classmethod
+    def from_value(cls, value: object) -> EmpiricalContactMappingProof:
+        if isinstance(value, cls):
+            return value
+        if not isinstance(value, Mapping):
+            raise TypeError(f"unsupported contact mapping proof: {type(value).__name__}")
+        try:
+            return cls(
+                schema_version=value["schema_version"],
+                task_identity=str(value["task_identity"]),
+                sensor_scene_key=str(value["sensor_scene_key"]),
+                sensor_body_name=str(value["sensor_body_name"]),
+                target_asset_scene_key=str(value["target_asset_scene_key"]),
+                target_prim_paths=tuple(str(path) for path in value["target_prim_paths"]),
+                baseline_force_w=_empirical_force_rows(
+                    value["baseline_force_w"],
+                    name="baseline force",
+                ),
+                target_touch_force_w=_empirical_force_rows(
+                    value["target_touch_force_w"],
+                    name="target-touch force",
+                ),
+                target_removed_force_w=_empirical_force_rows(
+                    value["target_removed_force_w"],
+                    name="target-removed force",
+                ),
+                baseline_state_digest=str(value["baseline_state_digest"]),
+                target_touch_state_digest=str(value["target_touch_state_digest"]),
+                target_removed_state_digest=str(value["target_removed_state_digest"]),
+                runtime_identity_digest=str(value["runtime_identity_digest"]),
+                proof_digest=str(value["proof_digest"]),
+            )
+        except KeyError as exc:
+            raise ValueError(f"missing contact mapping proof field: {exc.args[0]}") from exc
+
+
+@dataclass(frozen=True)
 class RuntimeContactSensorReport:
-    """Materialized one-body/one-filter sensor identity and tensor contract."""
+    """Materialized sensor identity plus separately proven filter identity."""
 
     schema_version: int
     side: Literal["left", "right"]
@@ -236,10 +296,15 @@ class RuntimeContactSensorReport:
     sensor_prim_path_expression: str
     resolved_sensor_prim_paths: tuple[str, ...]
     resolved_sensor_body_names: tuple[str, ...]
-    filter_prim_path_expressions: tuple[str, ...]
-    filtered_asset_scene_key: str
-    resolved_filter_prim_paths: tuple[str, ...]
-    resolved_filter_body_name: str
+    configured_filter_prim_path_expressions: tuple[str, ...]
+    candidate_filter_asset_scene_key: str
+    candidate_filter_asset_prim_path_expression: str
+    candidate_filter_asset_prim_paths: tuple[str, ...]
+    proven_filter_prim_paths: tuple[str, ...]
+    proven_filter_body_name: str
+    filter_mapping_proof_schema_version: int
+    filter_mapping_proof_source: str
+    filter_mapping_proof_digest: str
     num_bodies: int
     filter_count: int
     force_matrix_shape: tuple[int, ...]
@@ -325,6 +390,106 @@ def _as_float_tuple(value: object, length: int, *, name: str) -> tuple[float, ..
     if not all(math.isfinite(item) for item in result):
         raise ValueError(f"{name} must contain only finite values")
     return result
+
+
+def _empirical_force_rows(
+    value: object,
+    *,
+    name: str,
+) -> tuple[tuple[float, float, float], ...]:
+    if isinstance(value, torch.Tensor):
+        if value.ndim != 2 or value.shape[1] != 3:
+            raise ValueError(f"{name} must have shape [num_envs, 3]")
+        rows = value.detach().cpu()
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        rows = value
+    else:
+        raise TypeError(f"{name} must have shape [num_envs, 3]")
+    result = tuple(
+        _as_float_tuple(row, 3, name=f"{name} row")
+        for row in rows
+    )
+    if not result:
+        raise ValueError(f"{name} must contain at least one environment")
+    return tuple((row[0], row[1], row[2]) for row in result)
+
+
+def empirical_contact_mapping_proof_digest(
+    proof: EmpiricalContactMappingProof | Mapping[str, object],
+) -> str:
+    """Recompute the typed proof digest, excluding only the digest field itself."""
+
+    value = EmpiricalContactMappingProof.from_value(proof)
+    payload = {
+        "schema_version": value.schema_version,
+        "task_identity": value.task_identity,
+        "sensor_scene_key": value.sensor_scene_key,
+        "sensor_body_name": value.sensor_body_name,
+        "target_asset_scene_key": value.target_asset_scene_key,
+        "target_prim_paths": value.target_prim_paths,
+        "baseline_force_w": value.baseline_force_w,
+        "target_touch_force_w": value.target_touch_force_w,
+        "target_removed_force_w": value.target_removed_force_w,
+        "baseline_state_digest": value.baseline_state_digest,
+        "target_touch_state_digest": value.target_touch_state_digest,
+        "target_removed_state_digest": value.target_removed_state_digest,
+        "runtime_identity_digest": value.runtime_identity_digest,
+    }
+    serialized = json.dumps(
+        payload,
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def build_empirical_contact_mapping_proof(
+    *,
+    sensor_scene_key: str,
+    sensor_body_name: str,
+    target_asset_scene_key: str,
+    target_prim_paths: Sequence[str],
+    baseline_force_w: object,
+    target_touch_force_w: object,
+    target_removed_force_w: object,
+    baseline_state_digest: str,
+    target_touch_state_digest: str,
+    target_removed_state_digest: str,
+    runtime_identity_digest: str,
+) -> EmpiricalContactMappingProof:
+    """Freeze raw simulator measurements into a content-addressed proof payload."""
+
+    proof = EmpiricalContactMappingProof(
+        schema_version=RUNTIME_CONTACT_MAPPING_PROOF_SCHEMA_VERSION,
+        task_identity=PP_BOX_TASK_IDENTITY,
+        sensor_scene_key=str(sensor_scene_key),
+        sensor_body_name=str(sensor_body_name),
+        target_asset_scene_key=str(target_asset_scene_key),
+        target_prim_paths=tuple(str(path) for path in target_prim_paths),
+        baseline_force_w=_empirical_force_rows(
+            baseline_force_w,
+            name="baseline force",
+        ),
+        target_touch_force_w=_empirical_force_rows(
+            target_touch_force_w,
+            name="target-touch force",
+        ),
+        target_removed_force_w=_empirical_force_rows(
+            target_removed_force_w,
+            name="target-removed force",
+        ),
+        baseline_state_digest=str(baseline_state_digest),
+        target_touch_state_digest=str(target_touch_state_digest),
+        target_removed_state_digest=str(target_removed_state_digest),
+        runtime_identity_digest=str(runtime_identity_digest),
+        proof_digest="",
+    )
+    return replace(
+        proof,
+        proof_digest=empirical_contact_mapping_proof_digest(proof),
+    )
 
 
 def pairwise_contact_evidence(
@@ -675,6 +840,7 @@ _MATERIALIZED_ENV_PATH = re.compile(
     r"^(?P<namespace>/World/envs/env_[0-9]+)(?P<relative>/.*)$"
 )
 _ENV_PATH_EXPRESSION = re.compile(r"^/World/envs/env_(?:\.\*|[0-9]+)")
+_SHA256_DIGEST = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _canonical_env_relative_path(path: object) -> str:
@@ -711,12 +877,13 @@ def _materialized_env_paths(
         ):
             raise RecoveryTelemetryIncompleteError((capability,))
         namespaces.append(match.group("namespace"))
-    if len(set(namespaces)) != num_envs:
+    expected_namespaces = {f"/World/envs/env_{index}" for index in range(num_envs)}
+    if set(namespaces) != expected_namespaces:
         raise RecoveryTelemetryIncompleteError((capability,))
     return paths, tuple(namespaces)
 
 
-def _resolve_runtime_filter_asset(
+def _resolve_candidate_filter_asset(
     scene: object,
     *,
     num_envs: int,
@@ -741,6 +908,98 @@ def _resolve_runtime_filter_asset(
         capability="runtime_contact_filter_asset",
     )
     return scene_key, asset, prim_path, paths, namespaces
+
+
+def _resolve_contact_mapping_proofs(
+    env: object,
+    *,
+    expected_scene_keys: tuple[str, ...],
+) -> tuple[Mapping[str, object], str]:
+    raw_proofs = getattr(env, "recovery_contact_mapping_proofs", None)
+    expected = set(expected_scene_keys)
+    if not isinstance(raw_proofs, Mapping):
+        raise RecoveryTelemetryIncompleteError(
+            tuple(f"runtime_contact_mapping_proof:{key}" for key in expected_scene_keys)
+        )
+    provided = {str(key) for key in raw_proofs}
+    missing = tuple(
+        f"runtime_contact_mapping_proof:{key}"
+        for key in expected_scene_keys
+        if key not in raw_proofs
+    )
+    if missing:
+        raise RecoveryTelemetryIncompleteError(missing)
+    if provided != expected:
+        raise RecoveryTelemetryIncompleteError(("runtime_contact_mapping_proofs",))
+
+    runtime_identity_digest = str(
+        getattr(env, "recovery_runtime_identity_digest", "")
+    )
+    if _SHA256_DIGEST.fullmatch(runtime_identity_digest) is None:
+        raise RecoveryTelemetryIncompleteError(("runtime_contact_proof_runtime_identity",))
+    return raw_proofs, runtime_identity_digest
+
+
+def _force_magnitude(force: tuple[float, float, float]) -> float:
+    return math.sqrt(sum(component * component for component in force))
+
+
+def _validated_contact_mapping_proof(
+    raw_proof: object,
+    *,
+    binding: PairwiseContactBinding,
+    candidate_asset_scene_key: str,
+    candidate_prim_paths: tuple[str, ...],
+    runtime_identity_digest: str,
+    num_envs: int,
+    capability: str,
+) -> EmpiricalContactMappingProof:
+    try:
+        proof = EmpiricalContactMappingProof.from_value(raw_proof)
+        force_groups = (
+            proof.baseline_force_w,
+            proof.target_touch_force_w,
+            proof.target_removed_force_w,
+        )
+        normalized_groups = tuple(
+            _empirical_force_rows(group, name="contact mapping proof force")
+            for group in force_groups
+        )
+        state_digests = (
+            proof.baseline_state_digest,
+            proof.target_touch_state_digest,
+            proof.target_removed_state_digest,
+        )
+        quiet_groups = (proof.baseline_force_w, proof.target_removed_force_w)
+        valid = (
+            type(proof.schema_version) is int
+            and proof.schema_version == RUNTIME_CONTACT_MAPPING_PROOF_SCHEMA_VERSION
+            and proof.task_identity == PP_BOX_TASK_IDENTITY
+            and proof.sensor_scene_key == binding.sensor_scene_key
+            and proof.sensor_body_name == binding.sensor_body_name
+            and proof.target_asset_scene_key == candidate_asset_scene_key
+            and proof.target_prim_paths == candidate_prim_paths
+            and normalized_groups == force_groups
+            and all(len(group) == num_envs for group in force_groups)
+            and all(_SHA256_DIGEST.fullmatch(value) is not None for value in state_digests)
+            and len(set(state_digests)) == len(state_digests)
+            and proof.runtime_identity_digest == runtime_identity_digest
+            and proof.proof_digest == empirical_contact_mapping_proof_digest(proof)
+            and all(
+                _force_magnitude(force) <= EMPIRICAL_CONTACT_QUIET_MAX_N
+                for group in quiet_groups
+                for force in group
+            )
+            and all(
+                _force_magnitude(force) >= EMPIRICAL_CONTACT_TOUCH_MIN_N
+                for force in proof.target_touch_force_w
+            )
+        )
+    except (TypeError, ValueError):
+        valid = False
+    if not valid:
+        raise RecoveryTelemetryIncompleteError((capability,))
+    return proof
 
 
 def _resolve_hand_contact_bindings(env: object) -> dict[str, HandContactBinding]:
@@ -789,13 +1048,22 @@ def validate_runtime_hand_contact_sensors(
             ("runtime_contact_tensor_device",)
         ) from exc
 
+    expected_scene_keys = tuple(
+        binding.sensor_scene_key
+        for side in ("left", "right")
+        for binding in bindings[side].sensors
+    )
     (
-        filtered_asset_scene_key,
-        _filtered_asset,
-        filtered_asset_prim_path,
-        resolved_filter_prim_paths,
-        filter_namespaces,
-    ) = _resolve_runtime_filter_asset(scene, num_envs=num_envs)
+        candidate_asset_scene_key,
+        _candidate_asset,
+        candidate_asset_prim_path,
+        candidate_asset_prim_paths,
+        candidate_namespaces,
+    ) = _resolve_candidate_filter_asset(scene, num_envs=num_envs)
+    mapping_proofs, runtime_identity_digest = _resolve_contact_mapping_proofs(
+        env,
+        expected_scene_keys=expected_scene_keys,
+    )
 
     reports = []
     first_dtype: torch.dtype | None = None
@@ -851,16 +1119,26 @@ def validate_runtime_hand_contact_sensors(
                 or body_names != (binding.sensor_body_name,)
                 or not sensor_prim_path
                 or len(filter_prim_paths) != 1
-                or sensor_namespaces != filter_namespaces
+                or sensor_namespaces != candidate_namespaces
                 or _canonical_env_relative_path(sensor_prim_path)
                 != f"/Robot/{binding.sensor_body_name}"
                 or _canonical_env_relative_path(filter_prim_paths[0])
-                != _canonical_env_relative_path(filtered_asset_prim_path)
+                != _canonical_env_relative_path(candidate_asset_prim_path)
                 or binding.filtered_body_name
-                != filtered_asset_prim_path.rsplit("/", 1)[-1]
+                != candidate_asset_prim_path.rsplit("/", 1)[-1]
             ):
                 raise RecoveryTelemetryIncompleteError((capability,))
 
+            proof_capability = f"runtime_contact_mapping_proof:{binding.sensor_scene_key}"
+            proof = _validated_contact_mapping_proof(
+                mapping_proofs[binding.sensor_scene_key],
+                binding=binding,
+                candidate_asset_scene_key=candidate_asset_scene_key,
+                candidate_prim_paths=candidate_asset_prim_paths,
+                runtime_identity_digest=runtime_identity_digest,
+                num_envs=num_envs,
+                capability=proof_capability,
+            )
             reports.append(
                 RuntimeContactSensorReport(
                     schema_version=RUNTIME_CONTACT_SENSOR_REPORT_SCHEMA_VERSION,
@@ -869,10 +1147,15 @@ def validate_runtime_hand_contact_sensors(
                     sensor_prim_path_expression=sensor_prim_path,
                     resolved_sensor_prim_paths=resolved_sensor_prim_paths,
                     resolved_sensor_body_names=body_names,
-                    filter_prim_path_expressions=filter_prim_paths,
-                    filtered_asset_scene_key=filtered_asset_scene_key,
-                    resolved_filter_prim_paths=resolved_filter_prim_paths,
-                    resolved_filter_body_name=binding.filtered_body_name,
+                    configured_filter_prim_path_expressions=filter_prim_paths,
+                    candidate_filter_asset_scene_key=candidate_asset_scene_key,
+                    candidate_filter_asset_prim_path_expression=candidate_asset_prim_path,
+                    candidate_filter_asset_prim_paths=candidate_asset_prim_paths,
+                    proven_filter_prim_paths=proof.target_prim_paths,
+                    proven_filter_body_name=binding.filtered_body_name,
+                    filter_mapping_proof_schema_version=proof.schema_version,
+                    filter_mapping_proof_source="empirical_baseline_touch_removed",
+                    filter_mapping_proof_digest=proof.proof_digest,
                     num_bodies=num_bodies,
                     filter_count=filter_count,
                     force_matrix_shape=tuple(force_matrix.shape),
@@ -1002,37 +1285,28 @@ def _pairwise_force_tensor(
     *,
     side: str,
     num_envs: int,
-    filtered_asset: object,
+    validated_report: RuntimeContactSensorReport,
 ) -> torch.Tensor:
     sensor = _scene_get(scene, binding.sensor_scene_key)
     data = getattr(sensor, "data", None)
     force_matrix = getattr(data, "force_matrix_w", None)
     body_names = list(getattr(sensor, "body_names", ()) or ())
-    sensor_cfg = getattr(sensor, "cfg", None)
-    sensor_prim_path = str(getattr(sensor_cfg, "prim_path", ""))
-    filter_prim_paths = list(getattr(sensor_cfg, "filter_prim_paths_expr", ()) or ())
-    filtered_prim_path = str(getattr(getattr(filtered_asset, "cfg", None), "prim_path", ""))
-    filter_count = getattr(getattr(sensor, "contact_physx_view", None), "filter_count", None)
-
-    def canonical_env_path(path: str) -> str:
-        for prefix in ("{ENV_REGEX_NS}", "/World/envs/env_.*"):
-            if path.startswith(prefix):
-                return path[len(prefix) :]
-        return path
 
     if (
         not isinstance(force_matrix, torch.Tensor)
         or force_matrix.shape != (num_envs, 1, 1, 3)
+        or not force_matrix.is_floating_point()
+        or not bool(torch.isfinite(force_matrix).all().item())
         or getattr(sensor, "num_bodies", None) != 1
-        or filter_count != 1
         or body_names != [binding.sensor_body_name]
-        or not sensor_prim_path
-        or sensor_prim_path.rsplit("/", 1)[-1] != binding.sensor_body_name
-        or len(filter_prim_paths) != 1
-        or not filtered_prim_path
-        or binding.filtered_body_name != filtered_prim_path.rsplit("/", 1)[-1]
-        or canonical_env_path(str(filter_prim_paths[0]))
-        != canonical_env_path(filtered_prim_path)
+        or validated_report.sensor_scene_key != binding.sensor_scene_key
+        or validated_report.resolved_sensor_body_names != (binding.sensor_body_name,)
+        or validated_report.proven_filter_body_name != binding.filtered_body_name
+        or not validated_report.proven_filter_prim_paths
+        or validated_report.filter_mapping_proof_source
+        != "empirical_baseline_touch_removed"
+        or str(force_matrix.dtype) != validated_report.force_matrix_dtype
+        or str(force_matrix.device) != validated_report.force_matrix_device
     ):
         raise RecoveryTelemetryIncompleteError((f"{side}_box_pairwise_contact",))
     return force_matrix[:, 0, 0, :]
@@ -1141,6 +1415,21 @@ def extract_privileged_telemetry(
     scene = getattr(env, "scene", None)
     if num_envs <= 0 or scene is None:
         raise RecoveryTelemetryIncompleteError(("scene",))
+    try:
+        contact_reports = validate_runtime_hand_contact_sensors(env)
+    except RecoveryTelemetryIncompleteError as exc:
+        extraction_capabilities = []
+        for capability in exc.missing_capabilities:
+            if ":left_" in capability:
+                extraction_capabilities.append("left_box_pairwise_contact")
+            elif ":right_" in capability:
+                extraction_capabilities.append("right_box_pairwise_contact")
+            else:
+                extraction_capabilities.append(capability)
+        raise RecoveryTelemetryIncompleteError(extraction_capabilities) from exc
+    reports_by_scene_key = {
+        report.sensor_scene_key: report for report in contact_reports
+    }
     resolved_terminal_contexts = _resolve_terminal_contexts(
         env,
         terminal_contexts,
@@ -1182,7 +1471,7 @@ def extract_privileged_telemetry(
                 sensor_binding,
                 side=side,
                 num_envs=num_envs,
-                filtered_asset=box,
+                validated_report=reports_by_scene_key[sensor_binding.sensor_scene_key],
             )
             for sensor_binding in bindings[side].sensors
         )
@@ -1238,25 +1527,30 @@ def extract_privileged_telemetry(
 
 
 __all__ = [
-    "BimanualGraspEvidence",
     "DEFAULT_CONTACT_FORCE_THRESHOLD_N",
     "DEFAULT_MAX_EE_BOX_DISTANCE_M",
-    "DriverTerminalContext",
+    "EMPIRICAL_CONTACT_QUIET_MAX_N",
+    "EMPIRICAL_CONTACT_TOUCH_MIN_N",
     "HARD_FALL_UP_ALIGNMENT",
+    "PP_BOX_TASK_IDENTITY",
+    "RECOVERY_TELEMETRY_SCHEMA_VERSION",
+    "RUNTIME_CONTACT_MAPPING_PROOF_SCHEMA_VERSION",
+    "RUNTIME_CONTACT_SENSOR_REPORT_SCHEMA_VERSION",
+    "SOFT_FALL_UP_ALIGNMENT",
+    "BimanualGraspEvidence",
+    "DriverTerminalContext",
+    "EmpiricalContactMappingProof",
     "HandContactBinding",
     "HandContactEvidence",
-    "PP_BOX_TASK_IDENTITY",
     "PairwiseContactBinding",
     "PairwiseContactEvidence",
     "PrivilegedObservationLeakError",
     "PrivilegedRecoveryTelemetry",
-    "RECOVERY_TELEMETRY_SCHEMA_VERSION",
-    "RUNTIME_CONTACT_SENSOR_REPORT_SCHEMA_VERSION",
     "RecoveryTelemetryIncompleteError",
     "RuntimeContactSensorReport",
-    "SOFT_FALL_UP_ALIGNMENT",
     "aggregate_hand_contact_evidence",
     "assert_actor_observation_isolated",
+    "build_empirical_contact_mapping_proof",
     "build_privileged_telemetry",
     "classify_bimanual_grasp",
     "classify_fall",
@@ -1264,6 +1558,7 @@ __all__ = [
     "compute_live_fall_candidates",
     "compute_root_up_alignment",
     "default_hand_contact_bindings",
+    "empirical_contact_mapping_proof_digest",
     "extract_privileged_telemetry",
     "has_pairwise_bimanual_contact",
     "pairwise_contact_evidence",
