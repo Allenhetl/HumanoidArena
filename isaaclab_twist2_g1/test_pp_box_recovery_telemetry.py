@@ -810,6 +810,71 @@ def test_runtime_extractor_requires_self_consistent_driver_terminal_context(
     assert state.terminal_reason == "running"
 
 
+def test_runtime_extractor_rejects_nonzero_fall_streak_without_current_candidate(
+    telemetry,
+    rewards,
+) -> None:
+    env = _complete_runtime_env(telemetry)
+    env.recovery_terminal_contexts = (
+        _driver_terminal_context(telemetry, fall_streak=1),
+    )
+    support = _support_case(rewards, (0.0, 0.0, 0.7))
+
+    with pytest.raises(telemetry.RecoveryTelemetryIncompleteError) as exc_info:
+        telemetry.extract_privileged_telemetry(
+            env,
+            support_resolver=lambda _env: [support],
+        )
+
+    assert exc_info.value.missing_capabilities == ("authoritative_terminal_context",)
+
+
+def test_runtime_extractor_rejects_current_fall_candidate_with_zero_streak(
+    telemetry,
+    rewards,
+) -> None:
+    env = _complete_runtime_env(telemetry)
+    env.scene["robot"].data.root_state_w[0, 3:7] = torch.tensor(
+        [math.sqrt(0.5), math.sqrt(0.5), 0.0, 0.0]
+    )
+    env.recovery_terminal_contexts = (_driver_terminal_context(telemetry),)
+    support = _support_case(rewards, (0.0, 0.0, 0.7))
+
+    with pytest.raises(telemetry.RecoveryTelemetryIncompleteError) as exc_info:
+        telemetry.extract_privileged_telemetry(
+            env,
+            support_resolver=lambda _env: [support],
+        )
+
+    assert exc_info.value.missing_capabilities == ("authoritative_terminal_context",)
+
+
+def test_runtime_extractor_rejects_fall_streak_longer_than_control_history(
+    telemetry,
+    rewards,
+) -> None:
+    env = _complete_runtime_env(telemetry)
+    env.scene["robot"].data.root_state_w[0, 3:7] = torch.tensor(
+        [math.sqrt(0.5), math.sqrt(0.5), 0.0, 0.0]
+    )
+    env.recovery_terminal_contexts = (
+        _driver_terminal_context(
+            telemetry,
+            control_step_count=3,
+            fall_streak=4,
+        ),
+    )
+    support = _support_case(rewards, (0.0, 0.0, 0.7))
+
+    with pytest.raises(telemetry.RecoveryTelemetryIncompleteError) as exc_info:
+        telemetry.extract_privileged_telemetry(
+            env,
+            support_resolver=lambda _env: [support],
+        )
+
+    assert exc_info.value.missing_capabilities == ("authoritative_terminal_context",)
+
+
 def test_runtime_extractor_uses_critical_body_contact_for_soft_tilt(telemetry, rewards) -> None:
     env = _complete_runtime_env(telemetry)
     support = _support_case(rewards, (0.0, 0.0, 0.7))

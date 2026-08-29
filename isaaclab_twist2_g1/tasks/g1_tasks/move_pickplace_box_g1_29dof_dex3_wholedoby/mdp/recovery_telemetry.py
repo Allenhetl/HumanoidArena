@@ -142,6 +142,8 @@ class DriverTerminalContext:
             raise ValueError("driver step limits must be non-negative and positive")
         if self.fall_streak < 0 or self.fall_confirm_steps <= 0:
             raise ValueError("fall streak and confirmation steps are invalid")
+        if self.fall_streak > self.control_step_count:
+            raise ValueError("fall streak exceeds the available control-step history")
         if type(self.time_limit) is not bool or type(self.fall_confirmed) is not bool:
             raise ValueError("driver terminal flags must be booleans")
         if self.time_limit != (self.control_step_count >= self.max_control_steps):
@@ -501,7 +503,7 @@ def build_privileged_telemetry(
         root_up_alignment,
         critical_body_contact=critical_body_contact,
     )
-    if terminal_context.fall_confirmed and not fall_candidate:
+    if fall_candidate != (terminal_context.fall_streak > 0):
         raise RecoveryTelemetryIncompleteError(("authoritative_terminal_context",))
     fall = terminal_context.fall_confirmed
     success = bool(getattr(support, "placed"))
