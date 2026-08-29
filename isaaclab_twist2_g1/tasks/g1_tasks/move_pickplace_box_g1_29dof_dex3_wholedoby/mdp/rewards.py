@@ -16,19 +16,19 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 
-_BOX_SIZE_M = (0.21, 0.21, 0.21)
-_BOX_HALF_EXTENTS_M = tuple(size * 0.5 for size in _BOX_SIZE_M)
+BOX_SIZE_M = (0.21, 0.21, 0.21)
+BOX_HALF_EXTENTS_M = tuple(size * 0.5 for size in BOX_SIZE_M)
 
 _FALLBACK_SUPPORT_HALF_X_M = 0.45
 _FALLBACK_SUPPORT_HALF_Y_M = 0.18
-_MIN_SUPPORT_SPAN_X_M = _BOX_SIZE_M[0] + 0.02
-_MIN_SUPPORT_SPAN_Y_M = _BOX_SIZE_M[1] + 0.02
+_MIN_SUPPORT_SPAN_X_M = BOX_SIZE_M[0] + 0.02
+_MIN_SUPPORT_SPAN_Y_M = BOX_SIZE_M[1] + 0.02
 _SHELF_BASE_SUPPORT_TOP_Z_AT_DEFAULT_M = 0.1090
 _SHELF_ACTIVE_LAYER_TOP_Z_AT_DEFAULT_M = 0.6477
 _SHELF_ACTIVE_LAYER_Z_FROM_BASE_M = (
     _SHELF_ACTIVE_LAYER_TOP_Z_AT_DEFAULT_M - _SHELF_BASE_SUPPORT_TOP_Z_AT_DEFAULT_M
 )
-_BOX_BOTTOM_SURFACE_TOLERANCE_M = 0.06
+BOX_BOTTOM_SURFACE_TOLERANCE_M = 0.06
 
 
 @dataclass(frozen=True)
@@ -222,15 +222,15 @@ def _is_box_on_support_surface(
     center_x = float(box_center_w[0].item())
     center_y = float(box_center_w[1].item())
     center_z = float(box_center_w[2].item())
-    box_bottom_z = center_z - _BOX_HALF_EXTENTS_M[2]
+    box_bottom_z = center_z - BOX_HALF_EXTENTS_M[2]
 
     inside_xy = (
-        (center_x >= x_lo + _BOX_HALF_EXTENTS_M[0])
-        and (center_x <= x_hi - _BOX_HALF_EXTENTS_M[0])
-        and (center_y >= y_lo + _BOX_HALF_EXTENTS_M[1])
-        and (center_y <= y_hi - _BOX_HALF_EXTENTS_M[1])
+        (center_x >= x_lo + BOX_HALF_EXTENTS_M[0])
+        and (center_x <= x_hi - BOX_HALF_EXTENTS_M[0])
+        and (center_y >= y_lo + BOX_HALF_EXTENTS_M[1])
+        and (center_y <= y_hi - BOX_HALF_EXTENTS_M[1])
     )
-    aligned_z = abs(box_bottom_z - target_support_top_z) <= _BOX_BOTTOM_SURFACE_TOLERANCE_M
+    aligned_z = abs(box_bottom_z - target_support_top_z) <= BOX_BOTTOM_SURFACE_TOLERANCE_M
     return bool(inside_xy and aligned_z)
 
 
@@ -245,12 +245,12 @@ def _surface_debug_metrics(
     center_x = float(box_center_w[0].item())
     center_y = float(box_center_w[1].item())
     center_z = float(box_center_w[2].item())
-    box_bottom_z = center_z - _BOX_HALF_EXTENTS_M[2]
+    box_bottom_z = center_z - BOX_HALF_EXTENTS_M[2]
 
-    inner_x_lo = x_lo + _BOX_HALF_EXTENTS_M[0]
-    inner_x_hi = x_hi - _BOX_HALF_EXTENTS_M[0]
-    inner_y_lo = y_lo + _BOX_HALF_EXTENTS_M[1]
-    inner_y_hi = y_hi - _BOX_HALF_EXTENTS_M[1]
+    inner_x_lo = x_lo + BOX_HALF_EXTENTS_M[0]
+    inner_x_hi = x_hi - BOX_HALF_EXTENTS_M[0]
+    inner_y_lo = y_lo + BOX_HALF_EXTENTS_M[1]
+    inner_y_hi = y_hi - BOX_HALF_EXTENTS_M[1]
     dx_outside = max(inner_x_lo - center_x, 0.0, center_x - inner_x_hi)
     dy_outside = max(inner_y_lo - center_y, 0.0, center_y - inner_y_hi)
     if target_support_top_z is None:
@@ -258,7 +258,7 @@ def _surface_debug_metrics(
     z_gap = box_bottom_z - target_support_top_z
     abs_z_gap = abs(z_gap)
     inside_xy = dx_outside == 0.0 and dy_outside == 0.0
-    aligned_z = abs_z_gap <= _BOX_BOTTOM_SURFACE_TOLERANCE_M
+    aligned_z = abs_z_gap <= BOX_BOTTOM_SURFACE_TOLERANCE_M
 
     return {
         "inside_xy": inside_xy,
@@ -456,7 +456,7 @@ def compute_reward_pickplace_box(env: "ManagerBasedRLEnv") -> torch.Tensor:
         box_centers_w = _get_box_centers_world(env)
         shelf_surfaces_w = _get_shelf_support_surfaces_world(env)
         box_center = box_centers_w[i]
-        box_bottom_z = float(box_center[2].item()) - _BOX_HALF_EXTENTS_M[2]
+        box_bottom_z = float(box_center[2].item()) - BOX_HALF_EXTENTS_M[2]
         target_support_top_z, base_support_top_z = _estimate_target_support_top_z(
             env,
             i,
@@ -484,7 +484,7 @@ def compute_reward_pickplace_box(env: "ManagerBasedRLEnv") -> torch.Tensor:
                 float(box_center[2].item()),
             ),
             "box_bottom_z": box_bottom_z,
-            "box_half_extents": _BOX_HALF_EXTENTS_M,
+            "box_half_extents": BOX_HALF_EXTENTS_M,
             "surface_count": len(shelf_surfaces_w[i]),
             "surface_source": surface_source,
             "base_support_top_z": base_support_top_z,

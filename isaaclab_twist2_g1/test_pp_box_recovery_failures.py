@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import random
 import sys
 import types
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
+import torch
 
 THIS_DIR = Path(__file__).resolve().parent
 MDP_DIR = (
@@ -227,9 +230,7 @@ def _runtime_evidence(
     *,
     capabilities: frozenset[str] | None = None,
     include_category_resource: bool = True,
-    post_injection_predicate_passed: bool = False,
-    post_injection_category: str | None = None,
-    post_injection_transform_digest: str | None = None,
+    replay_records: tuple[object, ...] = (),
 ):
     return failures.FailureRuntimeCapabilityEvidence(
         schema_version=failures.RECOVERY_RUNTIME_CAPABILITY_SCHEMA_VERSION,
@@ -241,7 +242,6 @@ def _runtime_evidence(
             else capabilities
         ),
         evidence_id=f"runtime-{category}-0",
-        evidence_digest="2" * 64,
         target_shelf=_live_geometry(failures),
         ground_support=(
             _live_geometry(failures, ground=True)
@@ -253,9 +253,53 @@ def _runtime_evidence(
             if category in {"failed-grasp", "misaligned"} and include_category_resource
             else None
         ),
-        post_injection_predicate_passed=post_injection_predicate_passed,
-        post_injection_category=post_injection_category,
-        post_injection_transform_digest=post_injection_transform_digest,
+        replay_records=replay_records,
+    )
+
+
+def _replay_record(failures, plan, *, repeat_index: int, **overrides: object):
+    values: dict[str, object] = {
+        "schema_version": failures.RECOVERY_REPLAY_EVIDENCE_SCHEMA_VERSION,
+        "repeat_index": repeat_index,
+        "category": plan.category,
+        "failure_seed": plan.failure_seed,
+        "snapshot_digest": plan.snapshot_digest,
+        "category_seed": plan.category_seed,
+        "plan_transform_digest": plan.transform_digest,
+        "runtime_evidence_digest": plan.runtime_evidence_digest,
+        "readback_state_digest": "4" * 64,
+        "continuation_digest": "5" * 64,
+        "predicate_passed": True,
+        "observed_category": plan.category,
+        "category_passed": True,
+    }
+    values.update(overrides)
+    return failures.FailureReplayRecord(**values)
+
+
+def _recovery_snapshot(state):
+    return state.RecoveryStateSnapshot(
+        schema_version=state.RECOVERY_STATE_SCHEMA_VERSION,
+        task_identity=state.PP_BOX_TASK_IDENTITY,
+        capabilities=state.RecoveryStateCapabilities(
+            schema_version=state.RECOVERY_STATE_SCHEMA_VERSION,
+            available={"task_state": False},
+        ),
+        scene_state={
+            "box": {"root_state": np.arange(13, dtype=np.float32).reshape(1, 13)},
+            "robot": {"joint_pos": torch.tensor([[0.1, 0.2]], dtype=torch.float32)},
+        },
+        task_counters={"episode_length_buf": torch.tensor([7], dtype=torch.int64)},
+        task_state=None,
+        rng_state=state.RecoveryRngState(
+            python=random.Random(101).getstate(),
+            numpy=np.random.RandomState(202).get_state(),
+            torch_cpu=torch.Generator().manual_seed(303).get_state(),
+            torch_cuda=None,
+            task_local=None,
+            wrapper=None,
+        ),
+        runtime_state={},
     )
 
 
@@ -517,6 +561,131 @@ def test_reward_bindings_are_task_truth_for_distance_grasp_and_placement_only(
     )
 
 
+def test_reward_resolver_emits_component_scoped_numeric_task_truth_and_current_baselines(
+    modules,
+) -> None:
+    _state, telemetry, failures = modules
+    task_truth = _telemetry_state(
+        telemetry,
+        grasp=False,
+        pose_valid=True,
+        xy_mismatch_m=0.3,
+        z_mismatch_m=0.4,
+    )
+
+    resolved = failures.resolve_recovery_reward_telemetry(task_truth)
+    bindings = {
+        binding.term: binding for binding in failures.recovery_reward_bindings()
+    }
+    scopes = {
+        term: failures.recovery_reward_component_scope(binding)
+        for term, binding in bindings.items()
+    }
+    assert scopes == {
+        "distance": ('["distance",[["source","bimanual_ee"],["target","box"]]]'),
+        "grasp": ('["grasp",[["end_effector","bimanual_ee"],["object","box"]]]'),
+        "placement": ('["placement",[["object","box"],["target","shelf_target"]]]'),
+    }
+
+    distance = resolved["components"][scopes["distance"]]
+    grasp = resolved["components"][scopes["grasp"]]
+    placement = resolved["components"][scopes["placement"]]
+    assert distance["distance"] == pytest.approx(0.15)
+    assert distance["d_init"] == distance["distance"]
+    assert grasp["q_grasp"] == 0.0
+    assert placement["distance"] == pytest.approx(0.5)
+    assert placement["d_init"] == placement["distance"]
+    assert len(resolved["components"]) == 3
+    assert "articulation" not in repr(resolved).lower()
+    assert "rgb" not in repr(resolved).lower()
+    assert "vlm" not in repr(resolved).lower()
+    assert "injected" not in repr(resolved).lower()
+
+    closer = _telemetry_state(
+        telemetry,
+        grasp=True,
+        pose_valid=True,
+        xy_mismatch_m=0.12,
+        z_mismatch_m=0.05,
+    )
+    closer_resolved = failures.resolve_recovery_reward_telemetry(closer)
+    closer_placement = closer_resolved["components"][scopes["placement"]]
+    closer_grasp = closer_resolved["components"][scopes["grasp"]]
+    assert closer_placement["distance"] == pytest.approx(0.13)
+    assert closer_placement["d_init"] == closer_placement["distance"]
+    assert closer_grasp["q_grasp"] == 1.0
+
+
+def test_reward_resolver_emits_activation_completion_and_fallback_gate_truth(
+    modules,
+) -> None:
+    _state, telemetry, failures = modules
+    pose_without_grasp = failures.resolve_recovery_reward_telemetry(
+        _telemetry_state(telemetry, grasp=False, pose_valid=True)
+    )
+    grasped = failures.resolve_recovery_reward_telemetry(
+        _telemetry_state(telemetry, grasp=True, pose_valid=True)
+    )
+    no_pose = failures.resolve_recovery_reward_telemetry(
+        _telemetry_state(telemetry, grasp=False, pose_valid=False)
+    )
+    falling = failures.resolve_recovery_reward_telemetry(
+        _telemetry_state(
+            telemetry,
+            grasp=False,
+            pose_valid=True,
+            fall_candidate=True,
+        )
+    )
+
+    approach = pose_without_grasp["stage_gates"]["approach"]
+    acquire = pose_without_grasp["stage_gates"]["acquire"]
+    place = pose_without_grasp["stage_gates"]["place"]
+    assert approach == {
+        "activation_predicate": "running_and_not_grasp",
+        "activation": True,
+        "completion_predicate": "bimanual_pose_evidence",
+        "completion": True,
+        "fallbacks": {},
+    }
+    assert acquire["activation"] is True
+    assert acquire["completion"] is False
+    assert acquire["fallbacks"] == {"lost_bimanual_pose": False}
+    assert place["activation"] is False
+    assert place["fallbacks"] == {
+        "lost_grasp_with_bimanual_pose": True,
+        "lost_grasp_without_bimanual_pose": False,
+    }
+
+    assert grasped["stage_gates"]["acquire"]["completion"] is True
+    assert grasped["stage_gates"]["place"]["activation"] is True
+    assert no_pose["stage_gates"]["acquire"]["fallbacks"] == {
+        "lost_bimanual_pose": True
+    }
+    assert no_pose["stage_gates"]["place"]["fallbacks"] == {
+        "lost_grasp_with_bimanual_pose": False,
+        "lost_grasp_without_bimanual_pose": True,
+    }
+    assert all(
+        gate["activation"] is False
+        and all(active is False for active in gate["fallbacks"].values())
+        for gate in falling["stage_gates"].values()
+    )
+
+
+def test_recovery_geometry_constants_are_the_public_reward_source_of_truth(
+    modules,
+) -> None:
+    _state, _telemetry, failures = modules
+
+    assert failures.BOX_HALF_EXTENTS_M is failures.rewards.BOX_HALF_EXTENTS_M
+    assert failures.BOX_HALF_EXTENT_M == failures.rewards.BOX_HALF_EXTENTS_M[0]
+    assert (
+        failures.PLACEMENT_Z_TOLERANCE_M
+        == failures.rewards.BOX_BOTTOM_SURFACE_TOLERANCE_M
+    )
+
+
 @pytest.mark.parametrize("category", sorted(DECLARED_CATEGORIES))
 def test_each_category_requires_all_declared_runtime_capabilities(
     modules, category: str
@@ -662,7 +831,7 @@ def test_anchor_categories_reuse_only_the_verified_anchor_transform(
     assert plan.state_transform == evidence.verified_anchor.state_transform
 
 
-def test_effective_catalog_requires_complete_capabilities_and_passing_post_injection_readback(
+def test_effective_catalog_requires_two_identical_bound_replays_per_category(
     modules,
 ) -> None:
     _state, _telemetry, failures = modules
@@ -672,20 +841,136 @@ def test_effective_catalog_requires_complete_capabilities_and_passing_post_injec
     }
     assert failures.effective_failure_catalog(pre_injection) == {}
 
+    single_replay = {}
     verified = {}
     for category, evidence in pre_injection.items():
         descriptor = failures.RecoveryFailureDescriptor.from_mapping(
             _descriptor_payload(failures, category)
         )
         plan = failures.build_failure_injection_plan(descriptor, evidence)
+        first = _replay_record(failures, plan, repeat_index=0)
+        second = _replay_record(failures, plan, repeat_index=1)
+        single_replay[category] = replace(evidence, replay_records=(first,))
         verified[category] = replace(
             evidence,
-            post_injection_predicate_passed=True,
-            post_injection_category=category,
-            post_injection_transform_digest=plan.transform_digest,
+            replay_records=(first, second),
         )
 
+    assert failures.effective_failure_catalog(single_replay) == {}
     assert set(failures.effective_failure_catalog(verified)) == DECLARED_CATEGORIES
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("repeat_index", 0),
+        ("category", "dropped"),
+        ("failure_seed", 18),
+        ("snapshot_digest", "3" * 64),
+        ("category_seed", 123),
+        ("plan_transform_digest", "6" * 64),
+        ("runtime_evidence_digest", "7" * 64),
+        ("readback_state_digest", "8" * 64),
+        ("continuation_digest", "9" * 64),
+        ("predicate_passed", False),
+        ("observed_category", "dropped"),
+        ("category_passed", False),
+    ],
+)
+def test_effective_catalog_fails_closed_on_replay_label_digest_or_distribution_drift(
+    modules,
+    field: str,
+    value: object,
+) -> None:
+    _state, _telemetry, failures = modules
+    category = "near-shelf-misplaced"
+    descriptor = failures.RecoveryFailureDescriptor.from_mapping(
+        _descriptor_payload(failures, category)
+    )
+    evidence = _runtime_evidence(failures, category)
+    plan = failures.build_failure_injection_plan(descriptor, evidence)
+    first = _replay_record(failures, plan, repeat_index=0)
+    drifted_repeat_index = value if field == "repeat_index" else 1
+    drifted_overrides = {} if field == "repeat_index" else {field: value}
+    drifted = _replay_record(
+        failures,
+        plan,
+        repeat_index=drifted_repeat_index,
+        **drifted_overrides,
+    )
+
+    assert (
+        failures.effective_failure_catalog(
+            {category: replace(evidence, replay_records=(first, drifted))}
+        )
+        == {}
+    )
+
+
+def test_replay_record_schema_rejects_unknown_category_invalid_digest_and_non_bool(
+    modules,
+) -> None:
+    _state, _telemetry, failures = modules
+    descriptor = failures.RecoveryFailureDescriptor.from_mapping(
+        _descriptor_payload(failures, "near-shelf-misplaced")
+    )
+    evidence = _runtime_evidence(failures, "near-shelf-misplaced")
+    plan = failures.build_failure_injection_plan(descriptor, evidence)
+
+    for overrides, message in (
+        ({"category": "fall"}, "category"),
+        ({"snapshot_digest": "caller-label"}, "digest"),
+        ({"predicate_passed": 1}, "boolean"),
+    ):
+        with pytest.raises(failures.RecoveryFailureSchemaError, match=message):
+            _replay_record(failures, plan, repeat_index=0, **overrides)
+
+
+def test_runtime_evidence_digest_is_content_derived_and_stale_replays_fail_closed(
+    modules,
+) -> None:
+    _state, _telemetry, failures = modules
+    category = "misaligned"
+    evidence = _runtime_evidence(failures, category)
+    identical = _runtime_evidence(failures, category)
+    descriptor = failures.RecoveryFailureDescriptor.from_mapping(
+        _descriptor_payload(failures, category)
+    )
+    plan = failures.build_failure_injection_plan(descriptor, evidence)
+    records = (
+        _replay_record(failures, plan, repeat_index=0),
+        _replay_record(failures, plan, repeat_index=1),
+    )
+
+    assert evidence.evidence_digest == identical.evidence_digest
+
+    shifted_shelf = replace(
+        evidence.target_shelf,
+        bounds_w=(-0.9, 1.1, -0.5, 0.5),
+    )
+    shifted_anchor = replace(
+        evidence.verified_anchor,
+        state_transform={
+            **dict(evidence.verified_anchor.state_transform),
+            "box_position_w": (0.01, 0.0, 0.505),
+        },
+    )
+    reduced_capabilities = frozenset(
+        evidence.validated_capabilities - {"verified_grasp_preserving_anchor"}
+    )
+    mutations = (
+        replace(evidence, target_shelf=shifted_shelf, replay_records=records),
+        replace(evidence, verified_anchor=shifted_anchor, replay_records=records),
+        replace(
+            evidence,
+            validated_capabilities=reduced_capabilities,
+            replay_records=records,
+        ),
+    )
+
+    for mutated in mutations:
+        assert mutated.evidence_digest != evidence.evidence_digest
+        assert failures.effective_failure_catalog({category: mutated}) == {}
 
 
 class _RawSceneTrapEnv:
@@ -716,13 +1001,65 @@ class _InjectionHooks:
         return self._readback(plan)
 
 
+def test_snapshot_digest_mismatch_fails_before_restore_rng_or_hooks(
+    modules, monkeypatch
+) -> None:
+    state, _telemetry, failures = modules
+    snapshot = _recovery_snapshot(state)
+    actual_digest = state.recovery_state_digest(snapshot)
+    assert actual_digest != "a" * 64
+    descriptor = failures.RecoveryFailureDescriptor.from_mapping(
+        _descriptor_payload(failures, "near-shelf-misplaced")
+    )
+    evidence = _runtime_evidence(failures, "near-shelf-misplaced")
+    events: list[str] = []
+    monkeypatch.setattr(
+        failures.recovery_state,
+        "restore_recovery_state",
+        lambda env, restored_snapshot, **kwargs: events.append("restore"),
+    )
+    hooks = _InjectionHooks(
+        events,
+        lambda plan: pytest.fail("readback must not run for a mismatched snapshot"),
+    )
+    python_rng_before = random.getstate()
+    numpy_rng_before = np.random.get_state()
+    torch_rng_before = torch.random.get_rng_state().clone()
+
+    with pytest.raises(failures.RecoveryFailureSnapshotDigestError) as exc_info:
+        failures.inject_recovery_failure(
+            _RawSceneTrapEnv(),
+            snapshot,
+            descriptor,
+            evidence,
+            writer=hooks,
+            settler=hooks,
+            reader=hooks,
+        )
+
+    assert exc_info.value.expected_digest == "a" * 64
+    assert exc_info.value.actual_digest == actual_digest
+    assert events == []
+    assert (hooks.write_count, hooks.settle_count, hooks.read_count) == (0, 0, 0)
+    assert random.getstate() == python_rng_before
+    numpy_rng_after = np.random.get_state()
+    assert numpy_rng_after[0] == numpy_rng_before[0]
+    assert np.array_equal(numpy_rng_after[1], numpy_rng_before[1])
+    assert numpy_rng_after[2:] == numpy_rng_before[2:]
+    assert torch.equal(torch.random.get_rng_state(), torch_rng_before)
+
+
 def test_injection_delegates_restore_before_explicit_write_settle_readback_without_raw_mutation(
     modules,
     monkeypatch,
 ) -> None:
-    _state, telemetry, failures = modules
-    descriptor = failures.RecoveryFailureDescriptor.from_mapping(
-        _descriptor_payload(failures, "near-shelf-misplaced")
+    state, telemetry, failures = modules
+    snapshot = _recovery_snapshot(state)
+    descriptor = replace(
+        failures.RecoveryFailureDescriptor.from_mapping(
+            _descriptor_payload(failures, "near-shelf-misplaced")
+        ),
+        snapshot_digest=state.recovery_state_digest(snapshot),
     )
     evidence = _runtime_evidence(failures, "near-shelf-misplaced")
     events: list[str] = []
@@ -753,7 +1090,7 @@ def test_injection_delegates_restore_before_explicit_write_settle_readback_witho
     hooks = _InjectionHooks(events, readback)
     result = failures.inject_recovery_failure(
         _RawSceneTrapEnv(),
-        object(),
+        snapshot,
         descriptor,
         evidence,
         writer=hooks,
@@ -766,13 +1103,35 @@ def test_injection_delegates_restore_before_explicit_write_settle_readback_witho
     assert events == ["restore", "write", "settle", "readback"]
     assert (hooks.write_count, hooks.settle_count, hooks.read_count) == (1, 1, 1)
 
+    continuation = {
+        "control_step": 21,
+        "observation": torch.tensor([0.25, -0.5], dtype=torch.float32),
+    }
+    replay = failures.build_failure_replay_record(
+        result,
+        repeat_index=0,
+        continuation_state=continuation,
+    )
+    assert replay.category == result.category
+    assert replay.failure_seed == result.plan.failure_seed
+    assert replay.plan_transform_digest == result.plan.transform_digest
+    assert replay.readback_state_digest == state.recovery_value_digest(result.readback)
+    assert replay.continuation_digest == state.recovery_value_digest(continuation)
+    assert replay.predicate_passed is True
+    assert replay.observed_category == result.category
+    assert replay.category_passed is True
+
 
 def test_failed_readback_raises_once_without_retry_or_seed_change(
     modules, monkeypatch
 ) -> None:
-    _state, telemetry, failures = modules
-    descriptor = failures.RecoveryFailureDescriptor.from_mapping(
-        _descriptor_payload(failures, "dropped")
+    state, telemetry, failures = modules
+    snapshot = _recovery_snapshot(state)
+    descriptor = replace(
+        failures.RecoveryFailureDescriptor.from_mapping(
+            _descriptor_payload(failures, "dropped")
+        ),
+        snapshot_digest=state.recovery_state_digest(snapshot),
     )
     evidence = _runtime_evidence(failures, "dropped")
     events: list[str] = []
@@ -803,7 +1162,7 @@ def test_failed_readback_raises_once_without_retry_or_seed_change(
     ) as exc_info:
         failures.inject_recovery_failure(
             _RawSceneTrapEnv(),
-            object(),
+            snapshot,
             descriptor,
             evidence,
             writer=hooks,

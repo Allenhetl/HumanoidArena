@@ -13,11 +13,11 @@ import math
 import random
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
-from . import recovery_state
+from . import recovery_state, rewards
 from .recovery_telemetry import (
     RECOVERY_TELEMETRY_SCHEMA_VERSION,
     PrivilegedRecoveryTelemetry,
@@ -28,6 +28,7 @@ RECOVERY_FAILURE_DESCRIPTOR_SCHEMA_VERSION = 1
 RECOVERY_ATTEMPT_SCHEMA_VERSION = 1
 RECOVERY_RUNTIME_CAPABILITY_SCHEMA_VERSION = 1
 RECOVERY_INJECTION_PLAN_SCHEMA_VERSION = 1
+RECOVERY_REPLAY_EVIDENCE_SCHEMA_VERSION = 1
 
 DECLARED_FAILURE_CATEGORIES = (
     "dropped",
@@ -44,9 +45,9 @@ _CATEGORY_INITIAL_STAGE = {
 _DESCRIPTOR_ENTITIES = ("box", "shelf_target", "bimanual_ee")
 _REWARD_TERMS = ("distance", "grasp", "placement")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
-_BOX_HALF_EXTENT_M = 0.105
-_PLACEMENT_Z_TOLERANCE_M = 0.06
-BOX_HALF_EXTENT_M = _BOX_HALF_EXTENT_M
+BOX_HALF_EXTENTS_M = rewards.BOX_HALF_EXTENTS_M
+BOX_HALF_EXTENT_M = BOX_HALF_EXTENTS_M[0]
+PLACEMENT_Z_TOLERANCE_M = rewards.BOX_BOTTOM_SURFACE_TOLERANCE_M
 
 _COMMON_RUNTIME_CAPABILITIES = frozenset(
     {
@@ -118,6 +119,18 @@ class RecoveryFailureVerificationError(RecoveryFailureError):
         self.observed_category = observed_category
         super().__init__(
             f"{category} failure readback verification failed for seed {failure_seed}: {detail}"
+        )
+
+
+class RecoveryFailureSnapshotDigestError(RecoveryFailureError):
+    """Raised before injection when a descriptor does not bind the actual snapshot."""
+
+    def __init__(self, *, expected_digest: str, actual_digest: str) -> None:
+        self.expected_digest = expected_digest
+        self.actual_digest = actual_digest
+        super().__init__(
+            "recovery snapshot digest mismatch: "
+            f"expected {expected_digest}, got {actual_digest}"
         )
 
 
@@ -315,6 +328,105 @@ def recovery_reward_bindings() -> tuple[RecoveryRewardBinding, ...]:
     return _RECOVERY_REWARD_BINDINGS
 
 
+def recovery_reward_component_scope(binding: RecoveryRewardBinding) -> str:
+    """Return the shared compiler's stable scope key without importing its code."""
+
+    if not isinstance(binding, RecoveryRewardBinding):
+        raise RecoveryFailureSchemaError(
+            "reward component scope requires a RecoveryRewardBinding"
+        )
+    ordered_roles = [[role, entity] for role, entity in binding.entity_roles.items()]
+    return json.dumps(
+        [binding.term, ordered_roles],
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+
+
+def _recovery_gate_truth(
+    telemetry: PrivilegedRecoveryTelemetry,
+) -> Mapping[str, bool]:
+    running_safe = bool(
+        telemetry.terminal_reason == "running" and not telemetry.fall_candidate
+    )
+    pose_evidence = telemetry.grasp_evidence.pose_evidence
+    if type(pose_evidence) is not bool:
+        raise RecoveryFailureSchemaError(
+            "bimanual pose evidence must be an exact boolean"
+        )
+    truth = {
+        "running_and_not_grasp": running_safe and not telemetry.grasp,
+        "bimanual_pose_evidence": pose_evidence,
+        "running_and_not_grasp_and_bimanual_pose": (
+            running_safe and not telemetry.grasp and pose_evidence
+        ),
+        "grasp": telemetry.grasp,
+        "lost_bimanual_pose": running_safe and not pose_evidence,
+        "running_and_grasp": running_safe and telemetry.grasp,
+        "placement": telemetry.placement,
+        "lost_grasp_with_bimanual_pose": (
+            running_safe and not telemetry.grasp and pose_evidence
+        ),
+        "lost_grasp_without_bimanual_pose": (
+            running_safe and not telemetry.grasp and not pose_evidence
+        ),
+    }
+    return MappingProxyType(truth)
+
+
+def resolve_recovery_reward_telemetry(
+    telemetry: PrivilegedRecoveryTelemetry,
+) -> Mapping[str, object]:
+    """Resolve task truth into component-scoped reward and stage-gate telemetry."""
+
+    state = _validate_privileged_telemetry(telemetry)
+    left_distance = math.dist(state.left_ee_pose_w[:3], state.box_center_w)
+    right_distance = math.dist(state.right_ee_pose_w[:3], state.box_center_w)
+    distance = max(left_distance, right_distance)
+    placement_distance = math.hypot(state.xy_mismatch_m, state.z_mismatch_m)
+    gate_truth = _recovery_gate_truth(state)
+
+    components: dict[str, Mapping[str, object]] = {}
+    stage_gates: dict[str, Mapping[str, object]] = {}
+    potential_values: Mapping[str, Mapping[str, float]] = {
+        "distance": MappingProxyType({"distance": distance, "d_init": distance}),
+        "grasp": MappingProxyType({"q_grasp": 1.0 if state.grasp else 0.0}),
+        "placement": MappingProxyType(
+            {"distance": placement_distance, "d_init": placement_distance}
+        ),
+    }
+    bindings_by_stage = {
+        binding.stage: binding for binding in _RECOVERY_REWARD_BINDINGS
+    }
+    for stage in _RECOVERY_STAGE_FSM:
+        fallback_truth = {
+            transition.predicate: gate_truth[transition.predicate]
+            for transition in stage.fallbacks
+        }
+        stage_gates[stage.name] = MappingProxyType(
+            {
+                "activation_predicate": stage.activation_predicate,
+                "activation": gate_truth[stage.activation_predicate],
+                "completion_predicate": stage.completion_predicate,
+                "completion": gate_truth[stage.completion_predicate],
+                "fallbacks": MappingProxyType(fallback_truth),
+            }
+        )
+        binding = bindings_by_stage[stage.name]
+        scoped: dict[str, object] = dict(potential_values[binding.term])
+        scoped[stage.activation_predicate] = gate_truth[stage.activation_predicate]
+        scoped[stage.completion_predicate] = gate_truth[stage.completion_predicate]
+        scoped.update(fallback_truth)
+        components[recovery_reward_component_scope(binding)] = MappingProxyType(scoped)
+
+    return MappingProxyType(
+        {
+            "components": MappingProxyType(components),
+            "stage_gates": MappingProxyType(stage_gates),
+        }
+    )
+
+
 @dataclass(frozen=True)
 class RecoveryFailureCatalogEntry:
     category: str
@@ -370,11 +482,8 @@ def effective_failure_catalog(
             raise RecoveryFailureSchemaError(
                 f"runtime evidence key {category!r} does not match its category"
             )
-        if (
-            not _missing_runtime_capabilities(value)
-            and value.post_injection_predicate_passed
-            and value.post_injection_category == category
-            and value.post_injection_transform_digest is not None
+        if not _missing_runtime_capabilities(value) and _runtime_replays_are_effective(
+            value
         ):
             effective[category] = _DECLARED_CATALOG[category]
     return MappingProxyType(effective)
@@ -613,9 +722,9 @@ class LiveSupportGeometry:
         geometry_digest = _digest(self.geometry_digest, name="geometry digest")
         bounds = _finite_tuple(self.bounds_w, length=4, name="support bounds")
         x_lo, x_hi, y_lo, y_hi = bounds
-        if x_hi - x_lo <= 2.0 * _BOX_HALF_EXTENT_M:
+        if x_hi - x_lo <= 2.0 * BOX_HALF_EXTENT_M:
             raise RecoveryFailureSchemaError("support x span cannot contain the box")
-        if y_hi - y_lo <= 2.0 * _BOX_HALF_EXTENT_M:
+        if y_hi - y_lo <= 2.0 * BOX_HALF_EXTENT_M:
             raise RecoveryFailureSchemaError("support y span cannot contain the box")
         if isinstance(self.top_z_m, bool) or not isinstance(self.top_z_m, (int, float)):
             raise RecoveryFailureSchemaError("support top z must be finite")
@@ -690,6 +799,79 @@ class VerifiedFailureAnchor:
 
 
 @dataclass(frozen=True)
+class FailureReplayRecord:
+    """One content-bound deterministic injection/readback/continuation replay."""
+
+    schema_version: int
+    repeat_index: int
+    category: str
+    failure_seed: int
+    snapshot_digest: str
+    category_seed: int
+    plan_transform_digest: str
+    runtime_evidence_digest: str
+    readback_state_digest: str
+    continuation_digest: str
+    predicate_passed: bool
+    observed_category: str | None
+    category_passed: bool
+
+    def __post_init__(self) -> None:
+        if self.schema_version != RECOVERY_REPLAY_EVIDENCE_SCHEMA_VERSION:
+            raise RecoveryFailureSchemaError(
+                f"unsupported replay evidence schema version {self.schema_version}"
+            )
+        repeat_index = _strict_int(self.repeat_index, name="repeat index")
+        category = _category(self.category)
+        failure_seed = _strict_int(self.failure_seed, name="failure seed")
+        snapshot_digest = _digest(self.snapshot_digest, name="snapshot digest")
+        category_seed = _strict_int(self.category_seed, name="category seed")
+        plan_digest = _digest(
+            self.plan_transform_digest,
+            name="plan transform digest",
+        )
+        runtime_digest = _digest(
+            self.runtime_evidence_digest,
+            name="runtime evidence digest",
+        )
+        readback_digest = _digest(
+            self.readback_state_digest,
+            name="readback state digest",
+        )
+        continuation_digest = _digest(
+            self.continuation_digest,
+            name="continuation digest",
+        )
+        predicate_passed = _strict_bool(
+            self.predicate_passed,
+            name="predicate passed",
+        )
+        observed_category = _category(self.observed_category, optional=True)
+        category_passed = _strict_bool(
+            self.category_passed,
+            name="category passed",
+        )
+        assert category is not None
+        assert snapshot_digest is not None
+        assert plan_digest is not None
+        assert runtime_digest is not None
+        assert readback_digest is not None
+        assert continuation_digest is not None
+        object.__setattr__(self, "repeat_index", repeat_index)
+        object.__setattr__(self, "category", category)
+        object.__setattr__(self, "failure_seed", failure_seed)
+        object.__setattr__(self, "snapshot_digest", snapshot_digest)
+        object.__setattr__(self, "category_seed", category_seed)
+        object.__setattr__(self, "plan_transform_digest", plan_digest)
+        object.__setattr__(self, "runtime_evidence_digest", runtime_digest)
+        object.__setattr__(self, "readback_state_digest", readback_digest)
+        object.__setattr__(self, "continuation_digest", continuation_digest)
+        object.__setattr__(self, "predicate_passed", predicate_passed)
+        object.__setattr__(self, "observed_category", observed_category)
+        object.__setattr__(self, "category_passed", category_passed)
+
+
+@dataclass(frozen=True)
 class FailureRuntimeCapabilityEvidence:
     """Immutable per-category runtime evidence controlling catalog activation."""
 
@@ -698,13 +880,11 @@ class FailureRuntimeCapabilityEvidence:
     category: str
     validated_capabilities: frozenset[str]
     evidence_id: str
-    evidence_digest: str
     target_shelf: LiveSupportGeometry
     ground_support: LiveSupportGeometry | None
     verified_anchor: VerifiedFailureAnchor | None
-    post_injection_predicate_passed: bool
-    post_injection_category: str | None
-    post_injection_transform_digest: str | None
+    replay_records: tuple[FailureReplayRecord, ...] = ()
+    evidence_digest: str = field(init=False)
 
     def __post_init__(self) -> None:
         if self.schema_version != RECOVERY_RUNTIME_CAPABILITY_SCHEMA_VERSION:
@@ -733,7 +913,6 @@ class FailureRuntimeCapabilityEvidence:
             )
         if not isinstance(self.evidence_id, str) or not self.evidence_id.strip():
             raise RecoveryFailureSchemaError("runtime evidence id must be non-empty")
-        evidence_digest = _digest(self.evidence_digest, name="runtime evidence digest")
         if not isinstance(self.target_shelf, LiveSupportGeometry):
             raise RecoveryFailureSchemaError(
                 "runtime evidence requires live target shelf geometry"
@@ -752,31 +931,30 @@ class FailureRuntimeCapabilityEvidence:
             VerifiedFailureAnchor,
         ):
             raise RecoveryFailureSchemaError("verified failure anchor is invalid")
-        passed = _strict_bool(
-            self.post_injection_predicate_passed,
-            name="post injection predicate passed",
-        )
-        post_category = _category(self.post_injection_category, optional=True)
-        post_digest = _digest(
-            self.post_injection_transform_digest,
-            name="post injection transform digest",
-            optional=True,
-        )
-        if passed:
-            if post_category != category or post_digest is None:
-                raise RecoveryFailureSchemaError(
-                    "passing post-injection evidence must match category and transform digest"
-                )
-        elif post_category is not None or post_digest is not None:
+        if not isinstance(self.replay_records, (tuple, list)) or any(
+            not isinstance(record, FailureReplayRecord)
+            for record in self.replay_records
+        ):
             raise RecoveryFailureSchemaError(
-                "failed or absent post-injection evidence cannot claim category or digest"
+                "runtime replay records must be FailureReplayRecord values"
             )
-        assert evidence_digest is not None
+        replay_records = tuple(self.replay_records)
+        evidence_payload = (
+            "runtime-capability-evidence",
+            self.schema_version,
+            self.task_identity,
+            category,
+            tuple(sorted(capabilities)),
+            self.evidence_id,
+            self.target_shelf,
+            self.ground_support,
+            self.verified_anchor,
+        )
+        evidence_digest = recovery_state.recovery_value_digest(evidence_payload)
         object.__setattr__(self, "category", category)
         object.__setattr__(self, "validated_capabilities", capabilities)
+        object.__setattr__(self, "replay_records", replay_records)
         object.__setattr__(self, "evidence_digest", evidence_digest)
-        object.__setattr__(self, "post_injection_category", post_category)
-        object.__setattr__(self, "post_injection_transform_digest", post_digest)
 
 
 @dataclass(frozen=True)
@@ -913,11 +1091,11 @@ def _near_shelf_transform(
     rng: random.Random,
 ) -> dict[str, object]:
     x_lo, x_hi, y_lo, y_hi = geometry.bounds_w
-    inner_x_lo = x_lo + _BOX_HALF_EXTENT_M
-    inner_x_hi = x_hi - _BOX_HALF_EXTENT_M
-    inner_y_lo = y_lo + _BOX_HALF_EXTENT_M
-    inner_y_hi = y_hi - _BOX_HALF_EXTENT_M
-    overhang = _BOX_HALF_EXTENT_M * (0.2 + 0.6 * rng.random())
+    inner_x_lo = x_lo + BOX_HALF_EXTENT_M
+    inner_x_hi = x_hi - BOX_HALF_EXTENT_M
+    inner_y_lo = y_lo + BOX_HALF_EXTENT_M
+    inner_y_hi = y_hi - BOX_HALF_EXTENT_M
+    overhang = BOX_HALF_EXTENT_M * (0.2 + 0.6 * rng.random())
     side = rng.randrange(4)
     if side == 0:
         x = inner_x_lo - overhang
@@ -931,7 +1109,7 @@ def _near_shelf_transform(
     else:
         x = rng.uniform(inner_x_lo, inner_x_hi)
         y = inner_y_hi + overhang
-    return _box_root_transform((x, y, geometry.top_z_m + _BOX_HALF_EXTENT_M))
+    return _box_root_transform((x, y, geometry.top_z_m + BOX_HALF_EXTENT_M))
 
 
 def _ground_transform(
@@ -939,9 +1117,9 @@ def _ground_transform(
     rng: random.Random,
 ) -> dict[str, object]:
     x_lo, x_hi, y_lo, y_hi = geometry.bounds_w
-    x = rng.uniform(x_lo + _BOX_HALF_EXTENT_M, x_hi - _BOX_HALF_EXTENT_M)
-    y = rng.uniform(y_lo + _BOX_HALF_EXTENT_M, y_hi - _BOX_HALF_EXTENT_M)
-    return _box_root_transform((x, y, geometry.top_z_m + _BOX_HALF_EXTENT_M))
+    x = rng.uniform(x_lo + BOX_HALF_EXTENT_M, x_hi - BOX_HALF_EXTENT_M)
+    y = rng.uniform(y_lo + BOX_HALF_EXTENT_M, y_hi - BOX_HALF_EXTENT_M)
+    return _box_root_transform((x, y, geometry.top_z_m + BOX_HALF_EXTENT_M))
 
 
 def build_failure_injection_plan(
@@ -1003,6 +1181,65 @@ def build_failure_injection_plan(
     return FailureInjectionPlan(
         **plan_identity,
         transform_digest=transform_digest,
+    )
+
+
+def _runtime_replays_are_effective(
+    evidence: FailureRuntimeCapabilityEvidence,
+) -> bool:
+    records = evidence.replay_records
+    if len(records) < 2:
+        return False
+    repeat_indices = {record.repeat_index for record in records}
+    if len(repeat_indices) != len(records):
+        return False
+
+    first = records[0]
+    stable_fields = (
+        "category",
+        "failure_seed",
+        "snapshot_digest",
+        "category_seed",
+        "plan_transform_digest",
+        "runtime_evidence_digest",
+        "readback_state_digest",
+        "continuation_digest",
+    )
+    if any(
+        getattr(record, name) != getattr(first, name)
+        for record in records[1:]
+        for name in stable_fields
+    ):
+        return False
+    if any(
+        record.category != evidence.category
+        or record.runtime_evidence_digest != evidence.evidence_digest
+        or not record.predicate_passed
+        or record.observed_category != evidence.category
+        or not record.category_passed
+        for record in records
+    ):
+        return False
+
+    descriptor = RecoveryFailureDescriptor(
+        schema_version=RECOVERY_FAILURE_DESCRIPTOR_SCHEMA_VERSION,
+        task_identity=PP_BOX_TASK_IDENTITY,
+        category=evidence.category,
+        stage=_CATEGORY_INITIAL_STAGE[evidence.category],
+        entities=_DESCRIPTOR_ENTITIES,
+        confidence=1.0,
+        reward_mask={term: True for term in _REWARD_TERMS},
+        failure_seed=first.failure_seed,
+        snapshot_digest=first.snapshot_digest,
+    )
+    try:
+        expected_plan = build_failure_injection_plan(descriptor, evidence)
+    except RecoveryFailureError:
+        return False
+    return bool(
+        first.category_seed == expected_plan.category_seed
+        and first.plan_transform_digest == expected_plan.transform_digest
+        and first.runtime_evidence_digest == expected_plan.runtime_evidence_digest
     )
 
 
@@ -1090,8 +1327,8 @@ def _predicate_facts(context: FailurePredicateContext) -> dict[str, bool]:
         attempt.stable
         and context.box_axis_aligned
         and not telemetry.placement
-        and 0.0 < telemetry.xy_mismatch_m < _BOX_HALF_EXTENT_M
-        and telemetry.z_mismatch_m <= _PLACEMENT_Z_TOLERANCE_M
+        and 0.0 < telemetry.xy_mismatch_m < BOX_HALF_EXTENT_M
+        and telemetry.z_mismatch_m <= PLACEMENT_Z_TOLERANCE_M
     )
     dropped = bool(
         attempt.stable and context.ground_supported and context.target_disjoint
@@ -1201,6 +1438,41 @@ class FailureInjectionResult:
     readback: FailurePredicateContext
 
 
+def build_failure_replay_record(
+    result: FailureInjectionResult,
+    *,
+    repeat_index: int,
+    continuation_state: object,
+) -> FailureReplayRecord:
+    """Bind one verified injection and its continued state into replay evidence."""
+
+    if not isinstance(result, FailureInjectionResult):
+        raise RecoveryFailureSchemaError(
+            "replay evidence requires a FailureInjectionResult"
+        )
+    if not result.readback_passed:
+        raise RecoveryFailureSchemaError(
+            "replay evidence requires a passing injection readback"
+        )
+    observed = classify_recoverable_failure(result.readback)
+    category_passed = bool(observed == result.plan.category == result.category)
+    return FailureReplayRecord(
+        schema_version=RECOVERY_REPLAY_EVIDENCE_SCHEMA_VERSION,
+        repeat_index=repeat_index,
+        category=result.plan.category,
+        failure_seed=result.plan.failure_seed,
+        snapshot_digest=result.plan.snapshot_digest,
+        category_seed=result.plan.category_seed,
+        plan_transform_digest=result.plan.transform_digest,
+        runtime_evidence_digest=result.plan.runtime_evidence_digest,
+        readback_state_digest=recovery_state.recovery_value_digest(result.readback),
+        continuation_digest=recovery_state.recovery_value_digest(continuation_state),
+        predicate_passed=bool(result.readback_passed),
+        observed_category=observed,
+        category_passed=category_passed,
+    )
+
+
 def inject_recovery_failure(
     env: object,
     snapshot: object,
@@ -1213,6 +1485,14 @@ def inject_recovery_failure(
 ) -> FailureInjectionResult:
     """Restore then perform one write/settle/readback attempt with no resampling."""
 
+    if not isinstance(descriptor, RecoveryFailureDescriptor):
+        raise RecoveryFailureSchemaError("injection descriptor is invalid")
+    actual_snapshot_digest = recovery_state.recovery_state_digest(snapshot)
+    if descriptor.snapshot_digest != actual_snapshot_digest:
+        raise RecoveryFailureSnapshotDigestError(
+            expected_digest=descriptor.snapshot_digest,
+            actual_digest=actual_snapshot_digest,
+        )
     plan = build_failure_injection_plan(descriptor, evidence)
     missing_hooks = []
     if not isinstance(writer, RecoveryFailureWriter):
@@ -1276,16 +1556,20 @@ def inject_recovery_failure(
 
 
 __all__ = [
+    "BOX_HALF_EXTENTS_M",
     "BOX_HALF_EXTENT_M",
     "DECLARED_FAILURE_CATEGORIES",
+    "PLACEMENT_Z_TOLERANCE_M",
     "PP_BOX_TASK_IDENTITY",
     "RECOVERY_ATTEMPT_SCHEMA_VERSION",
     "RECOVERY_FAILURE_DESCRIPTOR_SCHEMA_VERSION",
     "RECOVERY_INJECTION_PLAN_SCHEMA_VERSION",
+    "RECOVERY_REPLAY_EVIDENCE_SCHEMA_VERSION",
     "RECOVERY_RUNTIME_CAPABILITY_SCHEMA_VERSION",
     "FailureInjectionPlan",
     "FailureInjectionResult",
     "FailurePredicateContext",
+    "FailureReplayRecord",
     "FailureRuntimeCapabilityEvidence",
     "LiveSupportGeometry",
     "RecoveryAttemptEvidence",
@@ -1297,6 +1581,7 @@ __all__ = [
     "RecoveryFailureReader",
     "RecoveryFailureSchemaError",
     "RecoveryFailureSettler",
+    "RecoveryFailureSnapshotDigestError",
     "RecoveryFailureVerificationError",
     "RecoveryFailureWriter",
     "RecoveryFallbackTransition",
@@ -1304,6 +1589,7 @@ __all__ = [
     "RecoveryStageSpec",
     "VerifiedFailureAnchor",
     "build_failure_injection_plan",
+    "build_failure_replay_record",
     "classify_recoverable_failure",
     "declared_failure_catalog",
     "derive_category_seed",
@@ -1311,8 +1597,10 @@ __all__ = [
     "evaluate_failure_predicates",
     "inject_recovery_failure",
     "recovery_reward_bindings",
+    "recovery_reward_component_scope",
     "recovery_stage_fsm",
     "recovery_state",
     "recovery_succeeded",
     "required_runtime_capabilities",
+    "resolve_recovery_reward_telemetry",
 ]

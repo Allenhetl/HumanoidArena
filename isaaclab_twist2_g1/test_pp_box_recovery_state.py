@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import random
 import sys
 from dataclasses import replace
@@ -10,7 +11,6 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
-
 
 THIS_DIR = Path(__file__).resolve().parent
 RECOVERY_STATE_PATH = (
@@ -24,12 +24,101 @@ RECOVERY_STATE_PATH = (
 
 
 def _load_recovery_state_module():
-    spec = importlib.util.spec_from_file_location("pp_box_recovery_state", RECOVERY_STATE_PATH)
+    spec = importlib.util.spec_from_file_location(
+        "pp_box_recovery_state", RECOVERY_STATE_PATH
+    )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def test_recovery_value_digest_is_stable_for_nested_tensor_array_mapping_tuple_and_rng() -> (
+    None
+):
+    recovery_state = _load_recovery_state_module()
+    value = {
+        "tensor": torch.tensor([[1.0, 2.0]], dtype=torch.float32),
+        "array": np.array([[3, 4]], dtype=np.int32),
+        "tuple": ("phase", 7, False),
+        "rng": {
+            "python": random.Random(11).getstate(),
+            "numpy": np.random.RandomState(12).get_state(),
+            "torch": torch.Generator().manual_seed(13).get_state(),
+        },
+    }
+    reordered = {
+        "rng": recovery_state.clone_recovery_value(value["rng"]),
+        "tuple": tuple(value["tuple"]),
+        "array": value["array"].copy(),
+        "tensor": value["tensor"].clone(),
+    }
+
+    first = recovery_state.recovery_value_digest(value)
+    second = recovery_state.recovery_value_digest(reordered)
+
+    assert first == second
+    assert len(first) == 64
+    assert set(first) <= set("0123456789abcdef")
+    mutated = recovery_state.clone_recovery_value(value)
+    mutated["tensor"][0, 1] = 2.5
+    assert recovery_state.recovery_value_digest(mutated) != first
+
+
+def test_tensor_digest_is_device_and_cpu_map_location_independent() -> None:
+    recovery_state = _load_recovery_state_module()
+    source = torch.tensor([[1.25, -2.5]], dtype=torch.float32)
+    buffer = io.BytesIO()
+    torch.save(source, buffer)
+    buffer.seek(0)
+    loaded_cpu = torch.load(buffer, map_location="cpu", weights_only=True)
+
+    expected = recovery_state.recovery_value_digest(source)
+
+    assert recovery_state.recovery_value_digest(loaded_cpu) == expected
+    if torch.cuda.is_available():
+        assert recovery_state.recovery_value_digest(source.cuda()) == expected
+
+
+def test_recovery_state_digest_binds_every_snapshot_payload_without_object_identity() -> (
+    None
+):
+    recovery_state = _load_recovery_state_module()
+    env = _FakeEnv()
+    snapshot = recovery_state.capture_recovery_state(
+        env,
+        required_capabilities={"task_state", "task_local_rng", "wrapper_rng"},
+    )
+    cloned = replace(
+        snapshot,
+        scene_state={
+            key: recovery_state.clone_recovery_value(snapshot.scene_state[key])
+            for key in reversed(tuple(snapshot.scene_state))
+        },
+        task_counters=recovery_state.clone_recovery_value(snapshot.task_counters),
+        task_state=recovery_state.clone_recovery_value(snapshot.task_state),
+        rng_state=recovery_state.clone_recovery_value(snapshot.rng_state),
+        runtime_state=recovery_state.clone_recovery_value(snapshot.runtime_state),
+    )
+
+    digest = recovery_state.recovery_state_digest(snapshot)
+
+    assert recovery_state.recovery_state_digest(cloned) == digest
+    mutated_task = recovery_state.clone_recovery_value(snapshot.task_state)
+    mutated_task["debug_score"] += 1
+    assert (
+        recovery_state.recovery_state_digest(replace(snapshot, task_state=mutated_task))
+        != digest
+    )
+    mutated_rng = replace(
+        snapshot.rng_state,
+        torch_cpu=torch.Generator().manual_seed(999).get_state(),
+    )
+    assert (
+        recovery_state.recovery_state_digest(replace(snapshot, rng_state=mutated_rng))
+        != digest
+    )
 
 
 class _Scene:
