@@ -122,10 +122,11 @@ def test_recovery_state_digest_binds_every_snapshot_payload_without_object_ident
 
 
 class _Scene:
-    def __init__(self, env: "_FakeEnv") -> None:
+    def __init__(self, env: _FakeEnv) -> None:
         self._env = env
 
-    def get_state(self) -> dict[str, object]:
+    def get_state(self, *, is_relative: bool | None = None) -> dict[str, object]:
+        self._env.api_events.append(("get_state", is_relative))
         return {
             "robot": {"joint_pos": self._env.joint_pos},
             "box": {"root_state": self._env.box_root_state},
@@ -134,6 +135,8 @@ class _Scene:
 
 class _FakeEnv:
     def __init__(self) -> None:
+        self.num_envs = 1
+        self.device = torch.device("cpu")
         self.joint_pos = torch.tensor([[0.1, 0.2]], dtype=torch.float32)
         self.box_root_state = np.arange(13, dtype=np.float32).reshape(1, 13)
         self.episode_length_buf = torch.tensor([7], dtype=torch.int64)
@@ -150,8 +153,26 @@ class _FakeEnv:
         self.wrapper_rng = np.random.default_rng(202)
         self.scene = _Scene(self)
         self.restore_events: list[str] = []
+        self.api_events: list[tuple[object, ...]] = []
+        self.last_reset_state: dict[str, object] | None = None
+        self.last_reset_env_ids: torch.Tensor | None = None
 
-    def reset_to(self, state: dict[str, object]) -> None:
+    def reset_to(
+        self,
+        state: dict[str, object],
+        env_ids: torch.Tensor | None = None,
+        *,
+        is_relative: bool | None = None,
+    ) -> None:
+        self.api_events.append(
+            (
+                "reset_to",
+                None if env_ids is None else env_ids.detach().cpu().clone(),
+                is_relative,
+            )
+        )
+        self.last_reset_state = state
+        self.last_reset_env_ids = env_ids
         self.restore_events.append("scene")
         self.joint_pos = state["robot"]["joint_pos"].clone()
         self.box_root_state = state["box"]["root_state"].copy()
@@ -160,7 +181,12 @@ class _FakeEnv:
         np.random.random()
         torch.rand(1)
         torch.rand(1, generator=self.task_generator)
-        self.wrapper_rng.random()
+        wrapper_rng = getattr(self, "wrapper_rng", None)
+        if wrapper_rng is not None:
+            wrapper_rng.random()
+        np_random = getattr(self, "np_random", None)
+        if np_random is not None:
+            np_random.random()
         self.episode_length_buf.add_(100)
 
     def capture_recovery_task_state(self) -> dict[str, object]:
@@ -274,6 +300,31 @@ class _DirectTaskStateEnv(_FakeEnv):
     restore_recovery_task_state = None
 
 
+class _DelegatingGymWrapper:
+    def __init__(self, unwrapped: _FakeEnv, nested_env: object) -> None:
+        self.unwrapped = unwrapped
+        self.env = nested_env
+        self._runtime = unwrapped
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._runtime, name)
+
+
+class _EnvLink:
+    def __init__(self) -> None:
+        self.env: object | None = None
+
+
+class _AbsoluteScene(_Scene):
+    def get_state(self, *, is_relative: bool | None = None) -> dict[str, object]:
+        self._env.api_events.append(("get_state", is_relative))
+        offset = 0.0 if is_relative is False else 1000.0
+        return {
+            "robot": {"joint_pos": self._env.joint_pos + offset},
+            "box": {"root_state": self._env.box_root_state + offset},
+        }
+
+
 def _global_rng_state() -> tuple[object, tuple[object, ...], torch.Tensor]:
     return random.getstate(), np.random.get_state(), torch.get_rng_state().clone()
 
@@ -362,6 +413,132 @@ def _assert_transition_equal(actual: dict[str, Any], expected: dict[str, Any]) -
 @pytest.fixture()
 def recovery_state():
     return _load_recovery_state_module()
+
+
+def test_capture_and_restore_use_absolute_single_env_isaac_api(recovery_state) -> None:
+    env = _FakeEnv()
+
+    snapshot = recovery_state.capture_recovery_state(env)
+
+    assert env.api_events == [
+        ("get_state", False),
+        ("get_state", False),
+    ]
+    env.api_events.clear()
+    recovery_state.restore_recovery_state(env, snapshot)
+
+    assert env.api_events[0] == ("get_state", False)
+    assert env.api_events[1][0] == "reset_to"
+    torch.testing.assert_close(env.api_events[1][1], torch.tensor([0]))
+    assert env.api_events[1][1].dtype == torch.long
+    assert env.api_events[1][1].device == env.device
+    assert env.api_events[1][2] is False
+    assert env.last_reset_state is not snapshot.scene_state
+    assert env.last_reset_state["robot"] is not snapshot.scene_state["robot"]
+    assert env.last_reset_env_ids is not None
+    assert env.last_reset_env_ids.device == env.device
+
+
+def test_absolute_world_capture_restore_is_symmetric(recovery_state) -> None:
+    env = _FakeEnv()
+    env.scene = _AbsoluteScene(env)
+    expected_joint_pos = env.joint_pos.clone()
+    expected_box_root_state = env.box_root_state.copy()
+
+    snapshot = recovery_state.capture_recovery_state(env)
+
+    torch.testing.assert_close(snapshot.scene_state["robot"]["joint_pos"], expected_joint_pos)
+    np.testing.assert_array_equal(
+        snapshot.scene_state["box"]["root_state"],
+        expected_box_root_state,
+    )
+    env.joint_pos.fill_(-100.0)
+    env.box_root_state.fill(-200.0)
+    recovery_state.restore_recovery_state(env, snapshot)
+
+    torch.testing.assert_close(env.joint_pos, expected_joint_pos)
+    np.testing.assert_array_equal(env.box_root_state, expected_box_root_state)
+    assert env.api_events[-1][0] == "reset_to"
+    assert env.api_events[-1][2] is False
+
+
+@pytest.mark.parametrize(
+    ("attribute", "value", "expected_missing"),
+    [
+        ("num_envs", None, "num_envs"),
+        ("num_envs", 2, "num_envs"),
+        ("device", None, "device"),
+        ("device", "not-a-torch-device", "device"),
+    ],
+)
+@pytest.mark.parametrize("operation", ["capture", "restore"])
+def test_capture_and_restore_fail_closed_without_valid_single_env_selection(
+    recovery_state,
+    attribute: str,
+    value: object,
+    expected_missing: str,
+    operation: str,
+) -> None:
+    source = _FakeEnv()
+    snapshot = recovery_state.capture_recovery_state(source)
+    env = _FakeEnv()
+    if value is None:
+        delattr(env, attribute)
+    else:
+        setattr(env, attribute, value)
+
+    with pytest.raises(recovery_state.RecoveryStateIncompleteError) as exc_info:
+        if operation == "capture":
+            recovery_state.capture_recovery_state(env)
+        else:
+            recovery_state.restore_recovery_state(env, snapshot)
+
+    assert expected_missing in exc_info.value.missing_capabilities
+    assert env.api_events == []
+    assert env.restore_events == []
+
+
+def test_unwrapped_np_random_is_bound_before_nested_or_forwarded_rng(recovery_state) -> None:
+    runtime = _FakeEnv()
+    runtime.np_random = np.random.default_rng(303)
+    nested = _EnvLink()
+    nested.np_random = np.random.default_rng(404)
+    wrapper = _DelegatingGymWrapper(runtime, nested)
+    snapshot = recovery_state.capture_recovery_state(
+        wrapper,
+        required_capabilities={"wrapper_rng"},
+    )
+    expected = runtime.np_random.random(3)
+    runtime.np_random.random(7)
+    runtime.wrapper_rng.random(5)
+    nested.np_random.random(4)
+    nested_state_before_restore = dict(nested.np_random.bit_generator.state)
+
+    recovery_state.restore_recovery_state(wrapper, snapshot)
+
+    np.testing.assert_array_equal(runtime.np_random.random(3), expected)
+    assert nested.np_random.bit_generator.state == nested_state_before_restore
+
+
+def test_nested_wrapper_rng_resolution_is_cycle_safe(recovery_state) -> None:
+    env = _FakeEnv()
+    del env.wrapper_rng
+    first = _EnvLink()
+    second = _EnvLink()
+    first.env = second
+    second.env = first
+    second.np_random = np.random.default_rng(505)
+    env.env = first
+
+    snapshot = recovery_state.capture_recovery_state(
+        env,
+        required_capabilities={"wrapper_rng"},
+    )
+    expected = second.np_random.random(2)
+    second.np_random.random(6)
+    recovery_state.restore_recovery_state(env, snapshot)
+
+    np.testing.assert_array_equal(second.np_random.random(2), expected)
 
 
 def test_snapshot_schema_is_versioned_and_task_bound(recovery_state) -> None:

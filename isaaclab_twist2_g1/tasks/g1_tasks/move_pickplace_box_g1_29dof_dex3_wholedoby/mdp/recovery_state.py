@@ -375,13 +375,47 @@ def _task_rng(env: Any) -> Any | None:
     return None
 
 
+def _optional_runtime_attribute(owner: Any, name: str) -> Any | None:
+    try:
+        return getattr(owner, name)
+    except (AttributeError, RecursionError):
+        return None
+
+
+def _unwrapped_env(env: Any) -> Any:
+    current = env
+    visited: set[int] = set()
+    while id(current) not in visited:
+        visited.add(id(current))
+        unwrapped = _optional_runtime_attribute(current, "unwrapped")
+        if unwrapped is None or unwrapped is current or id(unwrapped) in visited:
+            return current
+        current = unwrapped
+    return current
+
+
+def _nested_envs(env: Any):
+    current = env
+    visited: set[int] = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        yield current
+        current = _optional_runtime_attribute(current, "env")
+
+
 def _wrapper_rng(env: Any) -> Any | None:
-    source = getattr(env, "wrapper_rng", None)
-    if source is not None:
-        return source
-    wrapped = getattr(env, "env", None)
-    if wrapped is not None:
-        return getattr(wrapped, "np_random", None)
+    unwrapped = _unwrapped_env(env)
+    for name in ("np_random", "wrapper_rng"):
+        source = _optional_runtime_attribute(unwrapped, name)
+        if _supports_rng(source):
+            return source
+    for nested in _nested_envs(env):
+        if nested is unwrapped:
+            continue
+        for name in ("np_random", "wrapper_rng"):
+            source = _optional_runtime_attribute(nested, name)
+            if _supports_rng(source):
+                return source
     return None
 
 
@@ -390,6 +424,46 @@ def _supports_rng(source: Any | None) -> bool:
         source,
         (torch.Generator, np.random.Generator, np.random.RandomState, random.Random),
     )
+
+
+def _single_env_ids(env: Any, *, operation: str) -> torch.Tensor:
+    missing: set[str] = set()
+    num_envs = _optional_runtime_attribute(env, "num_envs")
+    if (
+        isinstance(num_envs, bool)
+        or not isinstance(num_envs, (int, np.integer))
+        or int(num_envs) != 1
+    ):
+        missing.add("num_envs")
+
+    env_ids = None
+    device = _optional_runtime_attribute(env, "device")
+    if device is None:
+        missing.add("device")
+    else:
+        try:
+            torch_device = torch.device(device)
+            if torch_device.type not in {"cpu", "cuda"}:
+                raise ValueError(f"unsupported recovery device type: {torch_device.type}")
+            env_ids = torch.tensor([0], dtype=torch.long, device=torch_device)
+        except (RuntimeError, TypeError, ValueError):
+            missing.add("device")
+
+    if missing:
+        raise RecoveryStateIncompleteError(
+            missing,
+            operation=operation,
+            available={
+                "num_envs": "num_envs" not in missing,
+                "device": "device" not in missing,
+            },
+        )
+    assert env_ids is not None
+    return env_ids
+
+
+def _absolute_scene_state(env: Any) -> Any:
+    return env.scene.get_state(is_relative=False)
 
 
 def discover_recovery_state_capabilities(env: Any) -> RecoveryStateCapabilities:
@@ -494,9 +568,10 @@ def capture_recovery_state(
 ) -> RecoveryStateSnapshot:
     """Capture state needed to replay the task's next observable transition."""
 
+    _single_env_ids(env, operation="capture single-env selection")
     capabilities = discover_recovery_state_capabilities(env)
     _require_capabilities(capabilities, required_capabilities, operation="capture")
-    scene_state = clone_recovery_value(env.scene.get_state())
+    scene_state = clone_recovery_value(_absolute_scene_state(env))
     scene_state_keys = tuple(scene_state) if isinstance(scene_state, Mapping) else ()
 
     task_state = None
@@ -697,9 +772,10 @@ def _missing_snapshot_payloads(snapshot: RecoveryStateSnapshot, env: Any) -> set
         if not _payload_matches_schema(
             snapshot.scene_state,
             snapshot.capabilities.scene_state_schema,
+        ) or (
+            _payload_schema(_absolute_scene_state(env))
+            != snapshot.capabilities.scene_state_schema
         ):
-            missing.add("scene_state")
-        elif _payload_schema(env.scene.get_state()) != snapshot.capabilities.scene_state_schema:
             missing.add("scene_state")
 
     counter_names = snapshot.capabilities.counter_names
@@ -742,16 +818,17 @@ def _missing_snapshot_payloads(snapshot: RecoveryStateSnapshot, env: Any) -> set
             _valid_rng_source_state(_wrapper_rng(env), snapshot.rng_state.wrapper)
         ):
             missing.add("wrapper_rng")
-    if snapshot.capabilities.available.get("task_state", False):
-        if snapshot.task_state is None or (
+    if snapshot.capabilities.available.get("task_state", False) and (
+        snapshot.task_state is None
+        or (
             isinstance(snapshot.task_state, Mapping) and not snapshot.task_state
-        ):
-            missing.add("task_state")
-        elif not _payload_matches_schema(
+        )
+        or not _payload_matches_schema(
             snapshot.task_state,
             snapshot.capabilities.task_state_schema,
-        ):
-            missing.add("task_state")
+        )
+    ):
+        missing.add("task_state")
     advertised_caches = {
         name
         for name in _RUNTIME_CACHE_NAMES
@@ -794,6 +871,7 @@ def restore_recovery_state(
     """Restore a snapshot in scene, task, then RNG order."""
 
     _validate_snapshot_schema(snapshot, task_identity)
+    env_ids = _single_env_ids(env, operation="restore single-env selection")
 
     capabilities = discover_recovery_state_capabilities(env)
     snapshot_capabilities = {
@@ -825,7 +903,11 @@ def restore_recovery_state(
             available=snapshot.capabilities.available,
         )
 
-    env.reset_to(clone_recovery_value(snapshot.scene_state))
+    env.reset_to(
+        clone_recovery_value(snapshot.scene_state),
+        env_ids=env_ids,
+        is_relative=False,
+    )
     for name in snapshot.capabilities.counter_names:
         _restore_attribute(env, name, snapshot.task_counters[name])
 
