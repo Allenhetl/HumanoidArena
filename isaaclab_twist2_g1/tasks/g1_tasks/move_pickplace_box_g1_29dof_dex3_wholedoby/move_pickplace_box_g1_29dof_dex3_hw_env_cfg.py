@@ -21,6 +21,17 @@ ROBOT_INIT_POS = (-1.6, -5.0, 0.8)
 ROBOT_INIT_ROT = (1.0, 0.0, 0.0, 0.0)
 
 
+def _box_contact_sensor_cfg(body_name: str) -> ContactSensorCfg:
+    return ContactSensorCfg(
+        prim_path=f"{{ENV_REGEX_NS}}/Robot/{body_name}",
+        update_period=0.0,
+        history_length=0,
+        track_air_time=False,
+        filter_prim_paths_expr=["{ENV_REGEX_NS}/Box"],
+        debug_vis=False,
+    )
+
+
 @configclass
 class PickPlaceBoxTaskSceneCfg(PickPlaceBoxSceneCfg):
     robot: ArticulationCfg = G1RobotPresets.g1_29dof_dex3_wholebody(
@@ -34,6 +45,25 @@ class PickPlaceBoxTaskSceneCfg(PickPlaceBoxSceneCfg):
         track_air_time=True,
         debug_vis=False,
     )
+
+    # Each filtered sensor names exactly one USD leaf. Runtime telemetry still
+    # validates the resolved body name, body count, filter count, and matrix shape.
+    left_box_contact_palm = _box_contact_sensor_cfg("left_hand_palm_link")
+    left_box_contact_index_0 = _box_contact_sensor_cfg("left_hand_index_0_link")
+    left_box_contact_index_1 = _box_contact_sensor_cfg("left_hand_index_1_link")
+    left_box_contact_middle_0 = _box_contact_sensor_cfg("left_hand_middle_0_link")
+    left_box_contact_middle_1 = _box_contact_sensor_cfg("left_hand_middle_1_link")
+    left_box_contact_thumb_0 = _box_contact_sensor_cfg("left_hand_thumb_0_link")
+    left_box_contact_thumb_1 = _box_contact_sensor_cfg("left_hand_thumb_1_link")
+    left_box_contact_thumb_2 = _box_contact_sensor_cfg("left_hand_thumb_2_link")
+    right_box_contact_palm = _box_contact_sensor_cfg("right_hand_palm_link")
+    right_box_contact_index_0 = _box_contact_sensor_cfg("right_hand_index_0_link")
+    right_box_contact_index_1 = _box_contact_sensor_cfg("right_hand_index_1_link")
+    right_box_contact_middle_0 = _box_contact_sensor_cfg("right_hand_middle_0_link")
+    right_box_contact_middle_1 = _box_contact_sensor_cfg("right_hand_middle_1_link")
+    right_box_contact_thumb_0 = _box_contact_sensor_cfg("right_hand_thumb_0_link")
+    right_box_contact_thumb_1 = _box_contact_sensor_cfg("right_hand_thumb_1_link")
+    right_box_contact_thumb_2 = _box_contact_sensor_cfg("right_hand_thumb_2_link")
 
     front_camera = CameraPresets.g1_front_camera()
 
@@ -93,6 +123,11 @@ class MovePickPlaceBoxG129Dex3WholedobyEnvCfg(ManagerBasedRLEnvCfg):
     commands = None
     rewards: RewardsCfg = RewardsCfg()
     curriculum = None
+    recovery_contact_bindings = mdp.default_hand_contact_bindings()
+    recovery_telemetry_thresholds = {
+        "contact_force_n": mdp.DEFAULT_CONTACT_FORCE_THRESHOLD_N,
+        "max_ee_box_distance_m": mdp.DEFAULT_MAX_EE_BOX_DISTANCE_M,
+    }
 
     def __post_init__(self):
         self.decimation = 4

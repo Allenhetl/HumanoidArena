@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
@@ -27,6 +29,23 @@ _SHELF_ACTIVE_LAYER_Z_FROM_BASE_M = (
     _SHELF_ACTIVE_LAYER_TOP_Z_AT_DEFAULT_M - _SHELF_BASE_SUPPORT_TOP_Z_AT_DEFAULT_M
 )
 _BOX_BOTTOM_SURFACE_TOLERANCE_M = 0.06
+
+
+@dataclass(frozen=True)
+class BoxSupportEvidence:
+    """Task-native support geometry shared by reward and recovery telemetry."""
+
+    surface_index: int
+    support_bounds_w: tuple[float, float, float, float]
+    support_top_z_m: float
+    target_support_top_z_m: float
+    dx_outside_m: float
+    dy_outside_m: float
+    xy_mismatch_m: float
+    z_mismatch_m: float
+    inside_xy: bool
+    aligned_z: bool
+    placed: bool
 
 
 def _candidate_shelf_paths(env_idx: int) -> list[str]:
@@ -351,11 +370,50 @@ def _best_surface_debug(
     return {"surface_index": best_idx, **best_metrics}
 
 
-def compute_success_mask(env: "ManagerBasedRLEnv") -> torch.Tensor:
-    success = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+def evaluate_box_support(
+    box_center_w: torch.Tensor,
+    surfaces_w: list[tuple[float, float, float, float, float]],
+    *,
+    target_support_top_z: float,
+) -> BoxSupportEvidence:
+    """Evaluate the same support predicate used by the binary task reward."""
+
+    best = _best_surface_debug(
+        box_center_w,
+        surfaces_w,
+        target_support_top_z=target_support_top_z,
+    )
+    if best is None:
+        raise ValueError("at least one shelf support surface is required")
+
+    dx_outside = float(best["dx_outside"])
+    dy_outside = float(best["dy_outside"])
+    return BoxSupportEvidence(
+        surface_index=int(best["surface_index"]),
+        support_bounds_w=(
+            float(best["x_lo"]),
+            float(best["x_hi"]),
+            float(best["y_lo"]),
+            float(best["y_hi"]),
+        ),
+        support_top_z_m=float(best["support_top_z"]),
+        target_support_top_z_m=float(best["target_support_top_z"]),
+        dx_outside_m=dx_outside,
+        dy_outside_m=dy_outside,
+        xy_mismatch_m=math.hypot(dx_outside, dy_outside),
+        z_mismatch_m=float(best["abs_z_gap"]),
+        inside_xy=bool(best["inside_xy"]),
+        aligned_z=bool(best["aligned_z"]),
+        placed=bool(best["matched"]),
+    )
+
+
+def compute_box_support_evidence(env: "ManagerBasedRLEnv") -> list[BoxSupportEvidence]:
+    """Resolve live shelf geometry once and expose its deterministic task truth."""
+
     box_centers_w = _get_box_centers_world(env)
     shelf_surfaces_w = _get_shelf_support_surfaces_world(env)
-
+    evidence = []
     for env_idx in range(env.num_envs):
         target_support_top_z, _base_support_top_z = _estimate_target_support_top_z(
             env,
@@ -363,14 +421,20 @@ def compute_success_mask(env: "ManagerBasedRLEnv") -> torch.Tensor:
             box_centers_w[env_idx],
             shelf_surfaces_w[env_idx],
         )
-        success[env_idx] = any(
-            _is_box_on_support_surface(
+        evidence.append(
+            evaluate_box_support(
                 box_centers_w[env_idx],
-                surface_w,
+                shelf_surfaces_w[env_idx],
                 target_support_top_z=target_support_top_z,
             )
-            for surface_w in shelf_surfaces_w[env_idx]
         )
+    return evidence
+
+
+def compute_success_mask(env: "ManagerBasedRLEnv") -> torch.Tensor:
+    success = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+    for env_idx, evidence in enumerate(compute_box_support_evidence(env)):
+        success[env_idx] = evidence.placed
 
     return success
 
@@ -442,6 +506,9 @@ def compute_reward_pickplace_box(env: "ManagerBasedRLEnv") -> torch.Tensor:
 
 
 __all__ = [
+    "BoxSupportEvidence",
+    "compute_box_support_evidence",
     "compute_reward_pickplace_box",
     "compute_success_mask",
+    "evaluate_box_support",
 ]
