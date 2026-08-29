@@ -123,6 +123,7 @@ class MovePickPlaceBoxG129Dex3WholedobyEnvCfg(ManagerBasedRLEnvCfg):
     commands = None
     rewards: RewardsCfg = RewardsCfg()
     curriculum = None
+    recovery_task_identity = mdp.PP_BOX_TASK_IDENTITY
     recovery_contact_bindings = mdp.default_hand_contact_bindings()
     recovery_telemetry_thresholds = {
         "contact_force_n": mdp.DEFAULT_CONTACT_FORCE_THRESHOLD_N,
@@ -187,6 +188,7 @@ class MovePickPlaceBoxG129Dex3WholedobyEnvCfg(ManagerBasedRLEnvCfg):
         self._replay_initial_env_state_active = (
             bool(getattr(args_cli, "replay_file", "")) if args_cli else False
         )
+        mdp.install_pp_box_recovery_task_state_hooks(env)
         self._make_shelf_static_collision(env)
 
     def _reset_object_self(self, env):

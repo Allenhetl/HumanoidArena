@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import ast
 import importlib.util
 import io
 import random
 import sys
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -20,6 +22,13 @@ RECOVERY_STATE_PATH = (
     / "move_pickplace_box_g1_29dof_dex3_wholedoby"
     / "mdp"
     / "recovery_state.py"
+)
+PP_BOX_CFG_PATH = (
+    THIS_DIR
+    / "tasks"
+    / "g1_tasks"
+    / "move_pickplace_box_g1_29dof_dex3_wholedoby"
+    / "move_pickplace_box_g1_29dof_dex3_hw_env_cfg.py"
 )
 
 
@@ -137,10 +146,11 @@ class _FakeEnv:
     def __init__(self) -> None:
         self.num_envs = 1
         self.device = torch.device("cpu")
+        self.recovery_process_global_rng_exclusive = True
         self.joint_pos = torch.tensor([[0.1, 0.2]], dtype=torch.float32)
         self.box_root_state = np.arange(13, dtype=np.float32).reshape(1, 13)
         self.episode_length_buf = torch.tensor([7], dtype=torch.int64)
-        self.common_step_counter = 11
+        self.__dict__["common_step_counter"] = 11
         self.reset_buf = torch.tensor([False])
         self.episode_count = 3
         self.reset_count = torch.tensor([2], dtype=torch.int64)
@@ -156,6 +166,9 @@ class _FakeEnv:
         self.api_events: list[tuple[object, ...]] = []
         self.last_reset_state: dict[str, object] | None = None
         self.last_reset_env_ids: torch.Tensor | None = None
+        self.preflight_failure: Exception | None = None
+        self.restore_failures_remaining = 0
+        self.corrupt_restores_remaining = 0
 
     def reset_to(
         self,
@@ -192,10 +205,20 @@ class _FakeEnv:
     def capture_recovery_task_state(self) -> dict[str, object]:
         return self.recovery_task_state
 
+    def preflight_restore_recovery_task_state(self, state: dict[str, object]) -> None:
+        if self.preflight_failure is not None:
+            raise self.preflight_failure
+        assert set(state) == {"fsm_stage", "debug_score", "hands_materialized"}
+
     def restore_recovery_task_state(self, state: dict[str, object]) -> None:
         self.restore_events.append("task")
-        assert int(self.episode_length_buf.item()) == 7
         self.recovery_task_state = state
+        if self.restore_failures_remaining:
+            self.restore_failures_remaining -= 1
+            raise RuntimeError("injected task-state restore failure")
+        if self.corrupt_restores_remaining:
+            self.corrupt_restores_remaining -= 1
+            self.recovery_task_state["debug_score"] += 1
 
     def deterministic_step(self) -> dict[str, Any]:
         python_draw = random.random()
@@ -275,6 +298,9 @@ class _CacheEnv(_FakeEnv):
     def restore_physics_solver_cache(self, state: dict[str, int]) -> None:
         self.restore_events.append(f"solver:{state['solver_epoch']}")
 
+    def preflight_restore_physics_solver_cache(self, state: dict[str, int]) -> None:
+        assert set(state) == {"solver_epoch"}
+
 
 class _BothCacheEnv(_CacheEnv):
     def capture_contact_cache(self) -> dict[str, int]:
@@ -282,6 +308,9 @@ class _BothCacheEnv(_CacheEnv):
 
     def restore_contact_cache(self, state: dict[str, int]) -> None:
         self.restore_events.append(f"contact:{state['contact_epoch']}")
+
+    def preflight_restore_contact_cache(self, state: dict[str, int]) -> None:
+        assert set(state) == {"contact_epoch"}
 
 
 class _CaptureOnlyTaskStateEnv(_FakeEnv):
@@ -297,7 +326,163 @@ class _CaptureOnlyTaskStateEnv(_FakeEnv):
 
 class _DirectTaskStateEnv(_FakeEnv):
     capture_recovery_task_state = None
+    preflight_restore_recovery_task_state = None
     restore_recovery_task_state = None
+
+
+class _ReadOnlyCounterEnv(_FakeEnv):
+    def __init__(self) -> None:
+        self._common_step_counter = 11
+        super().__init__()
+
+    @property
+    def common_step_counter(self) -> int:
+        return self._common_step_counter
+
+
+class _ProductionRobot:
+    def __init__(self) -> None:
+        self.data = SimpleNamespace(
+            joint_pos_target=torch.tensor([[16.0, 17.0]]),
+            joint_vel_target=torch.tensor([[18.0, 19.0]]),
+            joint_effort_target=torch.tensor([[20.0, 21.0]]),
+        )
+
+    def set_joint_position_target(self, target, *, env_ids=None) -> None:
+        self.data.joint_pos_target[env_ids] = target
+
+    def set_joint_velocity_target(self, target, *, env_ids=None) -> None:
+        self.data.joint_vel_target[env_ids] = target
+
+    def set_joint_effort_target(self, target, *, env_ids=None) -> None:
+        self.data.joint_effort_target[env_ids] = target
+
+
+class _ProductionScene(_Scene):
+    def __init__(self, env: _ProductionEnv) -> None:
+        super().__init__(env)
+        self.robot = _ProductionRobot()
+
+    def __getitem__(self, name: str):
+        if name != "robot":
+            raise KeyError(name)
+        return self.robot
+
+
+class JointPositionAction:
+    action_dim = 2
+
+    def __init__(self) -> None:
+        self._raw_actions = torch.tensor([[5.0, 6.0]])
+        self._processed_actions = torch.tensor([[7.0, 8.0]])
+
+
+class _ProductionEnv:
+    """Pure-Python mirror of PP-box buffers reset by Isaac Lab v2.2.1 reset_to."""
+
+    def __init__(self, task_identity: str) -> None:
+        self.num_envs = 1
+        self.device = torch.device("cpu")
+        self.joint_pos = torch.tensor([[0.1, 0.2]], dtype=torch.float32)
+        self.box_root_state = np.arange(13, dtype=np.float32).reshape(1, 13)
+        self.episode_length_buf = torch.tensor([7], dtype=torch.int64)
+        self.common_step_counter = 11
+        self.reset_buf = torch.tensor([False])
+        self.api_events: list[tuple[object, ...]] = []
+        self.scene = _ProductionScene(self)
+        self.action_manager = SimpleNamespace(
+            _term_names=["joint_pos"],
+            _terms={"joint_pos": JointPositionAction()},
+            _action=torch.tensor([[1.0, 2.0]]),
+            _prev_action=torch.tensor([[3.0, 4.0]]),
+        )
+        self.reward_manager = SimpleNamespace(
+            _term_names=["reward"],
+            _class_term_cfgs=[],
+            _episode_sums={"reward": torch.tensor([9.0])},
+            _reward_buf=torch.tensor([10.0]),
+            _step_reward=torch.tensor([[11.0]]),
+        )
+        self.termination_manager = SimpleNamespace(
+            _term_names=[],
+            _class_term_cfgs=[],
+            _term_dones={},
+            _truncated_buf=torch.tensor([False]),
+            _terminated_buf=torch.tensor([True]),
+        )
+        observation = {
+            "policy": {
+                "robot_joint_state": torch.tensor([[12.0, 13.0]]),
+                "robot_gipper_state": torch.tensor([[14.0, 15.0]]),
+                "camera_image": torch.tensor([[[[16.0, 17.0, 18.0]]]]),
+            }
+        }
+        self.observation_manager = SimpleNamespace(
+            _group_obs_term_names={
+                "policy": [
+                    "robot_joint_state",
+                    "robot_gipper_state",
+                    "camera_image",
+                ]
+            },
+            _group_obs_term_history_buffer={"policy": {}},
+            _group_obs_class_term_cfgs={"policy": []},
+            _group_obs_class_instances=[],
+            _obs_buffer=observation,
+        )
+        for name in ("command_manager", "curriculum_manager", "event_manager", "recorder_manager"):
+            setattr(self, name, SimpleNamespace(active_terms=[]))
+        self._sim_step_counter = 14
+        self.extras = {"log": {"episode": torch.tensor([15.0])}}
+        self.reward_buf = self.reward_manager._reward_buf
+        self.reset_terminated = self.termination_manager._terminated_buf
+        self.reset_time_outs = self.termination_manager._truncated_buf
+        self.obs_buf = self.observation_manager._obs_buffer
+        self.cfg = SimpleNamespace(
+            recovery_task_identity=task_identity,
+            _episode_runtime_seed=22,
+            _episode_object_seed_counter=23,
+            _current_episode_object_seed=24,
+            _current_episode_object_seed_source="env_seed",
+            _replay_initial_env_state_active=True,
+        )
+        self.task_generator = torch.Generator().manual_seed(101)
+        self.wrapper_rng = np.random.default_rng(202)
+        self.reset_calls = 0
+
+    def reset_to(self, state, env_ids=None, *, is_relative=False) -> None:
+        self.reset_calls += 1
+        self.joint_pos.copy_(state["robot"]["joint_pos"])
+        np.copyto(self.box_root_state, state["box"]["root_state"])
+        self.episode_length_buf.zero_()
+        self.action_manager._action.zero_()
+        self.action_manager._prev_action.zero_()
+        term = self.action_manager._terms["joint_pos"]
+        term._raw_actions.zero_()
+        term._processed_actions.zero_()
+        self.reward_manager._episode_sums["reward"].zero_()
+        self.reward_manager._reward_buf.zero_()
+        self.reward_manager._step_reward.zero_()
+        self.termination_manager._truncated_buf.zero_()
+        self.termination_manager._terminated_buf.zero_()
+        self.observation_manager._obs_buffer = {
+            "policy": {
+                "robot_joint_state": torch.zeros(1, 2),
+                "robot_gipper_state": torch.zeros(1, 2),
+                "camera_image": torch.zeros(1, 1, 1, 3),
+            }
+        }
+        self.obs_buf = self.observation_manager._obs_buffer
+        self._sim_step_counter = 0
+        self.extras = {"log": {}}
+        self.scene.robot.data.joint_pos_target.zero_()
+        self.scene.robot.data.joint_vel_target.zero_()
+        self.scene.robot.data.joint_effort_target.zero_()
+        self.cfg._episode_runtime_seed = -1
+        self.cfg._episode_object_seed_counter = -1
+        self.cfg._current_episode_object_seed = None
+        self.cfg._current_episode_object_seed_source = "reset"
+        self.cfg._replay_initial_env_state_active = False
 
 
 class _DelegatingGymWrapper:
@@ -415,6 +600,15 @@ def recovery_state():
     return _load_recovery_state_module()
 
 
+def _restore_bound(recovery_state, env, snapshot, **kwargs) -> None:
+    recovery_state.restore_recovery_state(
+        env,
+        snapshot,
+        snapshot_digest=recovery_state.recovery_state_digest(snapshot),
+        **kwargs,
+    )
+
+
 def test_capture_and_restore_use_absolute_single_env_isaac_api(recovery_state) -> None:
     env = _FakeEnv()
 
@@ -425,14 +619,18 @@ def test_capture_and_restore_use_absolute_single_env_isaac_api(recovery_state) -
         ("get_state", False),
     ]
     env.api_events.clear()
-    recovery_state.restore_recovery_state(env, snapshot)
+    _restore_bound(recovery_state, env, snapshot)
 
-    assert env.api_events[0] == ("get_state", False)
-    assert env.api_events[1][0] == "reset_to"
-    torch.testing.assert_close(env.api_events[1][1], torch.tensor([0]))
-    assert env.api_events[1][1].dtype == torch.long
-    assert env.api_events[1][1].device == env.device
-    assert env.api_events[1][2] is False
+    reset_events = [event for event in env.api_events if event[0] == "reset_to"]
+    assert len(reset_events) == 1
+    reset_event = reset_events[0]
+    reset_index = env.api_events.index(reset_event)
+    assert all(event == ("get_state", False) for event in env.api_events[:reset_index])
+    assert all(event == ("get_state", False) for event in env.api_events[reset_index + 1 :])
+    torch.testing.assert_close(reset_event[1], torch.tensor([0]))
+    assert reset_event[1].dtype == torch.long
+    assert reset_event[1].device == env.device
+    assert reset_event[2] is False
     assert env.last_reset_state is not snapshot.scene_state
     assert env.last_reset_state["robot"] is not snapshot.scene_state["robot"]
     assert env.last_reset_env_ids is not None
@@ -454,12 +652,13 @@ def test_absolute_world_capture_restore_is_symmetric(recovery_state) -> None:
     )
     env.joint_pos.fill_(-100.0)
     env.box_root_state.fill(-200.0)
-    recovery_state.restore_recovery_state(env, snapshot)
+    _restore_bound(recovery_state, env, snapshot)
 
     torch.testing.assert_close(env.joint_pos, expected_joint_pos)
     np.testing.assert_array_equal(env.box_root_state, expected_box_root_state)
-    assert env.api_events[-1][0] == "reset_to"
-    assert env.api_events[-1][2] is False
+    reset_events = [event for event in env.api_events if event[0] == "reset_to"]
+    assert len(reset_events) == 1
+    assert reset_events[0][2] is False
 
 
 @pytest.mark.parametrize(
@@ -491,7 +690,7 @@ def test_capture_and_restore_fail_closed_without_valid_single_env_selection(
         if operation == "capture":
             recovery_state.capture_recovery_state(env)
         else:
-            recovery_state.restore_recovery_state(env, snapshot)
+            _restore_bound(recovery_state, env, snapshot)
 
     assert expected_missing in exc_info.value.missing_capabilities
     assert env.api_events == []
@@ -514,7 +713,7 @@ def test_unwrapped_np_random_is_bound_before_nested_or_forwarded_rng(recovery_st
     nested.np_random.random(4)
     nested_state_before_restore = dict(nested.np_random.bit_generator.state)
 
-    recovery_state.restore_recovery_state(wrapper, snapshot)
+    _restore_bound(recovery_state, wrapper, snapshot)
 
     np.testing.assert_array_equal(runtime.np_random.random(3), expected)
     assert nested.np_random.bit_generator.state == nested_state_before_restore
@@ -536,7 +735,7 @@ def test_nested_wrapper_rng_resolution_is_cycle_safe(recovery_state) -> None:
     )
     expected = second.np_random.random(2)
     second.np_random.random(6)
-    recovery_state.restore_recovery_state(env, snapshot)
+    _restore_bound(recovery_state, env, snapshot)
 
     np.testing.assert_array_equal(second.np_random.random(2), expected)
 
@@ -546,9 +745,9 @@ def test_snapshot_schema_is_versioned_and_task_bound(recovery_state) -> None:
 
     snapshot = recovery_state.capture_recovery_state(env)
 
-    assert snapshot.schema_version == recovery_state.RECOVERY_STATE_SCHEMA_VERSION == 1
+    assert snapshot.schema_version == recovery_state.RECOVERY_STATE_SCHEMA_VERSION == 2
     assert snapshot.task_identity == recovery_state.PP_BOX_TASK_IDENTITY
-    assert snapshot.capabilities.schema_version == 1
+    assert snapshot.capabilities.schema_version == 2
 
 
 def test_capability_mapping_is_structurally_immutable(recovery_state) -> None:
@@ -569,7 +768,11 @@ def test_restore_rejects_unknown_capability_schema_before_mutation(recovery_stat
     rng_before = _global_rng_state()
 
     with pytest.raises(recovery_state.RecoveryStateSchemaError, match="capability schema"):
-        recovery_state.restore_recovery_state(env, incompatible)
+        recovery_state.restore_recovery_state(
+            env,
+            incompatible,
+            snapshot_digest="0" * 64,
+        )
 
     _assert_env_state_equal(_env_state(env), env_before)
     _assert_global_rng_state_equal(_global_rng_state(), rng_before)
@@ -605,7 +808,7 @@ def test_global_python_numpy_and_torch_rng_roundtrip(recovery_state) -> None:
     snapshot = recovery_state.capture_recovery_state(env)
 
     expected = (random.random(), np.random.random(), torch.rand(3))
-    recovery_state.restore_recovery_state(env, snapshot)
+    _restore_bound(recovery_state, env, snapshot)
     actual = (random.random(), np.random.random(), torch.rand(3))
 
     assert actual[:2] == expected[:2]
@@ -649,7 +852,7 @@ def test_restore_never_creates_fallback_task_state_attribute(recovery_state) -> 
     rng_before = _global_rng_state()
 
     with pytest.raises(recovery_state.RecoveryStateIncompleteError) as exc_info:
-        recovery_state.restore_recovery_state(target, snapshot)
+        _restore_bound(recovery_state, target, snapshot)
 
     assert exc_info.value.missing_capabilities == ("task_state",)
     assert not hasattr(target, "recovery_task_state")
@@ -666,7 +869,7 @@ def test_direct_task_state_attribute_uses_symmetric_direct_mode(recovery_state) 
         "hands_materialized": torch.tensor([[False, False]]),
     }
 
-    recovery_state.restore_recovery_state(env, snapshot)
+    _restore_bound(recovery_state, env, snapshot)
 
     assert snapshot.capabilities.task_state_mode == "direct"
     assert env.recovery_task_state["fsm_stage"] == "grasp"
@@ -681,7 +884,7 @@ def test_snapshot_without_task_state_can_restore_into_richer_runtime(recovery_st
     snapshot = recovery_state.capture_recovery_state(_CaptureOnlyTaskStateEnv())
     target = _FakeEnv()
 
-    recovery_state.restore_recovery_state(target, snapshot)
+    _restore_bound(recovery_state, target, snapshot)
 
     assert target.restore_events == ["scene"]
     assert target.recovery_task_state["fsm_stage"] == "grasp"
@@ -805,7 +1008,7 @@ def test_incomplete_mandatory_payload_is_rejected_before_any_mutation(
     rng_before = _global_rng_state()
 
     with pytest.raises(recovery_state.RecoveryStateIncompleteError) as exc_info:
-        recovery_state.restore_recovery_state(env, incomplete)
+        _restore_bound(recovery_state, env, incomplete)
 
     assert expected_missing in exc_info.value.missing_capabilities
     _assert_env_state_equal(_env_state(env), env_before)
@@ -822,7 +1025,7 @@ def test_missing_rng_record_reports_every_advertised_rng_before_mutation(
     rng_before = _global_rng_state()
 
     with pytest.raises(recovery_state.RecoveryStateIncompleteError) as exc_info:
-        recovery_state.restore_recovery_state(env, incomplete)
+        _restore_bound(recovery_state, env, incomplete)
 
     assert set(exc_info.value.missing_capabilities) >= {
         "python_rng",
@@ -844,7 +1047,8 @@ def test_restore_rejects_missing_required_cache_payload_before_reset(recovery_st
     incomplete = replace(snapshot, runtime_state={})
 
     with pytest.raises(recovery_state.RecoveryStateIncompleteError) as exc_info:
-        recovery_state.restore_recovery_state(
+        _restore_bound(
+            recovery_state,
             env,
             incomplete,
             required_capabilities={"physics_solver_cache"},
@@ -872,7 +1076,7 @@ def test_restore_rejects_non_mapping_runtime_cache_state_before_any_mutation(
     rng_before = _global_rng_state()
 
     with pytest.raises(recovery_state.RecoveryStateIncompleteError) as exc_info:
-        recovery_state.restore_recovery_state(env, incomplete)
+        _restore_bound(recovery_state, env, incomplete)
 
     assert exc_info.value.missing_capabilities == (
         "contact_cache",
@@ -920,7 +1124,7 @@ def test_restore_uses_scene_reset_then_counters_task_state_and_rng(recovery_stat
     env.reset_count.fill_(99)
     env.recovery_task_state = {"fsm_stage": "corrupted"}
 
-    recovery_state.restore_recovery_state(env, snapshot)
+    _restore_bound(recovery_state, env, snapshot)
 
     assert env.restore_events == ["scene", "task"]
     torch.testing.assert_close(env.episode_length_buf, torch.tensor([7]))
@@ -945,7 +1149,11 @@ def test_restore_rejects_snapshot_from_unknown_schema(recovery_state) -> None:
     )
 
     with pytest.raises(recovery_state.RecoveryStateSchemaError, match="schema version"):
-        recovery_state.restore_recovery_state(env, incompatible)
+        recovery_state.restore_recovery_state(
+            env,
+            incompatible,
+            snapshot_digest="0" * 64,
+        )
 
 
 def test_restore_replays_the_same_next_observable_step(recovery_state) -> None:
@@ -969,7 +1177,265 @@ def test_restore_replays_the_same_next_observable_step(recovery_state) -> None:
         "debug_score": -94,
         "hands_materialized": torch.tensor([[False, False]]),
     }
-    recovery_state.restore_recovery_state(env, snapshot)
+    _restore_bound(recovery_state, env, snapshot)
     actual = env.deterministic_step()
 
     _assert_transition_equal(actual, expected)
+
+
+def test_restore_requires_caller_bound_snapshot_digest(recovery_state) -> None:
+    env = _FakeEnv()
+    snapshot = recovery_state.capture_recovery_state(env)
+
+    with pytest.raises(TypeError, match="snapshot_digest"):
+        recovery_state.restore_recovery_state(env, snapshot)
+
+
+def test_restore_rejects_digest_mismatch_before_environment_access(recovery_state) -> None:
+    env = _FakeEnv()
+    snapshot = recovery_state.capture_recovery_state(env)
+    env.api_events.clear()
+    env_before = _env_state(env)
+    rng_before = _global_rng_state()
+
+    with pytest.raises(recovery_state.RecoveryStateDigestMismatchError):
+        recovery_state.restore_recovery_state(
+            env,
+            snapshot,
+            snapshot_digest="0" * 64,
+        )
+
+    assert env.api_events == []
+    _assert_env_state_equal(_env_state(env), env_before)
+    _assert_global_rng_state_equal(_global_rng_state(), rng_before)
+
+
+def test_task_state_preflight_failure_happens_before_reset_or_rollback_capture(
+    recovery_state,
+) -> None:
+    env = _FakeEnv()
+    snapshot = recovery_state.capture_recovery_state(env)
+    env.api_events.clear()
+    env.preflight_failure = ValueError("task state is not restorable")
+    env_before = _env_state(env)
+    rng_before = _global_rng_state()
+
+    with pytest.raises(recovery_state.RecoveryStatePreflightError, match="task_state"):
+        recovery_state.restore_recovery_state(
+            env,
+            snapshot,
+            snapshot_digest=recovery_state.recovery_state_digest(snapshot),
+        )
+
+    assert env.api_events == [("get_state", False)]
+    assert env.restore_events == []
+    _assert_env_state_equal(_env_state(env), env_before)
+    _assert_global_rng_state_equal(_global_rng_state(), rng_before)
+
+
+def test_read_only_task_counter_is_rejected_before_reset(recovery_state) -> None:
+    env = _ReadOnlyCounterEnv()
+    snapshot = recovery_state.capture_recovery_state(env)
+    env.api_events.clear()
+    env_before = _env_state(env)
+    rng_before = _global_rng_state()
+
+    with pytest.raises(recovery_state.RecoveryStateIncompleteError) as exc_info:
+        _restore_bound(recovery_state, env, snapshot)
+
+    assert "task_counter:common_step_counter" in exc_info.value.missing_capabilities
+    assert env.api_events == [("get_state", False)]
+    assert env.restore_events == []
+    _assert_env_state_equal(_env_state(env), env_before)
+    _assert_global_rng_state_equal(_global_rng_state(), rng_before)
+
+
+def test_failed_restore_rolls_back_exact_state_and_emits_success_evidence(
+    recovery_state,
+) -> None:
+    env = _FakeEnv()
+    target = recovery_state.capture_recovery_state(env)
+    env.deterministic_step()
+    rollback = recovery_state.capture_recovery_state(env)
+    rollback_digest = recovery_state.recovery_state_digest(rollback)
+    env.restore_failures_remaining = 1
+
+    with pytest.raises(recovery_state.RecoveryStateTransactionError) as exc_info:
+        recovery_state.restore_recovery_state(
+            env,
+            target,
+            snapshot_digest=recovery_state.recovery_state_digest(target),
+        )
+
+    evidence = exc_info.value.evidence
+    assert evidence.failure_phase == "apply_target"
+    assert evidence.failure_type == "RuntimeError"
+    assert evidence.rollback_succeeded is True
+    assert evidence.rollback_failure_type is None
+    assert evidence.rollback_snapshot_digest == rollback_digest
+    restored = recovery_state.capture_recovery_state(env)
+    assert recovery_state.recovery_state_digest(restored) == rollback_digest
+
+
+def test_postcondition_digest_failure_rolls_back_with_verify_phase_evidence(
+    recovery_state,
+) -> None:
+    env = _FakeEnv()
+    target = recovery_state.capture_recovery_state(env)
+    env.deterministic_step()
+    rollback = recovery_state.capture_recovery_state(env)
+    rollback_digest = recovery_state.recovery_state_digest(rollback)
+    env.corrupt_restores_remaining = 1
+
+    with pytest.raises(recovery_state.RecoveryStateTransactionError) as exc_info:
+        _restore_bound(recovery_state, env, target)
+
+    evidence = exc_info.value.evidence
+    assert evidence.failure_phase == "verify_target"
+    assert evidence.failure_type == "RecoveryStateDigestMismatchError"
+    assert evidence.rollback_succeeded is True
+    restored = recovery_state.capture_recovery_state(env)
+    assert recovery_state.recovery_state_digest(restored) == rollback_digest
+
+
+def test_failed_rollback_emits_both_target_and_rollback_failure_evidence(
+    recovery_state,
+) -> None:
+    env = _FakeEnv()
+    target = recovery_state.capture_recovery_state(env)
+    env.deterministic_step()
+    env.restore_failures_remaining = 2
+
+    with pytest.raises(recovery_state.RecoveryStateTransactionError) as exc_info:
+        recovery_state.restore_recovery_state(
+            env,
+            target,
+            snapshot_digest=recovery_state.recovery_state_digest(target),
+        )
+
+    evidence = exc_info.value.evidence
+    assert evidence.failure_type == "RuntimeError"
+    assert evidence.rollback_succeeded is False
+    assert evidence.rollback_failure_type == "RuntimeError"
+    assert "injected task-state restore failure" in evidence.rollback_failure_message
+    assert len(evidence.target_snapshot_digest) == 64
+    assert len(evidence.rollback_snapshot_digest) == 64
+
+
+def test_restore_fails_closed_when_process_global_rng_exclusion_is_busy(
+    recovery_state,
+) -> None:
+    env = _FakeEnv()
+    snapshot = recovery_state.capture_recovery_state(env)
+    env_before = _env_state(env)
+    rng_before = _global_rng_state()
+    assert recovery_state._PROCESS_GLOBAL_RNG_LOCK.acquire(blocking=False)
+    try:
+        with pytest.raises(recovery_state.RecoveryStateGlobalRngBusyError):
+            recovery_state.restore_recovery_state(
+                env,
+                snapshot,
+                snapshot_digest=recovery_state.recovery_state_digest(snapshot),
+            )
+    finally:
+        recovery_state._PROCESS_GLOBAL_RNG_LOCK.release()
+
+    _assert_env_state_equal(_env_state(env), env_before)
+    _assert_global_rng_state_equal(_global_rng_state(), rng_before)
+
+
+def test_pp_box_production_hooks_restore_every_reset_to_mutated_buffer(
+    recovery_state,
+) -> None:
+    env = _ProductionEnv(recovery_state.PP_BOX_TASK_IDENTITY)
+    recovery_state.install_pp_box_recovery_task_state_hooks(env)
+    snapshot = recovery_state.capture_recovery_state(
+        env,
+        required_capabilities={"task_state", "process_global_rng_exclusive"},
+    )
+
+    recovery_state.restore_recovery_state(
+        env,
+        snapshot,
+        snapshot_digest=recovery_state.recovery_state_digest(snapshot),
+    )
+
+    assert env.reset_calls == 1
+    torch.testing.assert_close(env.action_manager._action, torch.tensor([[1.0, 2.0]]))
+    torch.testing.assert_close(env.action_manager._prev_action, torch.tensor([[3.0, 4.0]]))
+    term = env.action_manager._terms["joint_pos"]
+    torch.testing.assert_close(term._raw_actions, torch.tensor([[5.0, 6.0]]))
+    torch.testing.assert_close(term._processed_actions, torch.tensor([[7.0, 8.0]]))
+    torch.testing.assert_close(
+        env.reward_manager._episode_sums["reward"], torch.tensor([9.0])
+    )
+    torch.testing.assert_close(env.reward_manager._reward_buf, torch.tensor([10.0]))
+    torch.testing.assert_close(env.reward_manager._step_reward, torch.tensor([[11.0]]))
+    torch.testing.assert_close(env.termination_manager._truncated_buf, torch.tensor([False]))
+    torch.testing.assert_close(env.termination_manager._terminated_buf, torch.tensor([True]))
+    torch.testing.assert_close(
+        env.observation_manager._obs_buffer["policy"]["robot_joint_state"],
+        torch.tensor([[12.0, 13.0]]),
+    )
+    assert env.obs_buf is env.observation_manager._obs_buffer
+    assert env.reward_buf is env.reward_manager._reward_buf
+    assert env.reset_terminated is env.termination_manager._terminated_buf
+    assert env.reset_time_outs is env.termination_manager._truncated_buf
+    assert env._sim_step_counter == 14
+    torch.testing.assert_close(env.extras["log"]["episode"], torch.tensor([15.0]))
+    torch.testing.assert_close(
+        env.scene.robot.data.joint_pos_target,
+        torch.tensor([[16.0, 17.0]]),
+    )
+    torch.testing.assert_close(
+        env.scene.robot.data.joint_vel_target,
+        torch.tensor([[18.0, 19.0]]),
+    )
+    torch.testing.assert_close(
+        env.scene.robot.data.joint_effort_target,
+        torch.tensor([[20.0, 21.0]]),
+    )
+    assert env.cfg._episode_runtime_seed == 22
+    assert env.cfg._episode_object_seed_counter == 23
+    assert env.cfg._current_episode_object_seed == 24
+    assert env.cfg._current_episode_object_seed_source == "env_seed"
+    assert env.cfg._replay_initial_env_state_active is True
+
+
+def test_pp_box_production_hook_rejects_wrong_task_identity(recovery_state) -> None:
+    env = _ProductionEnv("Isaac-Another-Task")
+
+    with pytest.raises(recovery_state.RecoveryStateSchemaError, match="task identity"):
+        recovery_state.install_pp_box_recovery_task_state_hooks(env)
+
+
+def test_pp_box_cfg_wires_task_identity_and_production_state_hooks() -> None:
+    tree = ast.parse(PP_BOX_CFG_PATH.read_text(encoding="utf-8"))
+    cfg_class = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef)
+        and node.name == "MovePickPlaceBoxG129Dex3WholedobyEnvCfg"
+    )
+    identity_assignment = next(
+        node
+        for node in cfg_class.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "recovery_task_identity" for target in node.targets)
+    )
+    assert isinstance(identity_assignment.value, ast.Attribute)
+    assert identity_assignment.value.attr == "PP_BOX_TASK_IDENTITY"
+    initializer = next(
+        node
+        for node in cfg_class.body
+        if isinstance(node, ast.FunctionDef) and node.name == "initialize_task_scene"
+    )
+    calls = [node for node in ast.walk(initializer) if isinstance(node, ast.Call)]
+    assert any(
+        isinstance(call.func, ast.Attribute)
+        and call.func.attr == "install_pp_box_recovery_task_state_hooks"
+        and len(call.args) == 1
+        and isinstance(call.args[0], ast.Name)
+        and call.args[0].id == "env"
+        for call in calls
+    )

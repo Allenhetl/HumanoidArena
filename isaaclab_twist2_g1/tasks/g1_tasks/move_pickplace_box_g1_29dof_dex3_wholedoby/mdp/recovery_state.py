@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import hmac
 import inspect
 import random
 import struct
+import threading
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field, fields, is_dataclass, replace
-from types import MappingProxyType
+from types import MappingProxyType, MethodType
 from typing import Any
 
 import numpy as np
@@ -22,25 +25,33 @@ import torch
 
 __all__ = [
     "PP_BOX_TASK_IDENTITY",
+    "PP_BOX_TASK_STATE_SCHEMA_VERSION",
     "RECOVERY_DIGEST_SCHEMA_VERSION",
     "RECOVERY_STATE_SCHEMA_VERSION",
     "RecoveryRngState",
     "RecoveryStateCapabilities",
+    "RecoveryStateDigestMismatchError",
+    "RecoveryStateGlobalRngBusyError",
     "RecoveryStateIncompleteError",
+    "RecoveryStatePreflightError",
+    "RecoveryStateRestoreEvidence",
     "RecoveryStateSchemaError",
     "RecoveryStateSnapshot",
+    "RecoveryStateTransactionError",
     "RngSourceState",
     "capture_recovery_state",
     "clone_recovery_value",
     "discover_recovery_state_capabilities",
+    "install_pp_box_recovery_task_state_hooks",
     "recovery_state_digest",
     "recovery_value_digest",
     "restore_recovery_state",
 ]
 
 RECOVERY_DIGEST_SCHEMA_VERSION = 1
-RECOVERY_STATE_SCHEMA_VERSION = 1
+RECOVERY_STATE_SCHEMA_VERSION = 2
 PP_BOX_TASK_IDENTITY = "Isaac-Move-PickPlace-Box-G129-Dex3-Wholedoby"
+PP_BOX_TASK_STATE_SCHEMA_VERSION = 1
 
 _CORE_TASK_COUNTER_NAMES = (
     "episode_length_buf",
@@ -60,6 +71,7 @@ _DEFAULT_REQUIRED_CAPABILITIES = frozenset(
         "python_rng",
         "numpy_rng",
         "torch_cpu_rng",
+        "process_global_rng_exclusive",
     }
 )
 _KNOWN_CAPABILITIES = (
@@ -70,12 +82,34 @@ _KNOWN_CAPABILITIES = (
     "numpy_rng",
     "torch_cpu_rng",
     "torch_cuda_rng",
+    "process_global_rng_exclusive",
     "task_local_rng",
     "wrapper_rng",
     "physics_solver_cache",
     "contact_cache",
 )
 _RUNTIME_CACHE_NAMES = ("physics_solver_cache", "contact_cache")
+_PROCESS_GLOBAL_RNG_LOCK = threading.Lock()
+_PP_BOX_CFG_STATE_NAMES = (
+    "_episode_runtime_seed",
+    "_episode_object_seed_counter",
+    "_current_episode_object_seed",
+    "_current_episode_object_seed_source",
+    "_replay_initial_env_state_active",
+)
+_PP_BOX_PASSIVE_MANAGER_NAMES = (
+    "command_manager",
+    "curriculum_manager",
+    "event_manager",
+    "recorder_manager",
+)
+_PP_BOX_OBSERVATION_TERMS = {
+    "policy": (
+        "robot_joint_state",
+        "robot_gipper_state",
+        "camera_image",
+    )
+}
 
 
 class RecoveryStateSchemaError(ValueError):
@@ -99,6 +133,67 @@ class RecoveryStateIncompleteError(RuntimeError):
         super().__init__(
             f"recovery state {operation} is incomplete; missing capabilities: {missing}"
         )
+
+
+class RecoveryStateDigestMismatchError(RecoveryStateSchemaError):
+    """Raised before mutation when the caller-bound snapshot digest differs."""
+
+
+class RecoveryStateGlobalRngBusyError(RuntimeError):
+    """Raised when another recovery operation owns process-global RNG state."""
+
+
+class RecoveryStatePreflightError(RuntimeError):
+    """Raised when a restore hook rejects state before any environment mutation."""
+
+    def __init__(self, capability: str, cause: Exception) -> None:
+        self.capability = capability
+        self.cause_type = type(cause).__name__
+        self.cause_message = str(cause)
+        super().__init__(
+            f"recovery restore preflight failed for {capability}: "
+            f"{self.cause_type}: {self.cause_message}"
+        )
+
+
+@dataclass(frozen=True)
+class RecoveryStateRestoreEvidence:
+    """Structured evidence for a failed target restore and its rollback attempt."""
+
+    schema_version: int
+    target_snapshot_digest: str
+    rollback_snapshot_digest: str
+    failure_phase: str
+    failure_type: str
+    failure_message: str
+    rollback_succeeded: bool
+    rollback_failure_type: str | None = None
+    rollback_failure_message: str | None = None
+
+
+class RecoveryStateTransactionError(RuntimeError):
+    """Raised after a mutating restore fails, with rollback outcome attached."""
+
+    def __init__(self, evidence: RecoveryStateRestoreEvidence) -> None:
+        self.evidence = evidence
+        rollback = "succeeded" if evidence.rollback_succeeded else "failed"
+        super().__init__(
+            f"recovery restore transaction failed during {evidence.failure_phase}; "
+            f"rollback {rollback}; target={evidence.target_snapshot_digest}; "
+            f"rollback_snapshot={evidence.rollback_snapshot_digest}"
+        )
+
+
+@contextmanager
+def _exclusive_process_global_rng(operation: str):
+    if not _PROCESS_GLOBAL_RNG_LOCK.acquire(blocking=False):
+        raise RecoveryStateGlobalRngBusyError(
+            f"process-global RNG state is already owned during recovery {operation}"
+        )
+    try:
+        yield
+    finally:
+        _PROCESS_GLOBAL_RNG_LOCK.release()
 
 
 @dataclass(frozen=True)
@@ -335,9 +430,14 @@ def clone_recovery_value(value: Any) -> Any:
     return copy.deepcopy(value)
 
 
-def _has_paired_hooks(env: Any, name: str) -> bool:
-    return callable(getattr(env, f"capture_{name}", None)) and callable(
-        getattr(env, f"restore_{name}", None)
+def _has_transactional_hooks(env: Any, name: str) -> bool:
+    return all(
+        callable(getattr(env, method_name, None))
+        for method_name in (
+            f"capture_{name}",
+            f"preflight_restore_{name}",
+            f"restore_{name}",
+        )
     )
 
 
@@ -360,7 +460,7 @@ def _has_writable_direct_task_state(env: Any) -> bool:
 
 
 def _task_state_mode(env: Any) -> str | None:
-    if _has_paired_hooks(env, "recovery_task_state"):
+    if _has_transactional_hooks(env, "recovery_task_state"):
         return "hooks"
     if _has_writable_direct_task_state(env):
         return "direct"
@@ -490,10 +590,15 @@ def discover_recovery_state_capabilities(env: Any) -> RecoveryStateCapabilities:
             "numpy_rng": True,
             "torch_cpu_rng": True,
             "torch_cuda_rng": cuda_rng,
+            "process_global_rng_exclusive": (
+                getattr(env, "recovery_process_global_rng_exclusive", None) is True
+            ),
             "task_local_rng": _supports_rng(_task_rng(env)),
             "wrapper_rng": _supports_rng(_wrapper_rng(env)),
-            "physics_solver_cache": _has_paired_hooks(env, "physics_solver_cache"),
-            "contact_cache": _has_paired_hooks(env, "contact_cache"),
+            "physics_solver_cache": _has_transactional_hooks(
+                env, "physics_solver_cache"
+            ),
+            "contact_cache": _has_transactional_hooks(env, "contact_cache"),
         }
     )
     return RecoveryStateCapabilities(
@@ -568,6 +673,22 @@ def capture_recovery_state(
 ) -> RecoveryStateSnapshot:
     """Capture state needed to replay the task's next observable transition."""
 
+    with _exclusive_process_global_rng("capture"):
+        return _capture_recovery_state_unlocked(
+            env,
+            required_capabilities=required_capabilities,
+            task_identity=task_identity,
+        )
+
+
+def _capture_recovery_state_unlocked(
+    env: Any,
+    *,
+    required_capabilities: set[str] | frozenset[str] | None = None,
+    task_identity: str = PP_BOX_TASK_IDENTITY,
+) -> RecoveryStateSnapshot:
+    """Capture while the caller owns ``_PROCESS_GLOBAL_RNG_LOCK``."""
+
     _single_env_ids(env, operation="capture single-env selection")
     capabilities = discover_recovery_state_capabilities(env)
     _require_capabilities(capabilities, required_capabilities, operation="capture")
@@ -631,20 +752,614 @@ def capture_recovery_state(
     return snapshot
 
 
-def _restore_attribute(owner: Any, name: str, saved: Any) -> None:
+def _resolve_restore_attribute_owner(owner: Any, name: str) -> Any:
+    if isinstance(owner, dict):
+        return owner
+    try:
+        if name in vars(owner) or inspect.getattr_static(type(owner), name, None) is not None:
+            return owner
+    except TypeError:
+        pass
+    unwrapped = _unwrapped_env(owner)
+    if unwrapped is not owner and hasattr(unwrapped, name):
+        return unwrapped
+    return owner
+
+
+def _attribute_is_restorable(owner: Any, name: str, saved: Any) -> bool:
+    owner = _resolve_restore_attribute_owner(owner, name)
+    if isinstance(owner, dict):
+        return name in owner
     if not hasattr(owner, name):
+        return False
+    current = getattr(owner, name)
+    if isinstance(current, torch.Tensor) and isinstance(saved, torch.Tensor):
+        return True
+    if isinstance(current, np.ndarray) and isinstance(saved, np.ndarray):
+        return True
+    descriptor = inspect.getattr_static(type(owner), name, None)
+    if isinstance(descriptor, property):
+        return descriptor.fset is not None
+    if descriptor is not None and hasattr(descriptor, "__set__"):
+        return True
+    try:
+        return name in vars(owner)
+    except TypeError:
+        return False
+
+
+def _restore_attribute(owner: Any, name: str, saved: Any) -> None:
+    owner = _resolve_restore_attribute_owner(owner, name)
+    is_dict = isinstance(owner, dict)
+    if (is_dict and name not in owner) or (not is_dict and not hasattr(owner, name)):
         raise RecoveryStateIncompleteError(
             {name},
             operation="restore",
             available={name: False},
         )
-    current = getattr(owner, name)
+    current = owner[name] if is_dict else getattr(owner, name)
     if isinstance(current, torch.Tensor) and isinstance(saved, torch.Tensor):
         current.copy_(saved)
     elif isinstance(current, np.ndarray) and isinstance(saved, np.ndarray):
         np.copyto(current, saved)
+    elif is_dict:
+        owner[name] = clone_recovery_value(saved)
     else:
         setattr(owner, name, clone_recovery_value(saved))
+
+
+def _raise_missing_task_state(path: str, *, operation: str) -> None:
+    raise RecoveryStateIncompleteError(
+        {f"task_state:{path}"},
+        operation=operation,
+        available={f"task_state:{path}": False},
+    )
+
+
+def _require_runtime_attribute(
+    owner: Any,
+    name: str,
+    *,
+    path: str,
+    operation: str,
+) -> Any:
+    if owner is None or not hasattr(owner, name):
+        _raise_missing_task_state(path, operation=operation)
+    return getattr(owner, name)
+
+
+def _type_identity(value: Any) -> str:
+    value_type = type(value)
+    return f"{value_type.__module__}.{value_type.__qualname__}"
+
+
+def _normalized_active_terms(manager: Any, *, path: str) -> Any:
+    active = _require_runtime_attribute(
+        manager,
+        "active_terms",
+        path=f"{path}.active_terms",
+        operation="capture task state",
+    )
+    if isinstance(active, Mapping):
+        return tuple((str(mode), tuple(names)) for mode, names in active.items())
+    return tuple(active)
+
+
+def _pp_box_robot(env: Any, *, operation: str) -> Any:
+    scene = _require_runtime_attribute(
+        env,
+        "scene",
+        path="scene",
+        operation=operation,
+    )
+    try:
+        return scene["robot"]
+    except (KeyError, TypeError):
+        robot = getattr(scene, "robot", None)
+        if robot is None:
+            _raise_missing_task_state("scene.robot", operation=operation)
+        return robot
+
+
+def _pp_box_runtime_identity(env: Any) -> Mapping[str, Any]:
+    operation = "capture task state"
+    cfg = _require_runtime_attribute(env, "cfg", path="cfg", operation=operation)
+    identity = getattr(cfg, "recovery_task_identity", None)
+    if identity != PP_BOX_TASK_IDENTITY:
+        raise RecoveryStateSchemaError(
+            f"PP-box recovery task identity {identity!r} does not match "
+            f"{PP_BOX_TASK_IDENTITY!r}"
+        )
+
+    action_manager = _require_runtime_attribute(
+        env, "action_manager", path="action_manager", operation=operation
+    )
+    action_names = tuple(
+        _require_runtime_attribute(
+            action_manager,
+            "_term_names",
+            path="action_manager._term_names",
+            operation=operation,
+        )
+    )
+    action_terms = _require_runtime_attribute(
+        action_manager,
+        "_terms",
+        path="action_manager._terms",
+        operation=operation,
+    )
+    if action_names != ("joint_pos",) or tuple(action_terms) != action_names:
+        _raise_missing_task_state("action_manager.term_contract", operation=operation)
+    action_term = action_terms["joint_pos"]
+    if type(action_term).__name__ != "JointPositionAction":
+        _raise_missing_task_state("action_manager.joint_pos_type", operation=operation)
+
+    reward_manager = _require_runtime_attribute(
+        env, "reward_manager", path="reward_manager", operation=operation
+    )
+    reward_names = tuple(
+        _require_runtime_attribute(
+            reward_manager,
+            "_term_names",
+            path="reward_manager._term_names",
+            operation=operation,
+        )
+    )
+    if reward_names != ("reward",):
+        _raise_missing_task_state("reward_manager.term_contract", operation=operation)
+    if tuple(getattr(reward_manager, "_class_term_cfgs", ())) != ():
+        _raise_missing_task_state("reward_manager.class_terms", operation=operation)
+
+    termination_manager = _require_runtime_attribute(
+        env, "termination_manager", path="termination_manager", operation=operation
+    )
+    termination_names = tuple(
+        _require_runtime_attribute(
+            termination_manager,
+            "_term_names",
+            path="termination_manager._term_names",
+            operation=operation,
+        )
+    )
+    if termination_names != () or tuple(
+        getattr(termination_manager, "_class_term_cfgs", ())
+    ) != ():
+        _raise_missing_task_state("termination_manager.term_contract", operation=operation)
+
+    observation_manager = _require_runtime_attribute(
+        env, "observation_manager", path="observation_manager", operation=operation
+    )
+    observation_terms = _require_runtime_attribute(
+        observation_manager,
+        "_group_obs_term_names",
+        path="observation_manager._group_obs_term_names",
+        operation=operation,
+    )
+    normalized_observation_terms = {
+        str(group): tuple(names) for group, names in observation_terms.items()
+    }
+    if normalized_observation_terms != _PP_BOX_OBSERVATION_TERMS:
+        _raise_missing_task_state("observation_manager.term_contract", operation=operation)
+    history_buffers = _require_runtime_attribute(
+        observation_manager,
+        "_group_obs_term_history_buffer",
+        path="observation_manager._group_obs_term_history_buffer",
+        operation=operation,
+    )
+    if any(dict(group_buffers) for group_buffers in history_buffers.values()):
+        _raise_missing_task_state("observation_manager.history", operation=operation)
+    class_terms = _require_runtime_attribute(
+        observation_manager,
+        "_group_obs_class_term_cfgs",
+        path="observation_manager._group_obs_class_term_cfgs",
+        operation=operation,
+    )
+    if any(tuple(group_terms) for group_terms in class_terms.values()) or tuple(
+        getattr(observation_manager, "_group_obs_class_instances", ())
+    ):
+        _raise_missing_task_state("observation_manager.class_terms", operation=operation)
+
+    passive_managers: dict[str, Any] = {}
+    for manager_name in _PP_BOX_PASSIVE_MANAGER_NAMES:
+        manager = _require_runtime_attribute(
+            env, manager_name, path=manager_name, operation=operation
+        )
+        active = _normalized_active_terms(manager, path=manager_name)
+        if isinstance(active, tuple) and any(
+            (bool(item[1]) if isinstance(item, tuple) and len(item) == 2 else True)
+            for item in active
+        ):
+            _raise_missing_task_state(f"{manager_name}.mutable_terms", operation=operation)
+        passive_managers[manager_name] = {
+            "type": _type_identity(manager),
+            "active_terms": active,
+        }
+
+    robot = _pp_box_robot(env, operation=operation)
+    return MappingProxyType(
+        {
+            "env_type": _type_identity(env),
+            "task_identity": identity,
+            "action_manager_type": _type_identity(action_manager),
+            "action_terms": tuple(
+                (
+                    name,
+                    _type_identity(action_terms[name]),
+                    int(action_terms[name].action_dim),
+                )
+                for name in action_names
+            ),
+            "reward_manager_type": _type_identity(reward_manager),
+            "reward_terms": reward_names,
+            "termination_manager_type": _type_identity(termination_manager),
+            "termination_terms": termination_names,
+            "observation_manager_type": _type_identity(observation_manager),
+            "observation_terms": normalized_observation_terms,
+            "passive_managers": passive_managers,
+            "robot_type": _type_identity(robot),
+        }
+    )
+
+
+def _require_alias(env: Any, env_name: str, owner: Any, owner_name: str) -> None:
+    if getattr(env, env_name, None) is not getattr(owner, owner_name, None):
+        _raise_missing_task_state(
+            f"driver_alias:{env_name}->{owner_name}",
+            operation="capture task state",
+        )
+
+
+def _capture_pp_box_recovery_task_state(env: Any) -> Mapping[str, Any]:
+    runtime_identity = _pp_box_runtime_identity(env)
+    operation = "capture task state"
+    action_manager = env.action_manager
+    reward_manager = env.reward_manager
+    termination_manager = env.termination_manager
+    observation_manager = env.observation_manager
+    robot = _pp_box_robot(env, operation=operation)
+    robot_data = _require_runtime_attribute(
+        robot, "data", path="scene.robot.data", operation=operation
+    )
+
+    _require_alias(env, "reward_buf", reward_manager, "_reward_buf")
+    _require_alias(env, "reset_terminated", termination_manager, "_terminated_buf")
+    _require_alias(env, "reset_time_outs", termination_manager, "_truncated_buf")
+    _require_alias(env, "obs_buf", observation_manager, "_obs_buffer")
+
+    action_terms: dict[str, Any] = {}
+    for name in action_manager._term_names:
+        term = action_manager._terms[name]
+        action_terms[name] = {
+            "raw_actions": clone_recovery_value(
+                _require_runtime_attribute(
+                    term,
+                    "_raw_actions",
+                    path=f"action_manager.{name}._raw_actions",
+                    operation=operation,
+                )
+            ),
+            "processed_actions": clone_recovery_value(
+                _require_runtime_attribute(
+                    term,
+                    "_processed_actions",
+                    path=f"action_manager.{name}._processed_actions",
+                    operation=operation,
+                )
+            ),
+        }
+
+    cfg_state = {
+        name: clone_recovery_value(
+            _require_runtime_attribute(
+                env.cfg,
+                name,
+                path=f"cfg.{name}",
+                operation=operation,
+            )
+        )
+        for name in _PP_BOX_CFG_STATE_NAMES
+    }
+    payload = {
+        "schema_version": PP_BOX_TASK_STATE_SCHEMA_VERSION,
+        "task_identity": PP_BOX_TASK_IDENTITY,
+        "runtime_identity": dict(runtime_identity),
+        "driver": {
+            "sim_step_counter": clone_recovery_value(
+                _require_runtime_attribute(
+                    env,
+                    "_sim_step_counter",
+                    path="driver._sim_step_counter",
+                    operation=operation,
+                )
+            ),
+            "extras": clone_recovery_value(
+                _require_runtime_attribute(
+                    env, "extras", path="driver.extras", operation=operation
+                )
+            ),
+        },
+        "action_manager": {
+            "action": clone_recovery_value(action_manager._action),
+            "prev_action": clone_recovery_value(action_manager._prev_action),
+            "terms": action_terms,
+        },
+        "reward_manager": {
+            "episode_sums": clone_recovery_value(reward_manager._episode_sums),
+            "reward_buf": clone_recovery_value(reward_manager._reward_buf),
+            "step_reward": clone_recovery_value(reward_manager._step_reward),
+        },
+        "termination_manager": {
+            "term_dones": clone_recovery_value(termination_manager._term_dones),
+            "truncated_buf": clone_recovery_value(termination_manager._truncated_buf),
+            "terminated_buf": clone_recovery_value(termination_manager._terminated_buf),
+        },
+        "observation_manager": {
+            "obs_buffer": clone_recovery_value(observation_manager._obs_buffer),
+        },
+        "robot_targets": {
+            "joint_pos": clone_recovery_value(robot_data.joint_pos_target),
+            "joint_vel": clone_recovery_value(robot_data.joint_vel_target),
+            "joint_effort": clone_recovery_value(robot_data.joint_effort_target),
+        },
+        "task_cfg": cfg_state,
+    }
+    if not _payload_is_finite(payload):
+        _raise_missing_task_state("nonfinite_payload", operation=operation)
+    return payload
+
+
+def _require_exact_mapping_keys(value: Any, expected: set[str], *, path: str) -> Mapping:
+    if not isinstance(value, Mapping) or set(value) != expected:
+        raise RecoveryStateSchemaError(
+            f"PP-box recovery task state {path} keys do not match schema"
+        )
+    return value
+
+
+def _require_same_payload_schema(current: Any, saved: Any, *, path: str) -> None:
+    if not _payload_matches_schema(saved, _payload_schema(current)):
+        raise RecoveryStateSchemaError(
+            f"PP-box recovery task state {path} does not match runtime schema"
+        )
+
+
+def _preflight_pp_box_recovery_task_state(env: Any, state: Any) -> None:
+    top = _require_exact_mapping_keys(
+        state,
+        {
+            "schema_version",
+            "task_identity",
+            "runtime_identity",
+            "driver",
+            "action_manager",
+            "reward_manager",
+            "termination_manager",
+            "observation_manager",
+            "robot_targets",
+            "task_cfg",
+        },
+        path="root",
+    )
+    if top["schema_version"] != PP_BOX_TASK_STATE_SCHEMA_VERSION:
+        raise RecoveryStateSchemaError("unsupported PP-box recovery task state schema")
+    if top["task_identity"] != PP_BOX_TASK_IDENTITY:
+        raise RecoveryStateSchemaError("PP-box recovery task state task identity mismatch")
+    if dict(top["runtime_identity"]) != dict(_pp_box_runtime_identity(env)):
+        raise RecoveryStateSchemaError("PP-box recovery runtime identity mismatch")
+
+    driver = _require_exact_mapping_keys(
+        top["driver"], {"sim_step_counter", "extras"}, path="driver"
+    )
+    if not isinstance(driver["sim_step_counter"], (int, np.integer)):
+        raise RecoveryStateSchemaError("PP-box driver sim step counter is invalid")
+    if not isinstance(driver["extras"], Mapping) or not _payload_is_finite(driver["extras"]):
+        raise RecoveryStateSchemaError("PP-box driver extras are invalid")
+
+    action = _require_exact_mapping_keys(
+        top["action_manager"], {"action", "prev_action", "terms"}, path="action_manager"
+    )
+    _require_same_payload_schema(
+        env.action_manager._action, action["action"], path="action_manager.action"
+    )
+    _require_same_payload_schema(
+        env.action_manager._prev_action,
+        action["prev_action"],
+        path="action_manager.prev_action",
+    )
+    terms = _require_exact_mapping_keys(
+        action["terms"], set(env.action_manager._term_names), path="action_manager.terms"
+    )
+    for name in env.action_manager._term_names:
+        term_state = _require_exact_mapping_keys(
+            terms[name], {"raw_actions", "processed_actions"}, path=f"action_manager.{name}"
+        )
+        term = env.action_manager._terms[name]
+        _require_same_payload_schema(
+            term._raw_actions,
+            term_state["raw_actions"],
+            path=f"action_manager.{name}.raw_actions",
+        )
+        _require_same_payload_schema(
+            term._processed_actions,
+            term_state["processed_actions"],
+            path=f"action_manager.{name}.processed_actions",
+        )
+
+    reward = _require_exact_mapping_keys(
+        top["reward_manager"],
+        {"episode_sums", "reward_buf", "step_reward"},
+        path="reward_manager",
+    )
+    episode_sums = _require_exact_mapping_keys(
+        reward["episode_sums"], set(env.reward_manager._episode_sums), path="reward_manager.episode_sums"
+    )
+    for name, current in env.reward_manager._episode_sums.items():
+        _require_same_payload_schema(
+            current, episode_sums[name], path=f"reward_manager.episode_sums.{name}"
+        )
+    _require_same_payload_schema(
+        env.reward_manager._reward_buf, reward["reward_buf"], path="reward_manager.reward_buf"
+    )
+    _require_same_payload_schema(
+        env.reward_manager._step_reward,
+        reward["step_reward"],
+        path="reward_manager.step_reward",
+    )
+
+    termination = _require_exact_mapping_keys(
+        top["termination_manager"],
+        {"term_dones", "truncated_buf", "terminated_buf"},
+        path="termination_manager",
+    )
+    term_dones = _require_exact_mapping_keys(
+        termination["term_dones"],
+        set(env.termination_manager._term_dones),
+        path="termination_manager.term_dones",
+    )
+    for name, current in env.termination_manager._term_dones.items():
+        _require_same_payload_schema(
+            current, term_dones[name], path=f"termination_manager.term_dones.{name}"
+        )
+    _require_same_payload_schema(
+        env.termination_manager._truncated_buf,
+        termination["truncated_buf"],
+        path="termination_manager.truncated_buf",
+    )
+    _require_same_payload_schema(
+        env.termination_manager._terminated_buf,
+        termination["terminated_buf"],
+        path="termination_manager.terminated_buf",
+    )
+
+    observation = _require_exact_mapping_keys(
+        top["observation_manager"], {"obs_buffer"}, path="observation_manager"
+    )
+    _require_same_payload_schema(
+        env.observation_manager._obs_buffer,
+        observation["obs_buffer"],
+        path="observation_manager.obs_buffer",
+    )
+
+    targets = _require_exact_mapping_keys(
+        top["robot_targets"], {"joint_pos", "joint_vel", "joint_effort"}, path="robot_targets"
+    )
+    robot = _pp_box_robot(env, operation="restore task state preflight")
+    _require_same_payload_schema(
+        robot.data.joint_pos_target, targets["joint_pos"], path="robot_targets.joint_pos"
+    )
+    _require_same_payload_schema(
+        robot.data.joint_vel_target, targets["joint_vel"], path="robot_targets.joint_vel"
+    )
+    _require_same_payload_schema(
+        robot.data.joint_effort_target,
+        targets["joint_effort"],
+        path="robot_targets.joint_effort",
+    )
+
+    task_cfg = _require_exact_mapping_keys(
+        top["task_cfg"], set(_PP_BOX_CFG_STATE_NAMES), path="task_cfg"
+    )
+    if not _payload_is_finite(task_cfg):
+        raise RecoveryStateSchemaError("PP-box recovery task cfg state is invalid")
+
+
+def _restore_pp_box_recovery_task_state(env: Any, state: Any) -> None:
+    _preflight_pp_box_recovery_task_state(env, state)
+    action = state["action_manager"]
+    _restore_attribute(env.action_manager, "_action", action["action"])
+    _restore_attribute(env.action_manager, "_prev_action", action["prev_action"])
+    for name, term_state in action["terms"].items():
+        term = env.action_manager._terms[name]
+        _restore_attribute(term, "_raw_actions", term_state["raw_actions"])
+        _restore_attribute(term, "_processed_actions", term_state["processed_actions"])
+
+    reward = state["reward_manager"]
+    for name, value in reward["episode_sums"].items():
+        _restore_attribute(env.reward_manager._episode_sums, name, value)
+    _restore_attribute(env.reward_manager, "_reward_buf", reward["reward_buf"])
+    _restore_attribute(env.reward_manager, "_step_reward", reward["step_reward"])
+    env.reward_buf = env.reward_manager._reward_buf
+
+    termination = state["termination_manager"]
+    for name, value in termination["term_dones"].items():
+        _restore_attribute(env.termination_manager._term_dones, name, value)
+    _restore_attribute(
+        env.termination_manager, "_truncated_buf", termination["truncated_buf"]
+    )
+    _restore_attribute(
+        env.termination_manager, "_terminated_buf", termination["terminated_buf"]
+    )
+    env.reset_terminated = env.termination_manager._terminated_buf
+    env.reset_time_outs = env.termination_manager._truncated_buf
+
+    observation = clone_recovery_value(state["observation_manager"]["obs_buffer"])
+    env.observation_manager._obs_buffer = observation
+    env.obs_buf = observation
+    env._sim_step_counter = int(state["driver"]["sim_step_counter"])
+    env.extras = clone_recovery_value(state["driver"]["extras"])
+
+    robot = _pp_box_robot(env, operation="restore task state")
+    env_ids = _single_env_ids(env, operation="restore task state targets")
+    targets = state["robot_targets"]
+    robot.set_joint_position_target(
+        clone_recovery_value(targets["joint_pos"]), env_ids=env_ids
+    )
+    robot.set_joint_velocity_target(
+        clone_recovery_value(targets["joint_vel"]), env_ids=env_ids
+    )
+    robot.set_joint_effort_target(
+        clone_recovery_value(targets["joint_effort"]), env_ids=env_ids
+    )
+    for name, value in state["task_cfg"].items():
+        setattr(env.cfg, name, clone_recovery_value(value))
+
+
+def _capture_pp_box_recovery_task_state_bound(env: Any) -> Mapping[str, Any]:
+    return _capture_pp_box_recovery_task_state(env)
+
+
+def _preflight_pp_box_recovery_task_state_bound(env: Any, state: Any) -> None:
+    _preflight_pp_box_recovery_task_state(env, state)
+
+
+def _restore_pp_box_recovery_task_state_bound(env: Any, state: Any) -> None:
+    _restore_pp_box_recovery_task_state(env, state)
+
+
+def install_pp_box_recovery_task_state_hooks(env: Any) -> None:
+    """Install task-specific state hooks on the production PP-box environment."""
+
+    _single_env_ids(env, operation="install PP-box recovery task-state hooks")
+    cfg = getattr(env, "cfg", None)
+    identity = getattr(cfg, "recovery_task_identity", None)
+    if identity != PP_BOX_TASK_IDENTITY:
+        raise RecoveryStateSchemaError(
+            f"PP-box recovery task identity {identity!r} does not match "
+            f"{PP_BOX_TASK_IDENTITY!r}"
+        )
+    marker = getattr(env, "_pp_box_recovery_task_state_hooks_version", None)
+    if marker == PP_BOX_TASK_STATE_SCHEMA_VERSION:
+        return
+    for name in (
+        "capture_recovery_task_state",
+        "preflight_restore_recovery_task_state",
+        "restore_recovery_task_state",
+    ):
+        if callable(getattr(env, name, None)):
+            _raise_missing_task_state(
+                f"conflicting_hook:{name}", operation="install task state hooks"
+            )
+    env.capture_recovery_task_state = MethodType(
+        _capture_pp_box_recovery_task_state_bound, env
+    )
+    env.preflight_restore_recovery_task_state = MethodType(
+        _preflight_pp_box_recovery_task_state_bound, env
+    )
+    env.restore_recovery_task_state = MethodType(
+        _restore_pp_box_recovery_task_state_bound, env
+    )
+    env.recovery_process_global_rng_exclusive = True
+    env._pp_box_recovery_task_state_hooks_version = PP_BOX_TASK_STATE_SCHEMA_VERSION
 
 
 def _payload_schema(value: Any) -> Any:
@@ -861,18 +1576,15 @@ def _validate_snapshot_schema(snapshot: RecoveryStateSnapshot, task_identity: st
         raise RecoveryStateSchemaError("recovery capability task-state mode is inconsistent")
 
 
-def restore_recovery_state(
+def _preflight_recovery_restore(
     env: Any,
     snapshot: RecoveryStateSnapshot,
     *,
-    required_capabilities: set[str] | frozenset[str] | None = None,
-    task_identity: str = PP_BOX_TASK_IDENTITY,
-) -> None:
-    """Restore a snapshot in scene, task, then RNG order."""
-
+    required_capabilities: set[str] | frozenset[str] | None,
+    task_identity: str,
+) -> torch.Tensor:
     _validate_snapshot_schema(snapshot, task_identity)
     env_ids = _single_env_ids(env, operation="restore single-env selection")
-
     capabilities = discover_recovery_state_capabilities(env)
     snapshot_capabilities = {
         name for name, is_available in snapshot.capabilities.available.items() if is_available
@@ -903,6 +1615,51 @@ def restore_recovery_state(
             available=snapshot.capabilities.available,
         )
 
+    non_restorable_counters = {
+        f"task_counter:{name}"
+        for name in snapshot.capabilities.counter_names
+        if not _attribute_is_restorable(env, name, snapshot.task_counters[name])
+    }
+    if non_restorable_counters:
+        raise RecoveryStateIncompleteError(
+            non_restorable_counters,
+            operation="restore preflight",
+            available=snapshot.capabilities.available,
+        )
+
+    if snapshot.capabilities.task_state_mode == "hooks":
+        try:
+            env.preflight_restore_recovery_task_state(
+                clone_recovery_value(snapshot.task_state)
+            )
+        except Exception as exc:
+            raise RecoveryStatePreflightError("task_state", exc) from exc
+    elif snapshot.capabilities.task_state_mode == "direct" and not (
+        _has_writable_direct_task_state(env)
+    ):
+        raise RecoveryStateIncompleteError(
+            {"task_state"},
+            operation="restore preflight",
+            available=capabilities.available,
+        )
+
+    for name in _RUNTIME_CACHE_NAMES:
+        if snapshot.capabilities.available.get(name, False):
+            try:
+                getattr(env, f"preflight_restore_{name}")(
+                    clone_recovery_value(snapshot.runtime_state[name])
+                )
+            except Exception as exc:
+                raise RecoveryStatePreflightError(name, exc) from exc
+    return env_ids
+
+
+def _apply_recovery_restore(
+    env: Any,
+    snapshot: RecoveryStateSnapshot,
+    *,
+    env_ids: torch.Tensor,
+) -> None:
     env.reset_to(
         clone_recovery_value(snapshot.scene_state),
         env_ids=env_ids,
@@ -918,13 +1675,17 @@ def restore_recovery_state(
 
     for name in _RUNTIME_CACHE_NAMES:
         if snapshot.capabilities.available.get(name, False):
-            getattr(env, f"restore_{name}")(clone_recovery_value(snapshot.runtime_state[name]))
+            getattr(env, f"restore_{name}")(
+                clone_recovery_value(snapshot.runtime_state[name])
+            )
 
     random.setstate(clone_recovery_value(snapshot.rng_state.python))
     np.random.set_state(clone_recovery_value(snapshot.rng_state.numpy))
     torch.set_rng_state(snapshot.rng_state.torch_cpu.clone())
     if snapshot.rng_state.torch_cuda is not None:
-        torch.cuda.set_rng_state_all([state.clone() for state in snapshot.rng_state.torch_cuda])
+        torch.cuda.set_rng_state_all(
+            [state.clone() for state in snapshot.rng_state.torch_cuda]
+        )
     _restore_rng_source(
         _task_rng(env),
         snapshot.rng_state.task_local,
@@ -935,3 +1696,182 @@ def restore_recovery_state(
         snapshot.rng_state.wrapper,
         capability="wrapper_rng",
     )
+
+
+def _project_snapshot_for_verification(
+    current: RecoveryStateSnapshot,
+    target: RecoveryStateSnapshot,
+) -> RecoveryStateSnapshot:
+    available = target.capabilities.available
+    current_rng = current.rng_state
+    return RecoveryStateSnapshot(
+        schema_version=target.schema_version,
+        task_identity=target.task_identity,
+        capabilities=target.capabilities,
+        scene_state=clone_recovery_value(current.scene_state),
+        task_counters={
+            name: clone_recovery_value(current.task_counters[name])
+            for name in target.capabilities.counter_names
+        },
+        task_state=(
+            clone_recovery_value(current.task_state)
+            if available.get("task_state", False)
+            else clone_recovery_value(target.task_state)
+        ),
+        rng_state=RecoveryRngState(
+            python=clone_recovery_value(current_rng.python),
+            numpy=clone_recovery_value(current_rng.numpy),
+            torch_cpu=current_rng.torch_cpu.clone(),
+            torch_cuda=(
+                clone_recovery_value(current_rng.torch_cuda)
+                if available.get("torch_cuda_rng", False)
+                else None
+            ),
+            task_local=(
+                clone_recovery_value(current_rng.task_local)
+                if available.get("task_local_rng", False)
+                else None
+            ),
+            wrapper=(
+                clone_recovery_value(current_rng.wrapper)
+                if available.get("wrapper_rng", False)
+                else None
+            ),
+        ),
+        runtime_state={
+            name: clone_recovery_value(current.runtime_state[name])
+            for name in _RUNTIME_CACHE_NAMES
+            if available.get(name, False)
+        },
+    )
+
+
+def _verify_recovery_restore(
+    env: Any,
+    target: RecoveryStateSnapshot,
+    *,
+    target_digest: str,
+    task_identity: str,
+) -> None:
+    advertised = {
+        name for name, value in target.capabilities.available.items() if value
+    }
+    current = _capture_recovery_state_unlocked(
+        env,
+        required_capabilities=advertised,
+        task_identity=task_identity,
+    )
+    projected = _project_snapshot_for_verification(current, target)
+    actual_digest = recovery_state_digest(projected, task_identity=task_identity)
+    if not hmac.compare_digest(actual_digest, target_digest):
+        raise RecoveryStateDigestMismatchError(
+            f"post-restore snapshot digest {actual_digest} does not match "
+            f"target {target_digest}"
+        )
+
+
+def _validate_bound_snapshot_digest(
+    snapshot: RecoveryStateSnapshot,
+    snapshot_digest: str,
+    *,
+    task_identity: str,
+) -> str:
+    _validate_snapshot_schema(snapshot, task_identity)
+    actual = recovery_state_digest(snapshot, task_identity=task_identity)
+    if not (
+        isinstance(snapshot_digest, str)
+        and len(snapshot_digest) == 64
+        and set(snapshot_digest) <= set("0123456789abcdef")
+        and hmac.compare_digest(snapshot_digest, actual)
+    ):
+        raise RecoveryStateDigestMismatchError(
+            f"caller-bound recovery snapshot digest {snapshot_digest!r} "
+            f"does not match {actual}"
+        )
+    return actual
+
+
+def restore_recovery_state(
+    env: Any,
+    snapshot: RecoveryStateSnapshot,
+    *,
+    snapshot_digest: str,
+    required_capabilities: set[str] | frozenset[str] | None = None,
+    task_identity: str = PP_BOX_TASK_IDENTITY,
+) -> None:
+    """Restore a caller-digest-bound snapshot as a verified transaction."""
+
+    target_digest = _validate_bound_snapshot_digest(
+        snapshot,
+        snapshot_digest,
+        task_identity=task_identity,
+    )
+    with _exclusive_process_global_rng("restore"):
+        env_ids = _preflight_recovery_restore(
+            env,
+            snapshot,
+            required_capabilities=required_capabilities,
+            task_identity=task_identity,
+        )
+        try:
+            rollback_snapshot = _capture_recovery_state_unlocked(
+                env,
+                required_capabilities=None,
+                task_identity=task_identity,
+            )
+            rollback_digest = recovery_state_digest(
+                rollback_snapshot, task_identity=task_identity
+            )
+        except Exception as exc:
+            raise RecoveryStatePreflightError("rollback_snapshot", exc) from exc
+
+        failure_phase = "apply_target"
+        try:
+            _apply_recovery_restore(env, snapshot, env_ids=env_ids)
+            failure_phase = "verify_target"
+            _verify_recovery_restore(
+                env,
+                snapshot,
+                target_digest=target_digest,
+                task_identity=task_identity,
+            )
+            return
+        except Exception as target_failure:
+            rollback_failure: Exception | None = None
+            try:
+                rollback_env_ids = _preflight_recovery_restore(
+                    env,
+                    rollback_snapshot,
+                    required_capabilities=None,
+                    task_identity=task_identity,
+                )
+                _apply_recovery_restore(
+                    env,
+                    rollback_snapshot,
+                    env_ids=rollback_env_ids,
+                )
+                _verify_recovery_restore(
+                    env,
+                    rollback_snapshot,
+                    target_digest=rollback_digest,
+                    task_identity=task_identity,
+                )
+            except Exception as exc:  # noqa: BLE001 - preserve arbitrary hook evidence.
+                rollback_failure = exc
+
+            evidence = RecoveryStateRestoreEvidence(
+                schema_version=1,
+                target_snapshot_digest=target_digest,
+                rollback_snapshot_digest=rollback_digest,
+                failure_phase=failure_phase,
+                failure_type=type(target_failure).__name__,
+                failure_message=str(target_failure),
+                rollback_succeeded=rollback_failure is None,
+                rollback_failure_type=(
+                    None if rollback_failure is None else type(rollback_failure).__name__
+                ),
+                rollback_failure_message=(
+                    None if rollback_failure is None else str(rollback_failure)
+                ),
+            )
+            raise RecoveryStateTransactionError(evidence) from target_failure

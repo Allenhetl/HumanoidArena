@@ -1548,6 +1548,7 @@ def inject_recovery_failure(
     recovery_state.restore_recovery_state(
         env,
         snapshot,
+        snapshot_digest=actual_snapshot_digest,
         required_capabilities=_SNAPSHOT_RESTORE_REQUIRED_CAPABILITIES,
         task_identity=PP_BOX_TASK_IDENTITY,
     )
