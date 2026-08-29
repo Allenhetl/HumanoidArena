@@ -5,7 +5,7 @@ import importlib.util
 import random
 import sys
 import types
-from dataclasses import replace
+from dataclasses import fields, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -257,21 +257,74 @@ def _runtime_evidence(
     )
 
 
-def _replay_record(failures, plan, *, repeat_index: int, **overrides: object):
+def _replay_context(failures, telemetry, plan):
+    attempt_overrides: dict[str, object] = {
+        "failure_seed": plan.failure_seed,
+        "injected_category": plan.category,
+        "transform_digest": plan.transform_digest,
+    }
+    telemetry_overrides: dict[str, object] = {}
+    context_overrides: dict[str, object] = {}
+    if plan.category == "dropped":
+        attempt_overrides.update(
+            trigger_kind="post-release",
+            pickup_attempted=True,
+            release_attempted=True,
+        )
+        telemetry_overrides.update(grasp=False, pose_valid=False, xy_mismatch_m=0.3)
+        context_overrides.update(ground_supported=True, target_disjoint=True)
+    elif plan.category == "failed-grasp":
+        attempt_overrides.update(
+            trigger_kind="pickup-attempt",
+            pickup_attempted=True,
+        )
+        telemetry_overrides.update(grasp=False, pose_valid=True, xy_mismatch_m=0.3)
+    elif plan.category == "misaligned":
+        attempt_overrides.update(
+            trigger_kind="place-attempt",
+            pickup_attempted=True,
+            place_attempted=True,
+        )
+        telemetry_overrides.update(grasp=True, pose_valid=True, xy_mismatch_m=0.2)
+    else:
+        attempt_overrides.update(
+            trigger_kind="post-release",
+            pickup_attempted=True,
+            place_attempted=True,
+            release_attempted=True,
+        )
+        telemetry_overrides.update(grasp=False, pose_valid=False, xy_mismatch_m=0.04)
+    return _predicate_context(
+        failures,
+        telemetry,
+        attempt_overrides=attempt_overrides,
+        **telemetry_overrides,
+        **context_overrides,
+    )
+
+
+def _replay_record(
+    failures,
+    telemetry,
+    plan,
+    *,
+    repeat_index: int,
+    readback=None,
+    continuation_readback=None,
+    **overrides: object,
+):
     values: dict[str, object] = {
         "schema_version": failures.RECOVERY_REPLAY_EVIDENCE_SCHEMA_VERSION,
         "repeat_index": repeat_index,
-        "category": plan.category,
-        "failure_seed": plan.failure_seed,
-        "snapshot_digest": plan.snapshot_digest,
-        "category_seed": plan.category_seed,
-        "plan_transform_digest": plan.transform_digest,
-        "runtime_evidence_digest": plan.runtime_evidence_digest,
-        "readback_state_digest": "4" * 64,
-        "continuation_digest": "5" * 64,
-        "predicate_passed": True,
-        "observed_category": plan.category,
-        "category_passed": True,
+        "plan": plan,
+        "readback": (
+            _replay_context(failures, telemetry, plan) if readback is None else readback
+        ),
+        "continuation_readback": (
+            _replay_context(failures, telemetry, plan)
+            if continuation_readback is None
+            else continuation_readback
+        ),
     }
     values.update(overrides)
     return failures.FailureReplayRecord(**values)
@@ -834,7 +887,7 @@ def test_anchor_categories_reuse_only_the_verified_anchor_transform(
 def test_effective_catalog_requires_two_identical_bound_replays_per_category(
     modules,
 ) -> None:
-    _state, _telemetry, failures = modules
+    _state, telemetry, failures = modules
     pre_injection = {
         category: _runtime_evidence(failures, category)
         for category in sorted(DECLARED_CATEGORIES)
@@ -848,8 +901,8 @@ def test_effective_catalog_requires_two_identical_bound_replays_per_category(
             _descriptor_payload(failures, category)
         )
         plan = failures.build_failure_injection_plan(descriptor, evidence)
-        first = _replay_record(failures, plan, repeat_index=0)
-        second = _replay_record(failures, plan, repeat_index=1)
+        first = _replay_record(failures, telemetry, plan, repeat_index=0)
+        second = _replay_record(failures, telemetry, plan, repeat_index=1)
         single_replay[category] = replace(evidence, replay_records=(first,))
         verified[category] = replace(
             evidence,
@@ -860,76 +913,244 @@ def test_effective_catalog_requires_two_identical_bound_replays_per_category(
     assert set(failures.effective_failure_catalog(verified)) == DECLARED_CATEGORIES
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("repeat_index", 0),
-        ("category", "dropped"),
-        ("failure_seed", 18),
-        ("snapshot_digest", "3" * 64),
-        ("category_seed", 123),
-        ("plan_transform_digest", "6" * 64),
-        ("runtime_evidence_digest", "7" * 64),
-        ("readback_state_digest", "8" * 64),
-        ("continuation_digest", "9" * 64),
-        ("predicate_passed", False),
-        ("observed_category", "dropped"),
-        ("category_passed", False),
-    ],
-)
-def test_effective_catalog_fails_closed_on_replay_label_digest_or_distribution_drift(
+def test_replay_constructor_derives_truth_and_rejects_digest_boolean_forgery(
     modules,
-    field: str,
-    value: object,
 ) -> None:
-    _state, _telemetry, failures = modules
+    state, telemetry, failures = modules
     category = "near-shelf-misplaced"
     descriptor = failures.RecoveryFailureDescriptor.from_mapping(
         _descriptor_payload(failures, category)
     )
     evidence = _runtime_evidence(failures, category)
     plan = failures.build_failure_injection_plan(descriptor, evidence)
-    first = _replay_record(failures, plan, repeat_index=0)
-    drifted_repeat_index = value if field == "repeat_index" else 1
-    drifted_overrides = {} if field == "repeat_index" else {field: value}
-    drifted = _replay_record(
-        failures,
-        plan,
-        repeat_index=drifted_repeat_index,
-        **drifted_overrides,
+    readback = _replay_context(failures, telemetry, plan)
+    continuation = _replay_context(failures, telemetry, plan)
+
+    record = failures.FailureReplayRecord(
+        schema_version=failures.RECOVERY_REPLAY_EVIDENCE_SCHEMA_VERSION,
+        repeat_index=0,
+        plan=plan,
+        readback=readback,
+        continuation_readback=continuation,
     )
+
+    derived_names = {
+        "category",
+        "failure_seed",
+        "snapshot_digest",
+        "category_seed",
+        "plan_transform_digest",
+        "runtime_evidence_digest",
+        "readback_state_digest",
+        "continuation_digest",
+        "predicate_passed",
+        "observed_category",
+        "continuation_category",
+        "category_passed",
+    }
+    assert all(
+        not replay_field.init
+        for replay_field in fields(failures.FailureReplayRecord)
+        if replay_field.name in derived_names
+    )
+    assert record.readback_state_digest == state.recovery_value_digest(readback)
+    assert record.continuation_digest == state.recovery_value_digest(continuation)
+    assert record.observed_category == category
+    assert record.continuation_category == category
+    assert record.predicate_passed is True
+    assert record.category_passed is True
+
+    for caller_truth in (
+        {"snapshot_digest": "3" * 64},
+        {"plan_transform_digest": "4" * 64},
+        {"runtime_evidence_digest": "4" * 64},
+        {"readback_state_digest": "4" * 64},
+        {"continuation_digest": "5" * 64},
+        {"predicate_passed": True},
+        {"observed_category": category},
+        {"continuation_category": category},
+        {"category_passed": True},
+    ):
+        with pytest.raises(TypeError):
+            failures.FailureReplayRecord(
+                schema_version=failures.RECOVERY_REPLAY_EVIDENCE_SCHEMA_VERSION,
+                repeat_index=1,
+                plan=plan,
+                readback=readback,
+                continuation_readback=continuation,
+                **caller_truth,
+            )
+
+
+def test_effective_catalog_rechecks_physical_payload_after_frozen_record_tampering(
+    modules,
+) -> None:
+    _state, telemetry, failures = modules
+    category = "near-shelf-misplaced"
+    descriptor = failures.RecoveryFailureDescriptor.from_mapping(
+        _descriptor_payload(failures, category)
+    )
+    evidence = _runtime_evidence(failures, category)
+    plan = failures.build_failure_injection_plan(descriptor, evidence)
+    valid = _replay_record(failures, telemetry, plan, repeat_index=0)
+    invalid_context = replace(
+        _replay_context(failures, telemetry, plan),
+        telemetry=replace(
+            _replay_context(failures, telemetry, plan).telemetry,
+            xy_mismatch_m=0.3,
+        ),
+    )
+    forged = _replay_record(
+        failures,
+        telemetry,
+        plan,
+        repeat_index=1,
+        readback=invalid_context,
+        continuation_readback=invalid_context,
+    )
+    for record in (valid, forged):
+        object.__setattr__(record, "readback_state_digest", "4" * 64)
+        object.__setattr__(record, "continuation_digest", "5" * 64)
+        object.__setattr__(record, "predicate_passed", True)
+        object.__setattr__(record, "observed_category", category)
+        object.__setattr__(record, "continuation_category", category)
+        object.__setattr__(record, "category_passed", True)
 
     assert (
         failures.effective_failure_catalog(
-            {category: replace(evidence, replay_records=(first, drifted))}
+            {category: replace(evidence, replay_records=(valid, forged))}
         )
         == {}
     )
 
 
-def test_replay_record_schema_rejects_unknown_category_invalid_digest_and_non_bool(
+@pytest.mark.parametrize(
+    "payload_kind",
+    ["readback_unknown", "continuation_drift", "continuation_conflict"],
+)
+def test_replay_physical_payload_mutation_fails_closed(
+    modules,
+    payload_kind: str,
+) -> None:
+    _state, telemetry, failures = modules
+    category = "near-shelf-misplaced"
+    descriptor = failures.RecoveryFailureDescriptor.from_mapping(
+        _descriptor_payload(failures, category)
+    )
+    evidence = _runtime_evidence(failures, category)
+    plan = failures.build_failure_injection_plan(descriptor, evidence)
+    first = _replay_record(failures, telemetry, plan, repeat_index=0)
+    base = _replay_context(failures, telemetry, plan)
+    if payload_kind == "readback_unknown":
+        second = _replay_record(
+            failures,
+            telemetry,
+            plan,
+            repeat_index=1,
+            readback=replace(
+                base, telemetry=replace(base.telemetry, xy_mismatch_m=0.3)
+            ),
+        )
+    elif payload_kind == "continuation_drift":
+        second = _replay_record(
+            failures,
+            telemetry,
+            plan,
+            repeat_index=1,
+            continuation_readback=replace(
+                base,
+                telemetry=replace(base.telemetry, xy_mismatch_m=0.05),
+            ),
+        )
+    else:
+        second = _replay_record(
+            failures,
+            telemetry,
+            plan,
+            repeat_index=1,
+            continuation_readback=replace(base, ground_supported=True),
+        )
+
+    assert (
+        failures.effective_failure_catalog(
+            {category: replace(evidence, replay_records=(first, second))}
+        )
+        == {}
+    )
+
+
+@pytest.mark.parametrize("payload_name", ["readback", "continuation_readback"])
+@pytest.mark.parametrize(
+    ("attempt_field", "value"),
+    [
+        ("failure_seed", 18),
+        ("injected_category", "dropped"),
+        ("transform_digest", "6" * 64),
+    ],
+)
+def test_replay_attempt_metadata_must_bind_plan_for_both_physical_payloads(
+    modules,
+    payload_name: str,
+    attempt_field: str,
+    value: object,
+) -> None:
+    _state, telemetry, failures = modules
+    category = "near-shelf-misplaced"
+    descriptor = failures.RecoveryFailureDescriptor.from_mapping(
+        _descriptor_payload(failures, category)
+    )
+    evidence = _runtime_evidence(failures, category)
+    plan = failures.build_failure_injection_plan(descriptor, evidence)
+    context = _replay_context(failures, telemetry, plan)
+    mutated = replace(
+        context,
+        attempt=replace(context.attempt, **{attempt_field: value}),
+    )
+
+    with pytest.raises(failures.RecoveryFailureSchemaError, match="metadata"):
+        _replay_record(
+            failures,
+            telemetry,
+            plan,
+            repeat_index=0,
+            **{payload_name: mutated},
+        )
+
+
+def test_replay_record_schema_rejects_invalid_version_index_plan_and_context(
     modules,
 ) -> None:
-    _state, _telemetry, failures = modules
+    _state, telemetry, failures = modules
     descriptor = failures.RecoveryFailureDescriptor.from_mapping(
         _descriptor_payload(failures, "near-shelf-misplaced")
     )
     evidence = _runtime_evidence(failures, "near-shelf-misplaced")
     plan = failures.build_failure_injection_plan(descriptor, evidence)
+    context = _replay_context(failures, telemetry, plan)
 
     for overrides, message in (
-        ({"category": "fall"}, "category"),
-        ({"snapshot_digest": "caller-label"}, "digest"),
-        ({"predicate_passed": 1}, "boolean"),
+        ({"schema_version": 999}, "schema version"),
+        ({"repeat_index": -1}, "non-negative"),
+        ({"plan": object()}, "plan"),
+        ({"readback": object()}, "physical readback"),
+        ({"continuation_readback": object()}, "physical continuation"),
     ):
         with pytest.raises(failures.RecoveryFailureSchemaError, match=message):
-            _replay_record(failures, plan, repeat_index=0, **overrides)
+            values = {
+                "schema_version": failures.RECOVERY_REPLAY_EVIDENCE_SCHEMA_VERSION,
+                "repeat_index": 0,
+                "plan": plan,
+                "readback": context,
+                "continuation_readback": context,
+            }
+            values.update(overrides)
+            failures.FailureReplayRecord(**values)
 
 
 def test_runtime_evidence_digest_is_content_derived_and_stale_replays_fail_closed(
     modules,
 ) -> None:
-    _state, _telemetry, failures = modules
+    _state, telemetry, failures = modules
     category = "misaligned"
     evidence = _runtime_evidence(failures, category)
     identical = _runtime_evidence(failures, category)
@@ -938,8 +1159,8 @@ def test_runtime_evidence_digest_is_content_derived_and_stale_replays_fail_close
     )
     plan = failures.build_failure_injection_plan(descriptor, evidence)
     records = (
-        _replay_record(failures, plan, repeat_index=0),
-        _replay_record(failures, plan, repeat_index=1),
+        _replay_record(failures, telemetry, plan, repeat_index=0),
+        _replay_record(failures, telemetry, plan, repeat_index=1),
     )
 
     assert evidence.evidence_digest == identical.evidence_digest
@@ -1103,14 +1324,11 @@ def test_injection_delegates_restore_before_explicit_write_settle_readback_witho
     assert events == ["restore", "write", "settle", "readback"]
     assert (hooks.write_count, hooks.settle_count, hooks.read_count) == (1, 1, 1)
 
-    continuation = {
-        "control_step": 21,
-        "observation": torch.tensor([0.25, -0.5], dtype=torch.float32),
-    }
+    continuation = replace(result.readback)
     replay = failures.build_failure_replay_record(
         result,
         repeat_index=0,
-        continuation_state=continuation,
+        continuation_readback=continuation,
     )
     assert replay.category == result.category
     assert replay.failure_seed == result.plan.failure_seed
@@ -1119,7 +1337,15 @@ def test_injection_delegates_restore_before_explicit_write_settle_readback_witho
     assert replay.continuation_digest == state.recovery_value_digest(continuation)
     assert replay.predicate_passed is True
     assert replay.observed_category == result.category
+    assert replay.continuation_category == result.category
     assert replay.category_passed is True
+
+    with pytest.raises(failures.RecoveryFailureSchemaError, match="continuation"):
+        failures.build_failure_replay_record(
+            result,
+            repeat_index=1,
+            continuation_readback={"caller": "digest-only"},
+        )
 
 
 def test_failed_readback_raises_once_without_retry_or_seed_change(

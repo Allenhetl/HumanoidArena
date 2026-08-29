@@ -804,17 +804,21 @@ class FailureReplayRecord:
 
     schema_version: int
     repeat_index: int
-    category: str
-    failure_seed: int
-    snapshot_digest: str
-    category_seed: int
-    plan_transform_digest: str
-    runtime_evidence_digest: str
-    readback_state_digest: str
-    continuation_digest: str
-    predicate_passed: bool
-    observed_category: str | None
-    category_passed: bool
+    plan: FailureInjectionPlan
+    readback: FailurePredicateContext
+    continuation_readback: FailurePredicateContext
+    category: str = field(init=False)
+    failure_seed: int = field(init=False)
+    snapshot_digest: str = field(init=False)
+    category_seed: int = field(init=False)
+    plan_transform_digest: str = field(init=False)
+    runtime_evidence_digest: str = field(init=False)
+    readback_state_digest: str = field(init=False)
+    continuation_digest: str = field(init=False)
+    predicate_passed: bool = field(init=False)
+    observed_category: str | None = field(init=False)
+    continuation_category: str | None = field(init=False)
+    category_passed: bool = field(init=False)
 
     def __post_init__(self) -> None:
         if self.schema_version != RECOVERY_REPLAY_EVIDENCE_SCHEMA_VERSION:
@@ -822,53 +826,28 @@ class FailureReplayRecord:
                 f"unsupported replay evidence schema version {self.schema_version}"
             )
         repeat_index = _strict_int(self.repeat_index, name="repeat index")
-        category = _category(self.category)
-        failure_seed = _strict_int(self.failure_seed, name="failure seed")
-        snapshot_digest = _digest(self.snapshot_digest, name="snapshot digest")
-        category_seed = _strict_int(self.category_seed, name="category seed")
-        plan_digest = _digest(
-            self.plan_transform_digest,
-            name="plan transform digest",
+        truth = _derive_failure_replay_truth(
+            self.plan,
+            self.readback,
+            self.continuation_readback,
         )
-        runtime_digest = _digest(
-            self.runtime_evidence_digest,
-            name="runtime evidence digest",
-        )
-        readback_digest = _digest(
-            self.readback_state_digest,
-            name="readback state digest",
-        )
-        continuation_digest = _digest(
-            self.continuation_digest,
-            name="continuation digest",
-        )
-        predicate_passed = _strict_bool(
-            self.predicate_passed,
-            name="predicate passed",
-        )
-        observed_category = _category(self.observed_category, optional=True)
-        category_passed = _strict_bool(
-            self.category_passed,
-            name="category passed",
-        )
-        assert category is not None
-        assert snapshot_digest is not None
-        assert plan_digest is not None
-        assert runtime_digest is not None
-        assert readback_digest is not None
-        assert continuation_digest is not None
         object.__setattr__(self, "repeat_index", repeat_index)
-        object.__setattr__(self, "category", category)
-        object.__setattr__(self, "failure_seed", failure_seed)
-        object.__setattr__(self, "snapshot_digest", snapshot_digest)
-        object.__setattr__(self, "category_seed", category_seed)
-        object.__setattr__(self, "plan_transform_digest", plan_digest)
-        object.__setattr__(self, "runtime_evidence_digest", runtime_digest)
-        object.__setattr__(self, "readback_state_digest", readback_digest)
-        object.__setattr__(self, "continuation_digest", continuation_digest)
-        object.__setattr__(self, "predicate_passed", predicate_passed)
-        object.__setattr__(self, "observed_category", observed_category)
-        object.__setattr__(self, "category_passed", category_passed)
+        object.__setattr__(self, "category", self.plan.category)
+        object.__setattr__(self, "failure_seed", self.plan.failure_seed)
+        object.__setattr__(self, "snapshot_digest", self.plan.snapshot_digest)
+        object.__setattr__(self, "category_seed", self.plan.category_seed)
+        object.__setattr__(
+            self,
+            "plan_transform_digest",
+            self.plan.transform_digest,
+        )
+        object.__setattr__(
+            self,
+            "runtime_evidence_digest",
+            self.plan.runtime_evidence_digest,
+        )
+        for name, value in truth.items():
+            object.__setattr__(self, name, value)
 
 
 @dataclass(frozen=True)
@@ -1194,30 +1173,47 @@ def _runtime_replays_are_effective(
     if len(repeat_indices) != len(records):
         return False
 
+    replay_truth: list[dict[str, object]] = []
+    for record in records:
+        try:
+            truth = _derive_failure_replay_truth(
+                record.plan,
+                record.readback,
+                record.continuation_readback,
+            )
+        except (RecoveryFailureError, recovery_state.RecoveryStateSchemaError):
+            return False
+        expected_cached = {
+            "category": record.plan.category,
+            "failure_seed": record.plan.failure_seed,
+            "snapshot_digest": record.plan.snapshot_digest,
+            "category_seed": record.plan.category_seed,
+            "plan_transform_digest": record.plan.transform_digest,
+            "runtime_evidence_digest": record.plan.runtime_evidence_digest,
+            **truth,
+        }
+        if any(
+            getattr(record, name) != value for name, value in expected_cached.items()
+        ):
+            return False
+        if (
+            record.plan.category != evidence.category
+            or record.plan.runtime_evidence_digest != evidence.evidence_digest
+            or truth["predicate_passed"] is not True
+            or truth["observed_category"] != evidence.category
+            or truth["continuation_category"] != evidence.category
+            or truth["category_passed"] is not True
+        ):
+            return False
+        replay_truth.append(truth)
+
     first = records[0]
-    stable_fields = (
-        "category",
-        "failure_seed",
-        "snapshot_digest",
-        "category_seed",
-        "plan_transform_digest",
-        "runtime_evidence_digest",
-        "readback_state_digest",
-        "continuation_digest",
-    )
-    if any(
-        getattr(record, name) != getattr(first, name)
-        for record in records[1:]
-        for name in stable_fields
-    ):
+    if any(record.plan != first.plan for record in records[1:]):
         return False
     if any(
-        record.category != evidence.category
-        or record.runtime_evidence_digest != evidence.evidence_digest
-        or not record.predicate_passed
-        or record.observed_category != evidence.category
-        or not record.category_passed
-        for record in records
+        truth["readback_state_digest"] != replay_truth[0]["readback_state_digest"]
+        or truth["continuation_digest"] != replay_truth[0]["continuation_digest"]
+        for truth in replay_truth[1:]
     ):
         return False
 
@@ -1229,18 +1225,14 @@ def _runtime_replays_are_effective(
         entities=_DESCRIPTOR_ENTITIES,
         confidence=1.0,
         reward_mask={term: True for term in _REWARD_TERMS},
-        failure_seed=first.failure_seed,
-        snapshot_digest=first.snapshot_digest,
+        failure_seed=first.plan.failure_seed,
+        snapshot_digest=first.plan.snapshot_digest,
     )
     try:
         expected_plan = build_failure_injection_plan(descriptor, evidence)
     except RecoveryFailureError:
         return False
-    return bool(
-        first.category_seed == expected_plan.category_seed
-        and first.plan_transform_digest == expected_plan.transform_digest
-        and first.runtime_evidence_digest == expected_plan.runtime_evidence_digest
-    )
+    return first.plan == expected_plan
 
 
 def _validate_privileged_telemetry(value: object) -> PrivilegedRecoveryTelemetry:
@@ -1400,6 +1392,58 @@ def classify_recoverable_failure(context: FailurePredicateContext) -> str | None
     return matched[0] if matched else None
 
 
+def _derive_failure_replay_truth(
+    plan: object,
+    readback: object,
+    continuation_readback: object,
+) -> dict[str, object]:
+    if not isinstance(plan, FailureInjectionPlan):
+        raise RecoveryFailureSchemaError("replay evidence plan is invalid")
+    contexts = {
+        "readback": readback,
+        "continuation": continuation_readback,
+    }
+    for name, context in contexts.items():
+        if not isinstance(context, FailurePredicateContext):
+            raise RecoveryFailureSchemaError(
+                f"replay physical {name} must be FailurePredicateContext"
+            )
+        attempt = context.attempt
+        if not isinstance(attempt, RecoveryAttemptEvidence):
+            raise RecoveryFailureSchemaError(
+                f"replay physical {name} attempt evidence is invalid"
+            )
+        if not (
+            attempt.failure_seed == plan.failure_seed
+            and attempt.injected_category == plan.category
+            and attempt.transform_digest == plan.transform_digest
+        ):
+            raise RecoveryFailureSchemaError(
+                f"replay physical {name} attempt metadata does not bind its plan"
+            )
+
+    observed: dict[str, str | None] = {}
+    for name, context in contexts.items():
+        try:
+            observed[name] = classify_recoverable_failure(context)
+        except RecoveryFailurePredicateConflictError:
+            observed[name] = None
+    readback_category = observed["readback"]
+    continuation_category = observed["continuation"]
+    predicate_passed = readback_category == plan.category
+    category_passed = bool(predicate_passed and continuation_category == plan.category)
+    return {
+        "readback_state_digest": recovery_state.recovery_value_digest(readback),
+        "continuation_digest": recovery_state.recovery_value_digest(
+            continuation_readback
+        ),
+        "predicate_passed": predicate_passed,
+        "observed_category": readback_category,
+        "continuation_category": continuation_category,
+        "category_passed": category_passed,
+    }
+
+
 def recovery_succeeded(telemetry: PrivilegedRecoveryTelemetry) -> bool:
     """Recovery completion is exactly the task's authoritative success terminal."""
 
@@ -1442,7 +1486,7 @@ def build_failure_replay_record(
     result: FailureInjectionResult,
     *,
     repeat_index: int,
-    continuation_state: object,
+    continuation_readback: FailurePredicateContext,
 ) -> FailureReplayRecord:
     """Bind one verified injection and its continued state into replay evidence."""
 
@@ -1450,26 +1494,23 @@ def build_failure_replay_record(
         raise RecoveryFailureSchemaError(
             "replay evidence requires a FailureInjectionResult"
         )
-    if not result.readback_passed:
+    if not _strict_bool(
+        result.readback_passed,
+        name="injection result readback passed",
+    ):
         raise RecoveryFailureSchemaError(
             "replay evidence requires a passing injection readback"
         )
-    observed = classify_recoverable_failure(result.readback)
-    category_passed = bool(observed == result.plan.category == result.category)
+    if result.category != result.plan.category:
+        raise RecoveryFailureSchemaError(
+            "injection result category does not match its plan"
+        )
     return FailureReplayRecord(
         schema_version=RECOVERY_REPLAY_EVIDENCE_SCHEMA_VERSION,
         repeat_index=repeat_index,
-        category=result.plan.category,
-        failure_seed=result.plan.failure_seed,
-        snapshot_digest=result.plan.snapshot_digest,
-        category_seed=result.plan.category_seed,
-        plan_transform_digest=result.plan.transform_digest,
-        runtime_evidence_digest=result.plan.runtime_evidence_digest,
-        readback_state_digest=recovery_state.recovery_value_digest(result.readback),
-        continuation_digest=recovery_state.recovery_value_digest(continuation_state),
-        predicate_passed=bool(result.readback_passed),
-        observed_category=observed,
-        category_passed=category_passed,
+        plan=result.plan,
+        readback=result.readback,
+        continuation_readback=continuation_readback,
     )
 
 
