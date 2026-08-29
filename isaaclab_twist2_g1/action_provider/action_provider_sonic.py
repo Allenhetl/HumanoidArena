@@ -47,6 +47,15 @@ import torch
 from scipy.spatial.transform import Rotation as R
 
 from action_provider.action_base import ActionProvider, ReplayComplete
+from action_provider.execution_identity import (
+    canonicalize_provider_semantic40,
+    parse_sonic_output_delay_steps,
+    resolve_binary_hand_states,
+    validate_hand_binary_threshold,
+    validate_provider_semantic40,
+    validate_sonic_body_action,
+    validate_source_control_step,
+)
 from action_provider.lerobot_vla_http_client import LeRobotVLAHttpClient
 from action_provider.recording_common import AsyncEpisodeRecorder
 from action_provider.vision_video import write_rgb_video_mp4
@@ -1567,7 +1576,12 @@ class SonicActionProvider(ActionProvider):
             max_root_delta_deg=self._vla_root_max_delta_deg,
         )
         self._vla_initial_robot_quat_wxyz: np.ndarray | None = None
-        self._lerobot_hand_binary_threshold = float(getattr(args_cli, "lerobot_gripper_threshold", 0.5))
+        self._lerobot_hand_binary_threshold = validate_hand_binary_threshold(
+            getattr(args_cli, "lerobot_gripper_threshold", 0.5),
+            require_provider_identity=(
+                self._use_lerobot_vla and not self._use_vla_latent64
+            ),
+        )
         self._lerobot_action_chunk_queue = deque()
         self._vla_root_debug = bool(
             getattr(
@@ -1699,12 +1713,7 @@ class SonicActionProvider(ActionProvider):
         self._latest_consumed_anchor_rot6d = np.array([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=np.float32)
         self._latest_canonical_action_raw = _default_vla_action()
         self._latest_canonical_action = _default_vla_action()
-        self._latest_executed_canonical_action_raw = _default_vla_action()
-        self._latest_executed_canonical_action = _default_vla_action()
-        self._latest_executed_source_frame_index = -1
-        self._latest_executed_source_timestamp_realtime = 0.0
-        self._latest_executed_source_timestamp_monotonic = 0.0
-        self._latest_executed_source_control_step = -1
+        self._invalidate_executed_action_telemetry()
         self._last_raw_frame_index = -1
         self._command_edge_this_frame = "none"
         # self._sonic_warmup_steps = int(getattr(args_cli, "sonic_warmup_steps", 50))  # warmup 已注释，仅用 history_ready
@@ -1715,10 +1724,10 @@ class SonicActionProvider(ActionProvider):
             "sonic_output_delay_steps",
             os.environ.get("SONIC_OUTPUT_DELAY_STEPS", "0"),
         )
-        try:
-            self._sonic_output_delay_steps = max(0, int(raw_output_delay_steps))
-        except Exception:
-            self._sonic_output_delay_steps = 0
+        self._sonic_output_delay_steps = parse_sonic_output_delay_steps(
+            raw_output_delay_steps,
+            require_zero=self._use_lerobot_vla,
+        )
         self._sonic_output_delay_queue: list[dict[str, Any]] = []
         self._sonic_last_executed_target = np.zeros((29,), dtype=np.float32)
         self._sonic_last_executed_bundle: dict[str, Any] = {
@@ -2390,21 +2399,29 @@ class SonicActionProvider(ActionProvider):
                 f"[SonicActionProvider] Expected VLA action chunk shape [N, {expected}] for "
                 f"SONIC_VLA_ACTION_FORMAT={self._vla_action_format}, got {action_chunk.shape}"
             )
+        if not np.isfinite(action_chunk).all():
+            raise ValueError("[SonicActionProvider] VLA action chunk contains non-finite values")
         return action_chunk
 
     def _pop_lerobot_action(self) -> np.ndarray:
         if not self._lerobot_action_chunk_queue:
             for action in self._fetch_lerobot_action_chunk():
                 self._lerobot_action_chunk_queue.append(np.asarray(action, dtype=np.float32).copy())
-        return np.asarray(self._lerobot_action_chunk_queue.popleft(), dtype=np.float32).reshape(-1)
+        action = np.asarray(self._lerobot_action_chunk_queue.popleft(), dtype=np.float32)
+        if action.ndim != 1:
+            raise ValueError(
+                f"[SonicActionProvider] queued VLA action must be 1-D, got {action.shape}"
+            )
+        if not np.isfinite(action).all():
+            raise ValueError("[SonicActionProvider] queued VLA action contains non-finite values")
+        return action.copy()
 
     def _pop_lerobot_semantic_action(self) -> np.ndarray:
         action = self._pop_lerobot_action()
-        if action.shape != (SONIC_VLA_ACTION_DIM,):
-            raise ValueError(
-                f"[SonicActionProvider] Expected canonical VLA action dim {SONIC_VLA_ACTION_DIM}, got {action.shape}"
-            )
-        return action
+        return validate_provider_semantic40(
+            action,
+            field="queued SONIC VLA semantic action",
+        )
 
     def _pop_lerobot_latent64_action(self) -> tuple[np.ndarray, np.ndarray | None]:
         action = self._pop_lerobot_action()
@@ -2426,8 +2443,11 @@ class SonicActionProvider(ActionProvider):
         return self._pop_lerobot_semantic_action()
 
     def _apply_lerobot_semantic_action(self, action: np.ndarray) -> None:
-        action = np.asarray(action, dtype=np.float32).reshape(-1)
-        self._latest_vla_action = action.copy()
+        action = validate_provider_semantic40(
+            action,
+            field="popped SONIC VLA semantic action",
+        )
+        self._latest_vla_action = None
         current_robot_quat_wxyz, current_robot_xy_world = self._get_current_robot_root_pose_for_vla()
         root_rot6d_action = action[3:9].astype(np.float32, copy=True)
         prev_root_rot6d_action = (
@@ -2523,11 +2543,24 @@ class SonicActionProvider(ActionProvider):
             "body_pos": payload["body_pos"].copy(),
             "body_quat_w": payload["body_quat_w"].copy(),
         }
-        self._apply_pose_data(data, "lerobot_vla_joint29_v3")
+        if not self._apply_pose_data(data, "lerobot_vla_joint29_v3"):
+            raise RuntimeError(
+                "[SonicActionProvider] popped VLA semantic action did not produce "
+                "a new provider control frame"
+            )
 
-        left_closed = bool(runtime_frame.hand_binary[0] >= self._lerobot_hand_binary_threshold)
-        right_closed = bool(runtime_frame.hand_binary[1] >= self._lerobot_hand_binary_threshold)
+        left_closed, right_closed = resolve_binary_hand_states(
+            runtime_frame.hand_binary,
+            threshold=self._lerobot_hand_binary_threshold,
+            field="SONIC VLA runtime hand_binary",
+        )
         self._apply_hand_binary_targets(left_closed=left_closed, right_closed=right_closed)
+        self._latest_vla_action = canonicalize_provider_semantic40(
+            action,
+            left_closed=self._left_hand_binary_state,
+            right_closed=self._right_hand_binary_state,
+            field="executed SONIC VLA semantic action",
+        )
 
     def _build_live_decoder_obs_with_latent(self, latent64: np.ndarray) -> np.ndarray:
         latent = np.asarray(latent64, dtype=np.float32).reshape(1, -1)
@@ -2602,9 +2635,14 @@ class SonicActionProvider(ActionProvider):
             else latent64.astype(np.float32, copy=True)
         )
         if hand_binary is not None:
+            left_closed, right_closed = resolve_binary_hand_states(
+                hand_binary,
+                threshold=self._lerobot_hand_binary_threshold,
+                field="SONIC latent64 hand_binary",
+            )
             self._apply_hand_binary_targets(
-                left_closed=bool(hand_binary[0] >= self._lerobot_hand_binary_threshold),
-                right_closed=bool(hand_binary[1] >= self._lerobot_hand_binary_threshold),
+                left_closed=left_closed,
+                right_closed=right_closed,
             )
         return self._decode_sonic_latent64_live(latent64)
 
@@ -3350,12 +3388,7 @@ class SonicActionProvider(ActionProvider):
         self._latest_consumed_anchor_rot6d[:] = np.array([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=np.float32)
         self._latest_canonical_action_raw = _default_vla_action()
         self._latest_canonical_action = _default_vla_action()
-        self._latest_executed_canonical_action_raw = _default_vla_action()
-        self._latest_executed_canonical_action = _default_vla_action()
-        self._latest_executed_source_frame_index = -1
-        self._latest_executed_source_timestamp_realtime = 0.0
-        self._latest_executed_source_timestamp_monotonic = 0.0
-        self._latest_executed_source_control_step = -1
+        self._invalidate_executed_action_telemetry()
         self._sonic_last_executed_bundle = {
             "body_action_29dof": self._sonic_default_np.copy(),
             "canonical_action_raw": _default_vla_action(),
@@ -3578,8 +3611,17 @@ class SonicActionProvider(ActionProvider):
             dtype=np.float32,
         )
 
-        if self._use_lerobot_vla and self._latest_vla_action is not None:
-            canonical_action_raw = np.asarray(self._latest_vla_action, dtype=np.float32).copy()
+        if (
+            self._use_lerobot_vla
+            and not self._use_vla_latent64
+            and self._latest_vla_action is not None
+        ):
+            canonical_action_raw = canonicalize_provider_semantic40(
+                self._latest_vla_action,
+                left_closed=self._left_hand_binary_state,
+                right_closed=self._right_hand_binary_state,
+                field="current SONIC VLA semantic action",
+            )
             canonical_action_aligned = canonical_action_raw.copy()
             return canonical_action_raw, canonical_action_aligned, controller_binary
 
@@ -3627,9 +3669,18 @@ class SonicActionProvider(ActionProvider):
 
     def _build_action_execution_bundle(self, target_sonic: np.ndarray) -> dict[str, Any]:
         return {
-            "body_action_29dof": np.asarray(target_sonic, dtype=np.float32).reshape(29).copy(),
-            "canonical_action_raw": self._latest_canonical_action_raw.astype(np.float32, copy=True),
-            "canonical_action_aligned": self._latest_canonical_action.astype(np.float32, copy=True),
+            "body_action_29dof": validate_sonic_body_action(
+                target_sonic,
+                field="SONIC body execution target",
+            ),
+            "canonical_action_raw": validate_provider_semantic40(
+                self._latest_canonical_action_raw,
+                field="raw canonical execution action",
+            ),
+            "canonical_action_aligned": validate_provider_semantic40(
+                self._latest_canonical_action,
+                field="aligned canonical execution action",
+            ),
             "source_frame_index": int(self._latest_frame_index),
             "source_timestamp_realtime": float(self._latest_timestamp_realtime),
             "source_timestamp_monotonic": float(self._latest_timestamp_monotonic),
@@ -5308,6 +5359,11 @@ class SonicActionProvider(ActionProvider):
             return target_sonic.astype(np.float32)
 
         except Exception as e:
+            if self._use_lerobot_vla:
+                raise RuntimeError(
+                    "SONIC inference failed after consuming a VLA action; "
+                    "execution telemetry remains invalid"
+                ) from e
             print(f"[SonicActionProvider] GEAR-SONIC inference error: {e}")
             import traceback
             traceback.print_exc()
@@ -5316,18 +5372,10 @@ class SonicActionProvider(ActionProvider):
 
     def _apply_sonic_output_delay(self, target_sonic: np.ndarray) -> dict[str, Any]:
         """Apply optional control-step output delay to SONIC 29DoF targets."""
-        target = np.asarray(target_sonic, dtype=np.float32).reshape(-1)
-        if target.shape != (29,):
-            bundle = self._build_action_execution_bundle(self._sonic_default_np)
-            self._sonic_last_executed_target = bundle["body_action_29dof"].astype(np.float32, copy=True)
-            self._sonic_last_executed_bundle = self._copy_action_bundle(bundle)
-            self._latest_executed_canonical_action_raw = bundle["canonical_action_raw"].astype(np.float32, copy=True)
-            self._latest_executed_canonical_action = bundle["canonical_action_aligned"].astype(np.float32, copy=True)
-            self._latest_executed_source_frame_index = int(bundle["source_frame_index"])
-            self._latest_executed_source_timestamp_realtime = float(bundle["source_timestamp_realtime"])
-            self._latest_executed_source_timestamp_monotonic = float(bundle["source_timestamp_monotonic"])
-            self._latest_executed_source_control_step = int(bundle["source_control_step"])
-            return bundle
+        target = validate_sonic_body_action(
+            target_sonic,
+            field="SONIC output-delay input",
+        )
         current_bundle = self._build_action_execution_bundle(target)
         if self._sonic_output_delay_steps <= 0:
             exec_bundle = current_bundle
@@ -5340,13 +5388,47 @@ class SonicActionProvider(ActionProvider):
 
         self._sonic_last_executed_target = exec_bundle["body_action_29dof"].astype(np.float32, copy=True)
         self._sonic_last_executed_bundle = self._copy_action_bundle(exec_bundle)
-        self._latest_executed_canonical_action_raw = exec_bundle["canonical_action_raw"].astype(np.float32, copy=True)
-        self._latest_executed_canonical_action = exec_bundle["canonical_action_aligned"].astype(np.float32, copy=True)
-        self._latest_executed_source_frame_index = int(exec_bundle["source_frame_index"])
-        self._latest_executed_source_timestamp_realtime = float(exec_bundle["source_timestamp_realtime"])
-        self._latest_executed_source_timestamp_monotonic = float(exec_bundle["source_timestamp_monotonic"])
-        self._latest_executed_source_control_step = int(exec_bundle["source_control_step"])
         return exec_bundle
+
+    def _invalidate_executed_action_telemetry(self) -> None:
+        self._latest_executed_canonical_action_raw = _default_vla_action()
+        self._latest_executed_canonical_action = _default_vla_action()
+        self._latest_executed_source_frame_index = -1
+        self._latest_executed_source_timestamp_realtime = 0.0
+        self._latest_executed_source_timestamp_monotonic = 0.0
+        self._latest_executed_source_control_step = -1
+
+    def _publish_executed_action_telemetry(self, bundle: dict[str, Any]) -> None:
+        """Atomically publish the provider-canonical action materialized this step."""
+        canonical_action_raw = canonicalize_provider_semantic40(
+            bundle["canonical_action_raw"],
+            left_closed=self._left_hand_binary_state,
+            right_closed=self._right_hand_binary_state,
+            field="executed raw canonical action",
+        )
+        canonical_action = canonicalize_provider_semantic40(
+            bundle["canonical_action_aligned"],
+            left_closed=self._left_hand_binary_state,
+            right_closed=self._right_hand_binary_state,
+            field="executed canonical action",
+        )
+        source_control_step = int(bundle["source_control_step"])
+        if self._use_lerobot_vla and not self._use_vla_latent64:
+            source_control_step = validate_source_control_step(
+                bundle["source_control_step"],
+                field="executed source control step",
+            )
+
+        self._latest_executed_canonical_action_raw = canonical_action_raw
+        self._latest_executed_canonical_action = canonical_action
+        self._latest_executed_source_frame_index = int(bundle["source_frame_index"])
+        self._latest_executed_source_timestamp_realtime = float(
+            bundle["source_timestamp_realtime"]
+        )
+        self._latest_executed_source_timestamp_monotonic = float(
+            bundle["source_timestamp_monotonic"]
+        )
+        self._latest_executed_source_control_step = source_control_step
 
 
     def get_action(self, env) -> Optional[torch.Tensor]:
@@ -5356,6 +5438,8 @@ class SonicActionProvider(ActionProvider):
                 self._frame_count = 0
                 print("\n[SONIC] Real get_action path enabled")
             self._frame_count += 1
+            if self._use_lerobot_vla:
+                self._invalidate_executed_action_telemetry()
             self._update_replay_reward_stats()
             self._latest_consumed_new_this_step = False
             self._command_edge_this_frame = "none"
@@ -5477,16 +5561,6 @@ class SonicActionProvider(ActionProvider):
                 if self._waiting_for_reset_complete:
                     return self._default_pos.clone().squeeze(0)
             self._latest_decoder_body_effort = body_effort_preview.copy()
-            if self._recording_enabled_for_current_mode() and self.recording_manager.is_recording:
-                self.recording_manager.add_frame(
-                    self._collect_recording_data(
-                        full_action=full_action,
-                        sonic_targets=sonic_targets,
-                        body_effort_target=body_effort_preview,
-                    )
-                )
-                if self._reset_complete_received:
-                    self._reset_complete_received = False
             if self._recording_enabled_for_current_mode():
                 self._update_recording_display_state()
 
@@ -5513,6 +5587,17 @@ class SonicActionProvider(ActionProvider):
                 env.sim.step(render=False)
                 env.scene.update(dt=env.physics_dt)
             t_sim1 = time.perf_counter()
+            self._publish_executed_action_telemetry(sonic_exec_bundle)
+            if self._recording_enabled_for_current_mode() and self.recording_manager.is_recording:
+                self.recording_manager.add_frame(
+                    self._collect_recording_data(
+                        full_action=full_action,
+                        sonic_targets=sonic_targets,
+                        body_effort_target=body_effort_preview,
+                    )
+                )
+                if self._reset_complete_received:
+                    self._reset_complete_received = False
             sim_ms = (t_sim1 - t_sim0) * 1000.0
             self._perf_sim_step_ms.append(sim_ms)
             if len(self._perf_sim_step_ms) > self._perf_buffer_size:
@@ -5661,7 +5746,7 @@ class SonicActionProvider(ActionProvider):
 
 
     def _apply_hand_targets(self, full_action: torch.Tensor):
-        if self._dex3_dds is not None:
+        if not self._use_lerobot_vla and self._dex3_dds is not None:
             try:
                 cmds = self._dex3_dds.get_hand_commands()
                 if cmds:
