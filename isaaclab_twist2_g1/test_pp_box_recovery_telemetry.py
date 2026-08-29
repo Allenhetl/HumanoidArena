@@ -11,7 +11,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-
 THIS_DIR = Path(__file__).resolve().parent
 MDP_DIR = (
     THIS_DIR
@@ -557,6 +556,7 @@ def _complete_runtime_env(telemetry):
     box_root_state[0, 10:13] = torch.tensor([0.4, 0.5, 0.6], dtype=torch.float64)
     box = SimpleNamespace(
         cfg=SimpleNamespace(prim_path="{ENV_REGEX_NS}/Box"),
+        root_physx_view=SimpleNamespace(prim_paths=["/World/envs/env_0/Box"]),
         data=SimpleNamespace(root_state_w=box_root_state),
     )
 
@@ -606,6 +606,11 @@ def _complete_runtime_env(telemetry):
             scene[sensor_binding.sensor_scene_key] = SimpleNamespace(
                 body_names=[sensor_binding.sensor_body_name],
                 num_bodies=1,
+                body_physx_view=SimpleNamespace(
+                    prim_paths=[
+                        f"/World/envs/env_0/Robot/{sensor_binding.sensor_body_name}"
+                    ]
+                ),
                 cfg=SimpleNamespace(
                     prim_path=(
                         f"{{ENV_REGEX_NS}}/Robot/{sensor_binding.sensor_body_name}"
@@ -631,6 +636,143 @@ def _complete_runtime_env(telemetry):
         episode_length_buf=torch.tensor([10]),
         max_episode_length=100,
         recovery_terminal_contexts=(_driver_terminal_context(telemetry),),
+    )
+
+
+def test_live_fall_candidate_producer_reuses_instantaneous_root_and_contact_truth(
+    telemetry,
+) -> None:
+    env = _complete_runtime_env(telemetry)
+    del env.recovery_terminal_contexts
+
+    assert telemetry.compute_live_fall_candidates(env) == (False,)
+
+    up_alignment = 0.4
+    root_x = math.sqrt((1.0 - up_alignment) / 2.0)
+    root_w = math.sqrt(1.0 - root_x * root_x)
+    env.scene["robot"].data.root_state_w[0, 3:7] = torch.tensor(
+        [root_w, root_x, 0.0, 0.0]
+    )
+    assert telemetry.compute_live_fall_candidates(env) == (False,)
+
+    pelvis_index = env.scene["robot"].data.body_names.index("pelvis")
+    env.scene["contact_forces"].data.net_forces_w[0, pelvis_index, 2] = 51.0
+    assert telemetry.compute_live_fall_candidates(env) == (True,)
+
+    env.scene["contact_forces"].data.net_forces_w = None
+    env.scene["robot"].data.root_state_w[0, 3:7] = torch.tensor([0.0, 1.0, 0.0, 0.0])
+    assert telemetry.compute_live_fall_candidates(env) == (True,)
+
+
+def test_runtime_contact_sensor_report_records_all_materialized_identities(
+    telemetry,
+) -> None:
+    env = _complete_runtime_env(telemetry)
+
+    reports = telemetry.validate_runtime_hand_contact_sensors(env)
+
+    assert len(reports) == 16
+    assert tuple(report.sensor_scene_key for report in reports) == tuple(
+        sensor.sensor_scene_key
+        for hand in telemetry.default_hand_contact_bindings().values()
+        for sensor in hand.sensors
+    )
+    palm = reports[0]
+    assert (
+        palm.schema_version
+        == telemetry.RUNTIME_CONTACT_SENSOR_REPORT_SCHEMA_VERSION
+        == 1
+    )
+    assert palm.side == "left"
+    assert palm.sensor_scene_key == "left_box_contact_palm"
+    assert (
+        palm.sensor_prim_path_expression == "{ENV_REGEX_NS}/Robot/left_hand_palm_link"
+    )
+    assert palm.resolved_sensor_prim_paths == (
+        "/World/envs/env_0/Robot/left_hand_palm_link",
+    )
+    assert palm.resolved_sensor_body_names == ("left_hand_palm_link",)
+    assert palm.filter_prim_path_expressions == ("{ENV_REGEX_NS}/Box",)
+    assert palm.filtered_asset_scene_key == "box"
+    assert palm.resolved_filter_prim_paths == ("/World/envs/env_0/Box",)
+    assert palm.resolved_filter_body_name == "Box"
+    assert palm.num_bodies == 1
+    assert palm.filter_count == 1
+    assert palm.force_matrix_shape == (1, 1, 1, 3)
+    assert palm.force_matrix_dtype == "torch.float64"
+    assert palm.force_matrix_device == "cpu"
+    assert palm.force_matrix_finite is True
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_key"),
+    [
+        (
+            lambda env: env.scene.pop("left_box_contact_middle_1"),
+            "left_box_contact_middle_1",
+        ),
+        (
+            lambda env: setattr(
+                env.scene["left_box_contact_index_0"].body_physx_view,
+                "prim_paths",
+                [
+                    "/World/envs/env_0/Robot/left_hand_index_0_link",
+                    "/World/envs/env_0/Robot/left_hand_index_0_link",
+                ],
+            ),
+            "left_box_contact_index_0",
+        ),
+        (
+            lambda env: setattr(
+                env.scene["right_box_contact_thumb_2"].body_physx_view,
+                "prim_paths",
+                ["/World/envs/env_0/Robot/right_hand_thumb_1_link"],
+            ),
+            "right_box_contact_thumb_2",
+        ),
+        (
+            lambda env: setattr(
+                env.scene["left_box_contact_palm"].data,
+                "force_matrix_w",
+                torch.full((1, 1, 1, 3), float("nan")),
+            ),
+            "left_box_contact_palm",
+        ),
+        (
+            lambda env: setattr(
+                env.scene["right_box_contact_index_1"].data,
+                "force_matrix_w",
+                torch.zeros((1, 1, 1, 3), dtype=torch.int64),
+            ),
+            "right_box_contact_index_1",
+        ),
+        (
+            lambda env: setattr(env, "device", "cuda:0"),
+            "left_box_contact_palm",
+        ),
+        (
+            lambda env: setattr(
+                env.scene["right_box_contact_middle_0"].data,
+                "force_matrix_w",
+                torch.zeros((1, 1, 1, 3), dtype=torch.float32),
+            ),
+            "right_box_contact_middle_0",
+        ),
+    ],
+)
+def test_runtime_contact_sensor_validator_fails_closed_on_identity_or_tensor_mismatch(
+    telemetry,
+    mutation,
+    expected_key: str,
+) -> None:
+    env = _complete_runtime_env(telemetry)
+    mutation(env)
+
+    with pytest.raises(telemetry.RecoveryTelemetryIncompleteError) as exc_info:
+        telemetry.validate_runtime_hand_contact_sensors(env)
+
+    assert (
+        f"runtime_contact_sensor:{expected_key}" in exc_info.value.missing_capabilities
     )
 
 

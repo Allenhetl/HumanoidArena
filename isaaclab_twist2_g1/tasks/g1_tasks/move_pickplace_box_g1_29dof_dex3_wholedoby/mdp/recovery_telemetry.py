@@ -8,14 +8,15 @@ manager while pure tests exercise the same predicates.
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass
 from typing import Any, Literal
 
 import torch
 
-
 RECOVERY_TELEMETRY_SCHEMA_VERSION = 1
+RUNTIME_CONTACT_SENSOR_REPORT_SCHEMA_VERSION = 1
 PP_BOX_TASK_IDENTITY = "Isaac-Move-PickPlace-Box-G129-Dex3-Wholedoby"
 
 DEFAULT_CONTACT_FORCE_THRESHOLD_N = 1.0
@@ -223,6 +224,28 @@ class HandContactBinding:
         expected = _default_hand_contact_binding(self.side)
         if self != expected:
             raise ValueError(f"{self.side} hand binding does not match the verified leaf catalog")
+
+
+@dataclass(frozen=True)
+class RuntimeContactSensorReport:
+    """Materialized one-body/one-filter sensor identity and tensor contract."""
+
+    schema_version: int
+    side: Literal["left", "right"]
+    sensor_scene_key: str
+    sensor_prim_path_expression: str
+    resolved_sensor_prim_paths: tuple[str, ...]
+    resolved_sensor_body_names: tuple[str, ...]
+    filter_prim_path_expressions: tuple[str, ...]
+    filtered_asset_scene_key: str
+    resolved_filter_prim_paths: tuple[str, ...]
+    resolved_filter_body_name: str
+    num_bodies: int
+    filter_count: int
+    force_matrix_shape: tuple[int, ...]
+    force_matrix_dtype: str
+    force_matrix_device: str
+    force_matrix_finite: bool
 
 
 def _default_hand_contact_binding(side: Literal["left", "right"]) -> HandContactBinding:
@@ -648,6 +671,78 @@ def _scene_get(scene: object, key: str) -> object | None:
         return getattr(scene, key, None)
 
 
+_MATERIALIZED_ENV_PATH = re.compile(
+    r"^(?P<namespace>/World/envs/env_[0-9]+)(?P<relative>/.*)$"
+)
+_ENV_PATH_EXPRESSION = re.compile(r"^/World/envs/env_(?:\.\*|[0-9]+)")
+
+
+def _canonical_env_relative_path(path: object) -> str:
+    value = str(path)
+    if value.startswith("{ENV_REGEX_NS}"):
+        return value[len("{ENV_REGEX_NS}") :]
+    return _ENV_PATH_EXPRESSION.sub("", value, count=1)
+
+
+def _materialized_env_paths(
+    raw_paths: object,
+    *,
+    expected_expression: str,
+    expected_leaf_name: str,
+    num_envs: int,
+    capability: str,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    if not isinstance(raw_paths, Sequence) or isinstance(
+        raw_paths, (str, bytes, bytearray)
+    ):
+        raise RecoveryTelemetryIncompleteError((capability,))
+    paths = tuple(str(path) for path in raw_paths)
+    if len(paths) != num_envs or len(set(paths)) != num_envs:
+        raise RecoveryTelemetryIncompleteError((capability,))
+
+    expected_relative = _canonical_env_relative_path(expected_expression)
+    namespaces = []
+    for path in paths:
+        match = _MATERIALIZED_ENV_PATH.fullmatch(path)
+        if (
+            match is None
+            or match.group("relative") != expected_relative
+            or path.rsplit("/", 1)[-1] != expected_leaf_name
+        ):
+            raise RecoveryTelemetryIncompleteError((capability,))
+        namespaces.append(match.group("namespace"))
+    if len(set(namespaces)) != num_envs:
+        raise RecoveryTelemetryIncompleteError((capability,))
+    return paths, tuple(namespaces)
+
+
+def _resolve_runtime_filter_asset(
+    scene: object,
+    *,
+    num_envs: int,
+) -> tuple[str, object, str, tuple[str, ...], tuple[str, ...]]:
+    candidates = tuple(
+        (scene_key, asset)
+        for scene_key in ("box", "Box")
+        if (asset := _scene_get(scene, scene_key)) is not None
+    )
+    if len(candidates) != 1:
+        raise RecoveryTelemetryIncompleteError(("runtime_contact_filter_asset",))
+    scene_key, asset = candidates[0]
+    prim_path = str(getattr(getattr(asset, "cfg", None), "prim_path", ""))
+    if not prim_path or prim_path.rsplit("/", 1)[-1] != "Box":
+        raise RecoveryTelemetryIncompleteError(("runtime_contact_filter_asset",))
+    view = getattr(asset, "root_physx_view", None)
+    paths, namespaces = _materialized_env_paths(
+        getattr(view, "prim_paths", None),
+        expected_expression=prim_path,
+        expected_leaf_name="Box",
+        num_envs=num_envs,
+        capability="runtime_contact_filter_asset",
+    )
+    return scene_key, asset, prim_path, paths, namespaces
+
+
 def _resolve_hand_contact_bindings(env: object) -> dict[str, HandContactBinding]:
     cfg = getattr(env, "cfg", None)
     raw = getattr(cfg, "recovery_contact_bindings", None)
@@ -675,6 +770,118 @@ def _resolve_hand_contact_bindings(env: object) -> dict[str, HandContactBinding]
     if missing:
         raise RecoveryTelemetryIncompleteError(missing)
     return bindings
+
+
+def validate_runtime_hand_contact_sensors(
+    env: object,
+) -> tuple[RuntimeContactSensorReport, ...]:
+    """Materialize and validate all 16 exact hand-to-Box contact sensors."""
+
+    bindings = _resolve_hand_contact_bindings(env)
+    num_envs = int(getattr(env, "num_envs", 0))
+    scene = getattr(env, "scene", None)
+    if num_envs <= 0 or scene is None:
+        raise RecoveryTelemetryIncompleteError(("scene",))
+    try:
+        expected_device = torch.device(env.device)  # type: ignore[attr-defined]
+    except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
+        raise RecoveryTelemetryIncompleteError(
+            ("runtime_contact_tensor_device",)
+        ) from exc
+
+    (
+        filtered_asset_scene_key,
+        _filtered_asset,
+        filtered_asset_prim_path,
+        resolved_filter_prim_paths,
+        filter_namespaces,
+    ) = _resolve_runtime_filter_asset(scene, num_envs=num_envs)
+
+    reports = []
+    first_dtype: torch.dtype | None = None
+    for side in ("left", "right"):
+        for binding in bindings[side].sensors:
+            capability = f"runtime_contact_sensor:{binding.sensor_scene_key}"
+            sensor = _scene_get(scene, binding.sensor_scene_key)
+            if sensor is None:
+                raise RecoveryTelemetryIncompleteError((capability,))
+            try:
+                # ContactSensor.data performs the lazy materialization/update.
+                force_matrix = getattr(sensor.data, "force_matrix_w", None)
+                body_names = tuple(str(name) for name in sensor.body_names)
+                num_bodies = int(sensor.num_bodies)
+                sensor_cfg = sensor.cfg
+                sensor_prim_path = str(sensor_cfg.prim_path)
+                filter_prim_paths = tuple(
+                    str(path) for path in sensor_cfg.filter_prim_paths_expr
+                )
+                filter_count = int(sensor.contact_physx_view.filter_count)
+                resolved_sensor_prim_paths, sensor_namespaces = _materialized_env_paths(
+                    sensor.body_physx_view.prim_paths,
+                    expected_expression=sensor_prim_path,
+                    expected_leaf_name=binding.sensor_body_name,
+                    num_envs=num_envs,
+                    capability=capability,
+                )
+            except RecoveryTelemetryIncompleteError:
+                raise
+            except Exception as exc:
+                raise RecoveryTelemetryIncompleteError((capability,)) from exc
+
+            valid_tensor = (
+                isinstance(force_matrix, torch.Tensor)
+                and force_matrix.shape == (num_envs, 1, 1, 3)
+                and force_matrix.is_floating_point()
+                and force_matrix.device == expected_device
+            )
+            if not valid_tensor:
+                raise RecoveryTelemetryIncompleteError((capability,))
+            assert isinstance(force_matrix, torch.Tensor)
+            finite = bool(torch.isfinite(force_matrix).all().item())
+            if not finite:
+                raise RecoveryTelemetryIncompleteError((capability,))
+            if first_dtype is None:
+                first_dtype = force_matrix.dtype
+            elif force_matrix.dtype != first_dtype:
+                raise RecoveryTelemetryIncompleteError((capability,))
+
+            if (
+                num_bodies != 1
+                or filter_count != 1
+                or body_names != (binding.sensor_body_name,)
+                or not sensor_prim_path
+                or len(filter_prim_paths) != 1
+                or sensor_namespaces != filter_namespaces
+                or _canonical_env_relative_path(sensor_prim_path)
+                != f"/Robot/{binding.sensor_body_name}"
+                or _canonical_env_relative_path(filter_prim_paths[0])
+                != _canonical_env_relative_path(filtered_asset_prim_path)
+                or binding.filtered_body_name
+                != filtered_asset_prim_path.rsplit("/", 1)[-1]
+            ):
+                raise RecoveryTelemetryIncompleteError((capability,))
+
+            reports.append(
+                RuntimeContactSensorReport(
+                    schema_version=RUNTIME_CONTACT_SENSOR_REPORT_SCHEMA_VERSION,
+                    side=side,
+                    sensor_scene_key=binding.sensor_scene_key,
+                    sensor_prim_path_expression=sensor_prim_path,
+                    resolved_sensor_prim_paths=resolved_sensor_prim_paths,
+                    resolved_sensor_body_names=body_names,
+                    filter_prim_path_expressions=filter_prim_paths,
+                    filtered_asset_scene_key=filtered_asset_scene_key,
+                    resolved_filter_prim_paths=resolved_filter_prim_paths,
+                    resolved_filter_body_name=binding.filtered_body_name,
+                    num_bodies=num_bodies,
+                    filter_count=filter_count,
+                    force_matrix_shape=tuple(force_matrix.shape),
+                    force_matrix_dtype=str(force_matrix.dtype),
+                    force_matrix_device=str(force_matrix.device),
+                    force_matrix_finite=finite,
+                )
+            )
+    return tuple(reports)
 
 
 def _resolve_terminal_contexts(
@@ -900,6 +1107,27 @@ def _critical_body_contact_by_env(
     ]
 
 
+def compute_live_fall_candidates(env: object) -> tuple[bool, ...]:
+    """Return instantaneous fall predicates without confirmation/streak state."""
+
+    num_envs = int(getattr(env, "num_envs", 0))
+    scene = getattr(env, "scene", None)
+    if num_envs <= 0 or scene is None:
+        raise RecoveryTelemetryIncompleteError(("scene",))
+    robot = _scene_get(scene, "robot")
+    if robot is None:
+        raise RecoveryTelemetryIncompleteError(("robot_state",))
+    root_quaternions = _root_quaternion_tensor(robot, num_envs=num_envs)
+    critical_contacts = _critical_body_contact_by_env(scene, robot, num_envs=num_envs)
+    return tuple(
+        classify_fall(
+            compute_root_up_alignment(root_quaternions[env_index]),
+            critical_body_contact=critical_contacts[env_index],
+        )
+        for env_index in range(num_envs)
+    )
+
+
 def extract_privileged_telemetry(
     env: object,
     *,
@@ -1023,7 +1251,9 @@ __all__ = [
     "PrivilegedObservationLeakError",
     "PrivilegedRecoveryTelemetry",
     "RECOVERY_TELEMETRY_SCHEMA_VERSION",
+    "RUNTIME_CONTACT_SENSOR_REPORT_SCHEMA_VERSION",
     "RecoveryTelemetryIncompleteError",
+    "RuntimeContactSensorReport",
     "SOFT_FALL_UP_ALIGNMENT",
     "aggregate_hand_contact_evidence",
     "assert_actor_observation_isolated",
@@ -1031,9 +1261,11 @@ __all__ = [
     "classify_bimanual_grasp",
     "classify_fall",
     "classify_terminal",
+    "compute_live_fall_candidates",
     "compute_root_up_alignment",
     "default_hand_contact_bindings",
     "extract_privileged_telemetry",
     "has_pairwise_bimanual_contact",
     "pairwise_contact_evidence",
+    "validate_runtime_hand_contact_sensors",
 ]
