@@ -20,6 +20,7 @@ from typing import Any, Protocol, runtime_checkable
 from . import recovery_state, rewards
 from .recovery_telemetry import (
     RECOVERY_TELEMETRY_SCHEMA_VERSION,
+    DriverTerminalContext,
     PrivilegedRecoveryTelemetry,
 )
 
@@ -28,7 +29,8 @@ RECOVERY_FAILURE_DESCRIPTOR_SCHEMA_VERSION = 1
 RECOVERY_ATTEMPT_SCHEMA_VERSION = 1
 RECOVERY_RUNTIME_CAPABILITY_SCHEMA_VERSION = 1
 RECOVERY_INJECTION_PLAN_SCHEMA_VERSION = 1
-RECOVERY_REPLAY_EVIDENCE_SCHEMA_VERSION = 1
+RECOVERY_RAW_RECEIPT_SCHEMA_VERSION = 1
+RECOVERY_CATALOG_QUALIFICATION_SCHEMA_VERSION = 1
 
 DECLARED_FAILURE_CATEGORIES = (
     "dropped",
@@ -44,6 +46,12 @@ _CATEGORY_INITIAL_STAGE = {
 }
 _DESCRIPTOR_ENTITIES = ("box", "shelf_target", "bimanual_ee")
 _REWARD_TERMS = ("distance", "grasp", "placement")
+_CONTINUATION_REWARD_TERMS = (
+    "articulation",
+    "distance",
+    "grasp",
+    "placement",
+)
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 BOX_HALF_EXTENTS_M = rewards.BOX_HALF_EXTENTS_M
 BOX_HALF_EXTENT_M = BOX_HALF_EXTENTS_M[0]
@@ -77,6 +85,16 @@ _KNOWN_RUNTIME_CAPABILITIES = frozenset(
     | frozenset().union(*_CATEGORY_RUNTIME_CAPABILITIES.values())
 )
 _SNAPSHOT_RESTORE_REQUIRED_CAPABILITIES = frozenset({"task_state", "wrapper_rng"})
+_QUALIFICATION_OPERATION_TRACE = (
+    "restore",
+    "write",
+    "settle",
+    "readback",
+    "primitive_step",
+    "readback",
+)
+_ISSUED_RECEIPT_DIGESTS: dict[object, str] = {}
+_ISSUED_QUALIFICATION_DIGESTS: dict[object, str] = {}
 
 
 class RecoveryFailureError(RuntimeError):
@@ -241,6 +259,27 @@ def _finite_tuple(value: object, *, length: int, name: str) -> tuple[float, ...]
     if not all(math.isfinite(item) for item in result):
         raise RecoveryFailureSchemaError(f"{name} must contain finite values")
     return result
+
+
+def _freeze_recovery_value(value: object) -> object:
+    """Clone nested runtime evidence while keeping tensor payloads digestible."""
+
+    def freeze(item: object) -> object:
+        if isinstance(item, Mapping):
+            return MappingProxyType(
+                {freeze(key): freeze(child) for key, child in item.items()}
+            )
+        if isinstance(item, list):
+            return tuple(freeze(child) for child in item)
+        if isinstance(item, tuple):
+            return tuple(freeze(child) for child in item)
+        if isinstance(item, set):
+            return frozenset(freeze(child) for child in item)
+        return recovery_state.clone_recovery_value(item)
+
+    frozen = freeze(value)
+    recovery_state.recovery_value_digest(frozen)
+    return frozen
 
 
 @dataclass(frozen=True)
@@ -459,32 +498,30 @@ def declared_failure_catalog() -> Mapping[str, RecoveryFailureCatalogEntry]:
 
 
 def effective_failure_catalog(
-    runtime_evidence: Mapping[str, object] | None = None,
+    qualifications: Mapping[str, object] | None = None,
 ) -> Mapping[str, RecoveryFailureCatalogEntry]:
-    """Return only runtime-proven entries; no evidence means no effective expert."""
+    """Return only entries proven by two factory-executed raw receipts."""
 
-    if runtime_evidence is None:
+    if qualifications is None:
         return {}
-    if not isinstance(runtime_evidence, Mapping):
-        raise RecoveryFailureSchemaError("runtime evidence catalog must be a mapping")
-    unknown = set(runtime_evidence) - set(DECLARED_FAILURE_CATEGORIES)
+    if not isinstance(qualifications, Mapping):
+        raise RecoveryFailureSchemaError("catalog qualifications must be a mapping")
+    unknown = set(qualifications) - set(DECLARED_FAILURE_CATEGORIES)
     if unknown:
         raise RecoveryFailureSchemaError(
-            "unknown runtime evidence categories: " + ", ".join(sorted(unknown))
+            "unknown catalog qualification categories: " + ", ".join(sorted(unknown))
         )
     effective: dict[str, RecoveryFailureCatalogEntry] = {}
-    for category, value in runtime_evidence.items():
-        if not isinstance(value, FailureRuntimeCapabilityEvidence):
+    for category, value in qualifications.items():
+        if not isinstance(value, FailureCatalogQualification):
             raise RecoveryFailureSchemaError(
-                f"runtime evidence for {category!r} has the wrong type"
+                f"catalog qualification for {category!r} has the wrong type"
             )
         if value.category != category:
             raise RecoveryFailureSchemaError(
-                f"runtime evidence key {category!r} does not match its category"
+                f"catalog qualification key {category!r} does not match its category"
             )
-        if not _missing_runtime_capabilities(value) and _runtime_replays_are_effective(
-            value
-        ):
+        if _qualification_is_effective(value):
             effective[category] = _DECLARED_CATALOG[category]
     return MappingProxyType(effective)
 
@@ -799,58 +836,6 @@ class VerifiedFailureAnchor:
 
 
 @dataclass(frozen=True)
-class FailureReplayRecord:
-    """One content-bound deterministic injection/readback/continuation replay."""
-
-    schema_version: int
-    repeat_index: int
-    plan: FailureInjectionPlan
-    readback: FailurePredicateContext
-    continuation_readback: FailurePredicateContext
-    category: str = field(init=False)
-    failure_seed: int = field(init=False)
-    snapshot_digest: str = field(init=False)
-    category_seed: int = field(init=False)
-    plan_transform_digest: str = field(init=False)
-    runtime_evidence_digest: str = field(init=False)
-    readback_state_digest: str = field(init=False)
-    continuation_digest: str = field(init=False)
-    predicate_passed: bool = field(init=False)
-    observed_category: str | None = field(init=False)
-    continuation_category: str | None = field(init=False)
-    category_passed: bool = field(init=False)
-
-    def __post_init__(self) -> None:
-        if self.schema_version != RECOVERY_REPLAY_EVIDENCE_SCHEMA_VERSION:
-            raise RecoveryFailureSchemaError(
-                f"unsupported replay evidence schema version {self.schema_version}"
-            )
-        repeat_index = _strict_int(self.repeat_index, name="repeat index")
-        truth = _derive_failure_replay_truth(
-            self.plan,
-            self.readback,
-            self.continuation_readback,
-        )
-        object.__setattr__(self, "repeat_index", repeat_index)
-        object.__setattr__(self, "category", self.plan.category)
-        object.__setattr__(self, "failure_seed", self.plan.failure_seed)
-        object.__setattr__(self, "snapshot_digest", self.plan.snapshot_digest)
-        object.__setattr__(self, "category_seed", self.plan.category_seed)
-        object.__setattr__(
-            self,
-            "plan_transform_digest",
-            self.plan.transform_digest,
-        )
-        object.__setattr__(
-            self,
-            "runtime_evidence_digest",
-            self.plan.runtime_evidence_digest,
-        )
-        for name, value in truth.items():
-            object.__setattr__(self, name, value)
-
-
-@dataclass(frozen=True)
 class FailureRuntimeCapabilityEvidence:
     """Immutable per-category runtime evidence controlling catalog activation."""
 
@@ -862,7 +847,6 @@ class FailureRuntimeCapabilityEvidence:
     target_shelf: LiveSupportGeometry
     ground_support: LiveSupportGeometry | None
     verified_anchor: VerifiedFailureAnchor | None
-    replay_records: tuple[FailureReplayRecord, ...] = ()
     evidence_digest: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -910,30 +894,35 @@ class FailureRuntimeCapabilityEvidence:
             VerifiedFailureAnchor,
         ):
             raise RecoveryFailureSchemaError("verified failure anchor is invalid")
-        if not isinstance(self.replay_records, (tuple, list)) or any(
-            not isinstance(record, FailureReplayRecord)
-            for record in self.replay_records
-        ):
-            raise RecoveryFailureSchemaError(
-                "runtime replay records must be FailureReplayRecord values"
-            )
-        replay_records = tuple(self.replay_records)
-        evidence_payload = (
-            "runtime-capability-evidence",
-            self.schema_version,
-            self.task_identity,
-            category,
-            tuple(sorted(capabilities)),
-            self.evidence_id,
-            self.target_shelf,
-            self.ground_support,
-            self.verified_anchor,
-        )
-        evidence_digest = recovery_state.recovery_value_digest(evidence_payload)
+        evidence_digest = _runtime_evidence_digest(self, category, capabilities)
         object.__setattr__(self, "category", category)
         object.__setattr__(self, "validated_capabilities", capabilities)
-        object.__setattr__(self, "replay_records", replay_records)
         object.__setattr__(self, "evidence_digest", evidence_digest)
+
+
+def _runtime_evidence_digest(
+    evidence: FailureRuntimeCapabilityEvidence,
+    category: str | None = None,
+    capabilities: frozenset[str] | None = None,
+) -> str:
+    normalized_category = evidence.category if category is None else category
+    normalized_capabilities = (
+        frozenset(evidence.validated_capabilities)
+        if capabilities is None
+        else capabilities
+    )
+    payload = (
+        "runtime-capability-evidence",
+        evidence.schema_version,
+        evidence.task_identity,
+        normalized_category,
+        tuple(sorted(normalized_capabilities)),
+        evidence.evidence_id,
+        evidence.target_shelf,
+        evidence.ground_support,
+        evidence.verified_anchor,
+    )
+    return recovery_state.recovery_value_digest(payload)
 
 
 @dataclass(frozen=True)
@@ -1002,6 +991,251 @@ class FailureInjectionPlan:
         object.__setattr__(self, "state_transform", frozen_transform)
         object.__setattr__(self, "anchor_digest", anchor_digest)
         object.__setattr__(self, "transform_digest", transform_digest)
+
+
+@dataclass(frozen=True)
+class FailureContinuationRaw:
+    """Full primitive-step continuation captured after one real injection."""
+
+    schema_version: int
+    env_index: int
+    runtime_identity_digest: str
+    fixed_action40: tuple[float, ...]
+    applied_action40: tuple[float, ...]
+    observation_before: Mapping[str, object]
+    observation_after: Mapping[str, object]
+    reward: float
+    reward_terms: Mapping[str, float]
+    terminated: bool
+    truncated: bool
+    terminal_context: DriverTerminalContext
+    task_state_before: Mapping[str, object]
+    task_state_after: Mapping[str, object]
+    rng_before: recovery_state.RecoveryRngState
+    rng_after: recovery_state.RecoveryRngState
+    contact16_before: tuple[Mapping[str, object], ...]
+    contact16_after: tuple[Mapping[str, object], ...]
+    live_fall_evidence_before: Mapping[str, object]
+    live_fall_evidence_after: Mapping[str, object]
+    continuation_readback: FailurePredicateContext
+    raw_digest: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        if self.schema_version != RECOVERY_RAW_RECEIPT_SCHEMA_VERSION:
+            raise RecoveryFailureSchemaError(
+                f"unsupported raw receipt schema version {self.schema_version}"
+            )
+        env_index = _strict_int(self.env_index, name="continuation env index")
+        runtime_digest = _digest(
+            self.runtime_identity_digest,
+            name="continuation runtime identity digest",
+        )
+        fixed_action = _finite_tuple(
+            self.fixed_action40,
+            length=40,
+            name="continuation fixed action40",
+        )
+        applied_action = _finite_tuple(
+            self.applied_action40,
+            length=40,
+            name="continuation applied action40",
+        )
+        observations: dict[str, object] = {}
+        for name in ("observation_before", "observation_after"):
+            value = getattr(self, name)
+            if not isinstance(value, Mapping) or not value:
+                raise RecoveryFailureSchemaError(
+                    f"continuation {name.replace('_', ' ')} must be a non-empty mapping"
+                )
+            observations[name] = _freeze_recovery_value(value)
+        if isinstance(self.reward, bool) or not isinstance(self.reward, (int, float)):
+            raise RecoveryFailureSchemaError("continuation reward must be finite")
+        reward = float(self.reward)
+        if not math.isfinite(reward):
+            raise RecoveryFailureSchemaError("continuation reward must be finite")
+        if not isinstance(self.reward_terms, Mapping) or set(self.reward_terms) != set(
+            _CONTINUATION_REWARD_TERMS
+        ):
+            raise RecoveryFailureSchemaError(
+                "continuation reward terms must contain exactly articulation, "
+                "distance, grasp, placement"
+            )
+        reward_terms: dict[str, float] = {}
+        for name in _CONTINUATION_REWARD_TERMS:
+            value = self.reward_terms[name]
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise RecoveryFailureSchemaError(
+                    f"continuation reward term {name!r} must be finite"
+                )
+            normalized = float(value)
+            if not math.isfinite(normalized):
+                raise RecoveryFailureSchemaError(
+                    f"continuation reward term {name!r} must be finite"
+                )
+            reward_terms[name] = normalized
+        terminated = _strict_bool(self.terminated, name="continuation terminated")
+        truncated = _strict_bool(self.truncated, name="continuation truncated")
+        if not isinstance(self.terminal_context, DriverTerminalContext):
+            raise RecoveryFailureSchemaError(
+                "continuation terminal context must be DriverTerminalContext"
+            )
+        try:
+            self.terminal_context.validate()
+        except (TypeError, ValueError) as exc:
+            raise RecoveryFailureSchemaError(
+                f"continuation terminal context is invalid: {exc}"
+            ) from exc
+        task_states: dict[str, object] = {}
+        for name in ("task_state_before", "task_state_after"):
+            value = getattr(self, name)
+            if not isinstance(value, Mapping) or not value:
+                raise RecoveryFailureSchemaError(
+                    f"continuation {name.replace('_', ' ')} must be a non-empty mapping"
+                )
+            task_states[name] = _freeze_recovery_value(value)
+        rng_states: dict[str, recovery_state.RecoveryRngState] = {}
+        for name in ("rng_before", "rng_after"):
+            value = getattr(self, name)
+            if not isinstance(value, recovery_state.RecoveryRngState):
+                raise RecoveryFailureSchemaError(
+                    f"continuation {name.replace('_', ' ')} is invalid"
+                )
+            rng_states[name] = _freeze_recovery_value(value)  # type: ignore[assignment]
+        contacts: dict[str, tuple[Mapping[str, object], ...]] = {}
+        for name in ("contact16_before", "contact16_after"):
+            value = getattr(self, name)
+            if not isinstance(value, (tuple, list)) or len(value) != 16:
+                raise RecoveryFailureSchemaError(
+                    f"continuation {name.replace('_', ' ')} must contain 16 rows"
+                )
+            indices: list[int] = []
+            frozen_rows: list[Mapping[str, object]] = []
+            for row_index, row in enumerate(value):
+                if not isinstance(row, Mapping) or not row:
+                    raise RecoveryFailureSchemaError(
+                        f"continuation {name} row {row_index} must be a non-empty mapping"
+                    )
+                if "sensor_index" not in row or "sensor_scene_key" not in row:
+                    raise RecoveryFailureSchemaError(
+                        f"continuation {name} row {row_index} lacks sensor identity"
+                    )
+                indices.append(
+                    _strict_int(
+                        row["sensor_index"],
+                        name=f"continuation {name} sensor index",
+                    )
+                )
+                scene_key = row["sensor_scene_key"]
+                if not isinstance(scene_key, str) or not scene_key:
+                    raise RecoveryFailureSchemaError(
+                        f"continuation {name} sensor scene key must be non-empty"
+                    )
+                frozen_rows.append(_freeze_recovery_value(row))  # type: ignore[arg-type]
+            if set(indices) != set(range(16)):
+                raise RecoveryFailureSchemaError(
+                    f"continuation {name.replace('_', ' ')} must cover sensor indices 0..15"
+                )
+            contacts[name] = tuple(frozen_rows)
+        fall_evidence: dict[str, object] = {}
+        for name in ("live_fall_evidence_before", "live_fall_evidence_after"):
+            value = getattr(self, name)
+            if not isinstance(value, Mapping) or not value:
+                raise RecoveryFailureSchemaError(
+                    f"continuation {name.replace('_', ' ')} must be a non-empty mapping"
+                )
+            fall_evidence[name] = _freeze_recovery_value(value)
+        if not isinstance(self.continuation_readback, FailurePredicateContext):
+            raise RecoveryFailureSchemaError(
+                "continuation readback must be FailurePredicateContext"
+            )
+        continuation_readback = _freeze_recovery_value(self.continuation_readback)
+        assert runtime_digest is not None
+        object.__setattr__(self, "env_index", env_index)
+        object.__setattr__(self, "runtime_identity_digest", runtime_digest)
+        object.__setattr__(self, "fixed_action40", fixed_action)
+        object.__setattr__(self, "applied_action40", applied_action)
+        for name, value in observations.items():
+            object.__setattr__(self, name, value)
+        object.__setattr__(self, "reward", reward)
+        object.__setattr__(self, "reward_terms", MappingProxyType(reward_terms))
+        object.__setattr__(self, "terminated", terminated)
+        object.__setattr__(self, "truncated", truncated)
+        for name, value in task_states.items():
+            object.__setattr__(self, name, value)
+        for name, value in rng_states.items():
+            object.__setattr__(self, name, value)
+        for name, value in contacts.items():
+            object.__setattr__(self, name, value)
+        for name, value in fall_evidence.items():
+            object.__setattr__(self, name, value)
+        object.__setattr__(self, "continuation_readback", continuation_readback)
+        object.__setattr__(self, "raw_digest", _continuation_raw_digest(self))
+
+
+def _continuation_raw_payload(value: FailureContinuationRaw) -> tuple[object, ...]:
+    return (
+        "failure-continuation-raw",
+        value.schema_version,
+        value.env_index,
+        value.runtime_identity_digest,
+        value.fixed_action40,
+        value.applied_action40,
+        value.observation_before,
+        value.observation_after,
+        value.reward,
+        value.reward_terms,
+        value.terminated,
+        value.truncated,
+        value.terminal_context,
+        value.task_state_before,
+        value.task_state_after,
+        value.rng_before,
+        value.rng_after,
+        value.contact16_before,
+        value.contact16_after,
+        value.live_fall_evidence_before,
+        value.live_fall_evidence_after,
+        value.continuation_readback,
+    )
+
+
+def _continuation_raw_digest(value: FailureContinuationRaw) -> str:
+    return recovery_state.recovery_value_digest(_continuation_raw_payload(value))
+
+
+@dataclass(frozen=True, init=False)
+class RawInjectorExecutionReceipt:
+    """Factory-issued canonical receipt for one injector plus primitive step."""
+
+    schema_version: int
+    repeat_index: int
+    task_identity: str
+    category: str
+    env_index: int
+    runtime_identity_digest: str
+    source_snapshot_digest: str
+    plan: FailureInjectionPlan
+    operation_trace: tuple[str, ...]
+    injection_readback: FailurePredicateContext
+    continuation: FailureContinuationRaw
+    injection_readback_digest: str
+    continuation_digest: str
+    execution_digest: str
+    receipt_digest: str
+    _issuance_token: object = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True, init=False)
+class FailureCatalogQualification:
+    """Factory-issued proof that exactly two real executions were identical."""
+
+    schema_version: int
+    task_identity: str
+    category: str
+    runtime_evidence: FailureRuntimeCapabilityEvidence
+    receipts: tuple[RawInjectorExecutionReceipt, RawInjectorExecutionReceipt]
+    qualification_digest: str
+    _issuance_token: object = field(repr=False, compare=False)
 
 
 def _missing_runtime_capabilities(
@@ -1163,78 +1397,6 @@ def build_failure_injection_plan(
     )
 
 
-def _runtime_replays_are_effective(
-    evidence: FailureRuntimeCapabilityEvidence,
-) -> bool:
-    records = evidence.replay_records
-    if len(records) < 2:
-        return False
-    repeat_indices = {record.repeat_index for record in records}
-    if len(repeat_indices) != len(records):
-        return False
-
-    replay_truth: list[dict[str, object]] = []
-    for record in records:
-        try:
-            truth = _derive_failure_replay_truth(
-                record.plan,
-                record.readback,
-                record.continuation_readback,
-            )
-        except (RecoveryFailureError, recovery_state.RecoveryStateSchemaError):
-            return False
-        expected_cached = {
-            "category": record.plan.category,
-            "failure_seed": record.plan.failure_seed,
-            "snapshot_digest": record.plan.snapshot_digest,
-            "category_seed": record.plan.category_seed,
-            "plan_transform_digest": record.plan.transform_digest,
-            "runtime_evidence_digest": record.plan.runtime_evidence_digest,
-            **truth,
-        }
-        if any(
-            getattr(record, name) != value for name, value in expected_cached.items()
-        ):
-            return False
-        if (
-            record.plan.category != evidence.category
-            or record.plan.runtime_evidence_digest != evidence.evidence_digest
-            or truth["predicate_passed"] is not True
-            or truth["observed_category"] != evidence.category
-            or truth["continuation_category"] != evidence.category
-            or truth["category_passed"] is not True
-        ):
-            return False
-        replay_truth.append(truth)
-
-    first = records[0]
-    if any(record.plan != first.plan for record in records[1:]):
-        return False
-    if any(
-        truth["readback_state_digest"] != replay_truth[0]["readback_state_digest"]
-        or truth["continuation_digest"] != replay_truth[0]["continuation_digest"]
-        for truth in replay_truth[1:]
-    ):
-        return False
-
-    descriptor = RecoveryFailureDescriptor(
-        schema_version=RECOVERY_FAILURE_DESCRIPTOR_SCHEMA_VERSION,
-        task_identity=PP_BOX_TASK_IDENTITY,
-        category=evidence.category,
-        stage=_CATEGORY_INITIAL_STAGE[evidence.category],
-        entities=_DESCRIPTOR_ENTITIES,
-        confidence=1.0,
-        reward_mask={term: True for term in _REWARD_TERMS},
-        failure_seed=first.plan.failure_seed,
-        snapshot_digest=first.plan.snapshot_digest,
-    )
-    try:
-        expected_plan = build_failure_injection_plan(descriptor, evidence)
-    except RecoveryFailureError:
-        return False
-    return first.plan == expected_plan
-
-
 def _validate_privileged_telemetry(value: object) -> PrivilegedRecoveryTelemetry:
     if not isinstance(value, PrivilegedRecoveryTelemetry):
         raise RecoveryFailureSchemaError(
@@ -1392,13 +1554,13 @@ def classify_recoverable_failure(context: FailurePredicateContext) -> str | None
     return matched[0] if matched else None
 
 
-def _derive_failure_replay_truth(
+def _derive_failure_execution_truth(
     plan: object,
     readback: object,
     continuation_readback: object,
 ) -> dict[str, object]:
     if not isinstance(plan, FailureInjectionPlan):
-        raise RecoveryFailureSchemaError("replay evidence plan is invalid")
+        raise RecoveryFailureSchemaError("execution receipt plan is invalid")
     contexts = {
         "readback": readback,
         "continuation": continuation_readback,
@@ -1406,12 +1568,12 @@ def _derive_failure_replay_truth(
     for name, context in contexts.items():
         if not isinstance(context, FailurePredicateContext):
             raise RecoveryFailureSchemaError(
-                f"replay physical {name} must be FailurePredicateContext"
+                f"execution physical {name} must be FailurePredicateContext"
             )
         attempt = context.attempt
         if not isinstance(attempt, RecoveryAttemptEvidence):
             raise RecoveryFailureSchemaError(
-                f"replay physical {name} attempt evidence is invalid"
+                f"execution physical {name} attempt evidence is invalid"
             )
         if not (
             attempt.failure_seed == plan.failure_seed
@@ -1419,7 +1581,7 @@ def _derive_failure_replay_truth(
             and attempt.transform_digest == plan.transform_digest
         ):
             raise RecoveryFailureSchemaError(
-                f"replay physical {name} attempt metadata does not bind its plan"
+                f"execution physical {name} attempt metadata does not bind its plan"
             )
 
     observed: dict[str, str | None] = {}
@@ -1442,6 +1604,310 @@ def _derive_failure_replay_truth(
         "continuation_category": continuation_category,
         "category_passed": category_passed,
     }
+
+
+def _clone_failure_continuation(
+    value: FailureContinuationRaw,
+) -> FailureContinuationRaw:
+    if not isinstance(value, FailureContinuationRaw):
+        raise RecoveryFailureSchemaError(
+            "primitive continuation runner must return FailureContinuationRaw"
+        )
+    init_values = {
+        item.name: getattr(value, item.name)
+        for item in fields(FailureContinuationRaw)
+        if item.init
+    }
+    return FailureContinuationRaw(**init_values)
+
+
+def _receipt_execution_payload(
+    *,
+    task_identity: str,
+    category: str,
+    env_index: int,
+    runtime_identity_digest: str,
+    source_snapshot_digest: str,
+    plan: FailureInjectionPlan,
+    operation_trace: tuple[str, ...],
+    injection_readback: FailurePredicateContext,
+    continuation: FailureContinuationRaw,
+) -> tuple[object, ...]:
+    return (
+        "raw-injector-execution",
+        RECOVERY_RAW_RECEIPT_SCHEMA_VERSION,
+        task_identity,
+        category,
+        env_index,
+        runtime_identity_digest,
+        source_snapshot_digest,
+        plan,
+        operation_trace,
+        injection_readback,
+        _continuation_raw_payload(continuation),
+    )
+
+
+def _canonical_receipt_payload(
+    receipt: RawInjectorExecutionReceipt,
+) -> tuple[object, ...]:
+    return (
+        "raw-injector-execution-receipt",
+        receipt.schema_version,
+        receipt.repeat_index,
+        *_receipt_execution_payload(
+            task_identity=receipt.task_identity,
+            category=receipt.category,
+            env_index=receipt.env_index,
+            runtime_identity_digest=receipt.runtime_identity_digest,
+            source_snapshot_digest=receipt.source_snapshot_digest,
+            plan=receipt.plan,
+            operation_trace=receipt.operation_trace,
+            injection_readback=receipt.injection_readback,
+            continuation=receipt.continuation,
+        ),
+    )
+
+
+def _issue_raw_injector_receipt(
+    result: FailureInjectionResult,
+    *,
+    repeat_index: int,
+    fixed_action40: tuple[float, ...],
+    continuation: FailureContinuationRaw,
+) -> RawInjectorExecutionReceipt:
+    if not isinstance(result, FailureInjectionResult):
+        raise RecoveryFailureSchemaError(
+            "raw receipt requires a FailureInjectionResult"
+        )
+    if result.readback_passed is not True or result.category != result.plan.category:
+        raise RecoveryFailureSchemaError(
+            "raw receipt requires a verified injection result"
+        )
+    repeat = _strict_int(repeat_index, name="receipt repeat index")
+    normalized_continuation = _clone_failure_continuation(continuation)
+    if normalized_continuation.fixed_action40 != fixed_action40:
+        raise RecoveryFailureSchemaError(
+            "continuation fixed action40 does not match the qualification action"
+        )
+    truth = _derive_failure_execution_truth(
+        result.plan,
+        result.readback,
+        normalized_continuation.continuation_readback,
+    )
+    if (
+        truth["predicate_passed"] is not True
+        or truth["observed_category"] != result.category
+        or truth["continuation_category"] != result.category
+        or truth["category_passed"] is not True
+        or normalized_continuation.terminated
+        or normalized_continuation.truncated
+    ):
+        raise RecoveryFailureVerificationError(
+            category=result.category,
+            failure_seed=result.plan.failure_seed,
+            observed_category=truth["continuation_category"],  # type: ignore[arg-type]
+            detail="fixed-action continuation did not preserve the injected failure",
+        )
+    injection_readback = _freeze_recovery_value(result.readback)
+    injection_digest = recovery_state.recovery_value_digest(injection_readback)
+    continuation_digest = _continuation_raw_digest(normalized_continuation)
+    execution_payload = _receipt_execution_payload(
+        task_identity=PP_BOX_TASK_IDENTITY,
+        category=result.category,
+        env_index=normalized_continuation.env_index,
+        runtime_identity_digest=normalized_continuation.runtime_identity_digest,
+        source_snapshot_digest=result.plan.snapshot_digest,
+        plan=result.plan,
+        operation_trace=_QUALIFICATION_OPERATION_TRACE,
+        injection_readback=injection_readback,  # type: ignore[arg-type]
+        continuation=normalized_continuation,
+    )
+    execution_digest = recovery_state.recovery_value_digest(execution_payload)
+    token = object()
+    receipt = object.__new__(RawInjectorExecutionReceipt)
+    values = {
+        "schema_version": RECOVERY_RAW_RECEIPT_SCHEMA_VERSION,
+        "repeat_index": repeat,
+        "task_identity": PP_BOX_TASK_IDENTITY,
+        "category": result.category,
+        "env_index": normalized_continuation.env_index,
+        "runtime_identity_digest": normalized_continuation.runtime_identity_digest,
+        "source_snapshot_digest": result.plan.snapshot_digest,
+        "plan": result.plan,
+        "operation_trace": _QUALIFICATION_OPERATION_TRACE,
+        "injection_readback": injection_readback,
+        "continuation": normalized_continuation,
+        "injection_readback_digest": injection_digest,
+        "continuation_digest": continuation_digest,
+        "execution_digest": execution_digest,
+        "_issuance_token": token,
+    }
+    for name, value in values.items():
+        object.__setattr__(receipt, name, value)
+    receipt_digest = recovery_state.recovery_value_digest(
+        _canonical_receipt_payload(receipt)
+    )
+    object.__setattr__(receipt, "receipt_digest", receipt_digest)
+    _ISSUED_RECEIPT_DIGESTS[token] = receipt_digest
+    return receipt
+
+
+def _issued_receipt_is_valid(receipt: object) -> bool:
+    if type(receipt) is not RawInjectorExecutionReceipt:
+        return False
+    try:
+        if (
+            receipt.schema_version != RECOVERY_RAW_RECEIPT_SCHEMA_VERSION
+            or receipt.task_identity != PP_BOX_TASK_IDENTITY
+            or receipt.operation_trace != _QUALIFICATION_OPERATION_TRACE
+            or receipt.category != receipt.plan.category
+            or receipt.env_index != receipt.continuation.env_index
+            or receipt.runtime_identity_digest
+            != receipt.continuation.runtime_identity_digest
+            or receipt.source_snapshot_digest != receipt.plan.snapshot_digest
+            or receipt.continuation.terminated
+            or receipt.continuation.truncated
+        ):
+            return False
+        _strict_int(receipt.repeat_index, name="receipt repeat index")
+        if not isinstance(receipt.plan, FailureInjectionPlan):
+            return False
+        if not isinstance(receipt.injection_readback, FailurePredicateContext):
+            return False
+        if not isinstance(receipt.continuation, FailureContinuationRaw):
+            return False
+        continuation_digest = _continuation_raw_digest(receipt.continuation)
+        injection_digest = recovery_state.recovery_value_digest(
+            receipt.injection_readback
+        )
+        truth = _derive_failure_execution_truth(
+            receipt.plan,
+            receipt.injection_readback,
+            receipt.continuation.continuation_readback,
+        )
+        if (
+            receipt.continuation.raw_digest != continuation_digest
+            or receipt.continuation_digest != continuation_digest
+            or receipt.injection_readback_digest != injection_digest
+            or truth["predicate_passed"] is not True
+            or truth["observed_category"] != receipt.category
+            or truth["continuation_category"] != receipt.category
+            or truth["category_passed"] is not True
+        ):
+            return False
+        execution_digest = recovery_state.recovery_value_digest(
+            _receipt_execution_payload(
+                task_identity=receipt.task_identity,
+                category=receipt.category,
+                env_index=receipt.env_index,
+                runtime_identity_digest=receipt.runtime_identity_digest,
+                source_snapshot_digest=receipt.source_snapshot_digest,
+                plan=receipt.plan,
+                operation_trace=receipt.operation_trace,
+                injection_readback=receipt.injection_readback,
+                continuation=receipt.continuation,
+            )
+        )
+        receipt_digest = recovery_state.recovery_value_digest(
+            _canonical_receipt_payload(receipt)
+        )
+        return bool(
+            receipt.execution_digest == execution_digest
+            and receipt.receipt_digest == receipt_digest
+            and _ISSUED_RECEIPT_DIGESTS.get(receipt._issuance_token)
+            == receipt_digest
+        )
+    except (
+        AttributeError,
+        TypeError,
+        ValueError,
+        RecoveryFailureError,
+        recovery_state.RecoveryStateSchemaError,
+    ):
+        return False
+
+
+def _qualification_payload(
+    qualification: FailureCatalogQualification,
+) -> tuple[object, ...]:
+    return (
+        "failure-catalog-qualification",
+        qualification.schema_version,
+        qualification.task_identity,
+        qualification.category,
+        qualification.runtime_evidence,
+        tuple(
+            _canonical_receipt_payload(receipt)
+            for receipt in qualification.receipts
+        ),
+    )
+
+
+def _qualification_is_effective(qualification: object) -> bool:
+    if type(qualification) is not FailureCatalogQualification:
+        return False
+    try:
+        evidence = qualification.runtime_evidence
+        receipts = qualification.receipts
+        if (
+            qualification.schema_version
+            != RECOVERY_CATALOG_QUALIFICATION_SCHEMA_VERSION
+            or qualification.task_identity != PP_BOX_TASK_IDENTITY
+            or not isinstance(evidence, FailureRuntimeCapabilityEvidence)
+            or qualification.category != evidence.category
+            or evidence.evidence_digest != _runtime_evidence_digest(evidence)
+            or _missing_runtime_capabilities(evidence)
+            or not isinstance(receipts, tuple)
+            or len(receipts) != 2
+            or tuple(receipt.repeat_index for receipt in receipts) != (0, 1)
+            or not all(_issued_receipt_is_valid(receipt) for receipt in receipts)
+        ):
+            return False
+        first, second = receipts
+        if (
+            first.category != qualification.category
+            or second.category != qualification.category
+            or first.plan != second.plan
+            or first.plan.runtime_evidence_digest != evidence.evidence_digest
+            or first.execution_digest != second.execution_digest
+            or first.env_index != second.env_index
+            or first.runtime_identity_digest != second.runtime_identity_digest
+            or first.continuation.fixed_action40
+            != second.continuation.fixed_action40
+        ):
+            return False
+        descriptor = RecoveryFailureDescriptor(
+            schema_version=RECOVERY_FAILURE_DESCRIPTOR_SCHEMA_VERSION,
+            task_identity=PP_BOX_TASK_IDENTITY,
+            category=qualification.category,
+            stage=_CATEGORY_INITIAL_STAGE[qualification.category],
+            entities=_DESCRIPTOR_ENTITIES,
+            confidence=1.0,
+            reward_mask={term: True for term in _REWARD_TERMS},
+            failure_seed=first.plan.failure_seed,
+            snapshot_digest=first.plan.snapshot_digest,
+        )
+        if first.plan != build_failure_injection_plan(descriptor, evidence):
+            return False
+        qualification_digest = recovery_state.recovery_value_digest(
+            _qualification_payload(qualification)
+        )
+        return bool(
+            qualification.qualification_digest == qualification_digest
+            and _ISSUED_QUALIFICATION_DIGESTS.get(
+                qualification._issuance_token
+            )
+            == qualification_digest
+        )
+    except (
+        AttributeError,
+        TypeError,
+        ValueError,
+        RecoveryFailureError,
+        recovery_state.RecoveryStateSchemaError,
+    ):
+        return False
 
 
 def recovery_succeeded(telemetry: PrivilegedRecoveryTelemetry) -> bool:
@@ -1474,44 +1940,23 @@ class RecoveryFailureReader(Protocol):
     ) -> FailurePredicateContext: ...
 
 
+@runtime_checkable
+class RecoveryFailureContinuationRunner(Protocol):
+    """Executes one fixed primitive action and returns the complete raw state."""
+
+    def run_failure_continuation(
+        self,
+        plan: FailureInjectionPlan,
+        fixed_action40: tuple[float, ...],
+    ) -> FailureContinuationRaw: ...
+
+
 @dataclass(frozen=True)
 class FailureInjectionResult:
     plan: FailureInjectionPlan
     category: str
     readback_passed: bool
     readback: FailurePredicateContext
-
-
-def build_failure_replay_record(
-    result: FailureInjectionResult,
-    *,
-    repeat_index: int,
-    continuation_readback: FailurePredicateContext,
-) -> FailureReplayRecord:
-    """Bind one verified injection and its continued state into replay evidence."""
-
-    if not isinstance(result, FailureInjectionResult):
-        raise RecoveryFailureSchemaError(
-            "replay evidence requires a FailureInjectionResult"
-        )
-    if not _strict_bool(
-        result.readback_passed,
-        name="injection result readback passed",
-    ):
-        raise RecoveryFailureSchemaError(
-            "replay evidence requires a passing injection readback"
-        )
-    if result.category != result.plan.category:
-        raise RecoveryFailureSchemaError(
-            "injection result category does not match its plan"
-        )
-    return FailureReplayRecord(
-        schema_version=RECOVERY_REPLAY_EVIDENCE_SCHEMA_VERSION,
-        repeat_index=repeat_index,
-        plan=result.plan,
-        readback=result.readback,
-        continuation_readback=continuation_readback,
-    )
 
 
 def inject_recovery_failure(
@@ -1597,6 +2042,89 @@ def inject_recovery_failure(
     )
 
 
+def qualify_failure_catalog_entry(
+    *,
+    env: object,
+    snapshot: object,
+    descriptor: RecoveryFailureDescriptor,
+    runtime_evidence: FailureRuntimeCapabilityEvidence,
+    writer: RecoveryFailureWriter,
+    settler: RecoveryFailureSettler,
+    reader: RecoveryFailureReader,
+    continuation_runner: RecoveryFailureContinuationRunner,
+    fixed_action40: Sequence[float],
+) -> FailureCatalogQualification:
+    """Issue a catalog proof from exactly two real injector/step executions."""
+
+    if not isinstance(continuation_runner, RecoveryFailureContinuationRunner):
+        category = getattr(descriptor, "category", "unknown")
+        raise RecoveryFailureCapabilityError(
+            str(category),
+            ("fixed_primitive_continuation",),
+        )
+    fixed_action = _finite_tuple(
+        fixed_action40,
+        length=40,
+        name="catalog qualification fixed action40",
+    )
+    receipts: list[RawInjectorExecutionReceipt] = []
+    for repeat_index in range(2):
+        result = inject_recovery_failure(
+            env,
+            snapshot,
+            descriptor,
+            runtime_evidence,
+            writer=writer,
+            settler=settler,
+            reader=reader,
+        )
+        continuation = continuation_runner.run_failure_continuation(
+            result.plan,
+            fixed_action,
+        )
+        receipts.append(
+            _issue_raw_injector_receipt(
+                result,
+                repeat_index=repeat_index,
+                fixed_action40=fixed_action,
+                continuation=continuation,
+            )
+        )
+    first, second = receipts
+    if first.execution_digest != second.execution_digest:
+        raise RecoveryFailureVerificationError(
+            category=descriptor.category,
+            failure_seed=descriptor.failure_seed,
+            observed_category=second.category,
+            detail="two canonical injector executions were not identical",
+        )
+    token = object()
+    qualification = object.__new__(FailureCatalogQualification)
+    values = {
+        "schema_version": RECOVERY_CATALOG_QUALIFICATION_SCHEMA_VERSION,
+        "task_identity": PP_BOX_TASK_IDENTITY,
+        "category": descriptor.category,
+        "runtime_evidence": runtime_evidence,
+        "receipts": (first, second),
+        "_issuance_token": token,
+    }
+    for name, value in values.items():
+        object.__setattr__(qualification, name, value)
+    qualification_digest = recovery_state.recovery_value_digest(
+        _qualification_payload(qualification)
+    )
+    object.__setattr__(qualification, "qualification_digest", qualification_digest)
+    _ISSUED_QUALIFICATION_DIGESTS[token] = qualification_digest
+    if not _qualification_is_effective(qualification):
+        raise RecoveryFailureVerificationError(
+            category=descriptor.category,
+            failure_seed=descriptor.failure_seed,
+            observed_category=None,
+            detail="factory-issued catalog qualification failed canonical validation",
+        )
+    return qualification
+
+
 __all__ = [
     "BOX_HALF_EXTENTS_M",
     "BOX_HALF_EXTENT_M",
@@ -1604,19 +2132,23 @@ __all__ = [
     "PLACEMENT_Z_TOLERANCE_M",
     "PP_BOX_TASK_IDENTITY",
     "RECOVERY_ATTEMPT_SCHEMA_VERSION",
+    "RECOVERY_CATALOG_QUALIFICATION_SCHEMA_VERSION",
     "RECOVERY_FAILURE_DESCRIPTOR_SCHEMA_VERSION",
     "RECOVERY_INJECTION_PLAN_SCHEMA_VERSION",
-    "RECOVERY_REPLAY_EVIDENCE_SCHEMA_VERSION",
+    "RECOVERY_RAW_RECEIPT_SCHEMA_VERSION",
     "RECOVERY_RUNTIME_CAPABILITY_SCHEMA_VERSION",
+    "FailureCatalogQualification",
+    "FailureContinuationRaw",
     "FailureInjectionPlan",
     "FailureInjectionResult",
     "FailurePredicateContext",
-    "FailureReplayRecord",
     "FailureRuntimeCapabilityEvidence",
     "LiveSupportGeometry",
+    "RawInjectorExecutionReceipt",
     "RecoveryAttemptEvidence",
     "RecoveryFailureCapabilityError",
     "RecoveryFailureCatalogEntry",
+    "RecoveryFailureContinuationRunner",
     "RecoveryFailureDescriptor",
     "RecoveryFailureError",
     "RecoveryFailurePredicateConflictError",
@@ -1631,13 +2163,13 @@ __all__ = [
     "RecoveryStageSpec",
     "VerifiedFailureAnchor",
     "build_failure_injection_plan",
-    "build_failure_replay_record",
     "classify_recoverable_failure",
     "declared_failure_catalog",
     "derive_category_seed",
     "effective_failure_catalog",
     "evaluate_failure_predicates",
     "inject_recovery_failure",
+    "qualify_failure_catalog_entry",
     "recovery_reward_bindings",
     "recovery_reward_component_scope",
     "recovery_stage_fsm",

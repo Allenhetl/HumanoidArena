@@ -5,7 +5,7 @@ import importlib.util
 import random
 import sys
 import types
-from dataclasses import fields, replace
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -230,7 +230,6 @@ def _runtime_evidence(
     *,
     capabilities: frozenset[str] | None = None,
     include_category_resource: bool = True,
-    replay_records: tuple[object, ...] = (),
 ):
     return failures.FailureRuntimeCapabilityEvidence(
         schema_version=failures.RECOVERY_RUNTIME_CAPABILITY_SCHEMA_VERSION,
@@ -253,7 +252,6 @@ def _runtime_evidence(
             if category in {"failed-grasp", "misaligned"} and include_category_resource
             else None
         ),
-        replay_records=replay_records,
     )
 
 
@@ -301,33 +299,6 @@ def _replay_context(failures, telemetry, plan):
         **telemetry_overrides,
         **context_overrides,
     )
-
-
-def _replay_record(
-    failures,
-    telemetry,
-    plan,
-    *,
-    repeat_index: int,
-    readback=None,
-    continuation_readback=None,
-    **overrides: object,
-):
-    values: dict[str, object] = {
-        "schema_version": failures.RECOVERY_REPLAY_EVIDENCE_SCHEMA_VERSION,
-        "repeat_index": repeat_index,
-        "plan": plan,
-        "readback": (
-            _replay_context(failures, telemetry, plan) if readback is None else readback
-        ),
-        "continuation_readback": (
-            _replay_context(failures, telemetry, plan)
-            if continuation_readback is None
-            else continuation_readback
-        ),
-    }
-    values.update(overrides)
-    return failures.FailureReplayRecord(**values)
 
 
 def _recovery_snapshot(state):
@@ -884,284 +855,13 @@ def test_anchor_categories_reuse_only_the_verified_anchor_transform(
     assert plan.state_transform == evidence.verified_anchor.state_transform
 
 
-def test_effective_catalog_requires_two_identical_bound_replays_per_category(
+def test_runtime_evidence_digest_is_content_derived(
     modules,
 ) -> None:
-    _state, telemetry, failures = modules
-    pre_injection = {
-        category: _runtime_evidence(failures, category)
-        for category in sorted(DECLARED_CATEGORIES)
-    }
-    assert failures.effective_failure_catalog(pre_injection) == {}
-
-    single_replay = {}
-    verified = {}
-    for category, evidence in pre_injection.items():
-        descriptor = failures.RecoveryFailureDescriptor.from_mapping(
-            _descriptor_payload(failures, category)
-        )
-        plan = failures.build_failure_injection_plan(descriptor, evidence)
-        first = _replay_record(failures, telemetry, plan, repeat_index=0)
-        second = _replay_record(failures, telemetry, plan, repeat_index=1)
-        single_replay[category] = replace(evidence, replay_records=(first,))
-        verified[category] = replace(
-            evidence,
-            replay_records=(first, second),
-        )
-
-    assert failures.effective_failure_catalog(single_replay) == {}
-    assert set(failures.effective_failure_catalog(verified)) == DECLARED_CATEGORIES
-
-
-def test_replay_constructor_derives_truth_and_rejects_digest_boolean_forgery(
-    modules,
-) -> None:
-    state, telemetry, failures = modules
-    category = "near-shelf-misplaced"
-    descriptor = failures.RecoveryFailureDescriptor.from_mapping(
-        _descriptor_payload(failures, category)
-    )
-    evidence = _runtime_evidence(failures, category)
-    plan = failures.build_failure_injection_plan(descriptor, evidence)
-    readback = _replay_context(failures, telemetry, plan)
-    continuation = _replay_context(failures, telemetry, plan)
-
-    record = failures.FailureReplayRecord(
-        schema_version=failures.RECOVERY_REPLAY_EVIDENCE_SCHEMA_VERSION,
-        repeat_index=0,
-        plan=plan,
-        readback=readback,
-        continuation_readback=continuation,
-    )
-
-    derived_names = {
-        "category",
-        "failure_seed",
-        "snapshot_digest",
-        "category_seed",
-        "plan_transform_digest",
-        "runtime_evidence_digest",
-        "readback_state_digest",
-        "continuation_digest",
-        "predicate_passed",
-        "observed_category",
-        "continuation_category",
-        "category_passed",
-    }
-    assert all(
-        not replay_field.init
-        for replay_field in fields(failures.FailureReplayRecord)
-        if replay_field.name in derived_names
-    )
-    assert record.readback_state_digest == state.recovery_value_digest(readback)
-    assert record.continuation_digest == state.recovery_value_digest(continuation)
-    assert record.observed_category == category
-    assert record.continuation_category == category
-    assert record.predicate_passed is True
-    assert record.category_passed is True
-
-    for caller_truth in (
-        {"snapshot_digest": "3" * 64},
-        {"plan_transform_digest": "4" * 64},
-        {"runtime_evidence_digest": "4" * 64},
-        {"readback_state_digest": "4" * 64},
-        {"continuation_digest": "5" * 64},
-        {"predicate_passed": True},
-        {"observed_category": category},
-        {"continuation_category": category},
-        {"category_passed": True},
-    ):
-        with pytest.raises(TypeError):
-            failures.FailureReplayRecord(
-                schema_version=failures.RECOVERY_REPLAY_EVIDENCE_SCHEMA_VERSION,
-                repeat_index=1,
-                plan=plan,
-                readback=readback,
-                continuation_readback=continuation,
-                **caller_truth,
-            )
-
-
-def test_effective_catalog_rechecks_physical_payload_after_frozen_record_tampering(
-    modules,
-) -> None:
-    _state, telemetry, failures = modules
-    category = "near-shelf-misplaced"
-    descriptor = failures.RecoveryFailureDescriptor.from_mapping(
-        _descriptor_payload(failures, category)
-    )
-    evidence = _runtime_evidence(failures, category)
-    plan = failures.build_failure_injection_plan(descriptor, evidence)
-    valid = _replay_record(failures, telemetry, plan, repeat_index=0)
-    invalid_context = replace(
-        _replay_context(failures, telemetry, plan),
-        telemetry=replace(
-            _replay_context(failures, telemetry, plan).telemetry,
-            xy_mismatch_m=0.3,
-        ),
-    )
-    forged = _replay_record(
-        failures,
-        telemetry,
-        plan,
-        repeat_index=1,
-        readback=invalid_context,
-        continuation_readback=invalid_context,
-    )
-    for record in (valid, forged):
-        object.__setattr__(record, "readback_state_digest", "4" * 64)
-        object.__setattr__(record, "continuation_digest", "5" * 64)
-        object.__setattr__(record, "predicate_passed", True)
-        object.__setattr__(record, "observed_category", category)
-        object.__setattr__(record, "continuation_category", category)
-        object.__setattr__(record, "category_passed", True)
-
-    assert (
-        failures.effective_failure_catalog(
-            {category: replace(evidence, replay_records=(valid, forged))}
-        )
-        == {}
-    )
-
-
-@pytest.mark.parametrize(
-    "payload_kind",
-    ["readback_unknown", "continuation_drift", "continuation_conflict"],
-)
-def test_replay_physical_payload_mutation_fails_closed(
-    modules,
-    payload_kind: str,
-) -> None:
-    _state, telemetry, failures = modules
-    category = "near-shelf-misplaced"
-    descriptor = failures.RecoveryFailureDescriptor.from_mapping(
-        _descriptor_payload(failures, category)
-    )
-    evidence = _runtime_evidence(failures, category)
-    plan = failures.build_failure_injection_plan(descriptor, evidence)
-    first = _replay_record(failures, telemetry, plan, repeat_index=0)
-    base = _replay_context(failures, telemetry, plan)
-    if payload_kind == "readback_unknown":
-        second = _replay_record(
-            failures,
-            telemetry,
-            plan,
-            repeat_index=1,
-            readback=replace(
-                base, telemetry=replace(base.telemetry, xy_mismatch_m=0.3)
-            ),
-        )
-    elif payload_kind == "continuation_drift":
-        second = _replay_record(
-            failures,
-            telemetry,
-            plan,
-            repeat_index=1,
-            continuation_readback=replace(
-                base,
-                telemetry=replace(base.telemetry, xy_mismatch_m=0.05),
-            ),
-        )
-    else:
-        second = _replay_record(
-            failures,
-            telemetry,
-            plan,
-            repeat_index=1,
-            continuation_readback=replace(base, ground_supported=True),
-        )
-
-    assert (
-        failures.effective_failure_catalog(
-            {category: replace(evidence, replay_records=(first, second))}
-        )
-        == {}
-    )
-
-
-@pytest.mark.parametrize("payload_name", ["readback", "continuation_readback"])
-@pytest.mark.parametrize(
-    ("attempt_field", "value"),
-    [
-        ("failure_seed", 18),
-        ("injected_category", "dropped"),
-        ("transform_digest", "6" * 64),
-    ],
-)
-def test_replay_attempt_metadata_must_bind_plan_for_both_physical_payloads(
-    modules,
-    payload_name: str,
-    attempt_field: str,
-    value: object,
-) -> None:
-    _state, telemetry, failures = modules
-    category = "near-shelf-misplaced"
-    descriptor = failures.RecoveryFailureDescriptor.from_mapping(
-        _descriptor_payload(failures, category)
-    )
-    evidence = _runtime_evidence(failures, category)
-    plan = failures.build_failure_injection_plan(descriptor, evidence)
-    context = _replay_context(failures, telemetry, plan)
-    mutated = replace(
-        context,
-        attempt=replace(context.attempt, **{attempt_field: value}),
-    )
-
-    with pytest.raises(failures.RecoveryFailureSchemaError, match="metadata"):
-        _replay_record(
-            failures,
-            telemetry,
-            plan,
-            repeat_index=0,
-            **{payload_name: mutated},
-        )
-
-
-def test_replay_record_schema_rejects_invalid_version_index_plan_and_context(
-    modules,
-) -> None:
-    _state, telemetry, failures = modules
-    descriptor = failures.RecoveryFailureDescriptor.from_mapping(
-        _descriptor_payload(failures, "near-shelf-misplaced")
-    )
-    evidence = _runtime_evidence(failures, "near-shelf-misplaced")
-    plan = failures.build_failure_injection_plan(descriptor, evidence)
-    context = _replay_context(failures, telemetry, plan)
-
-    for overrides, message in (
-        ({"schema_version": 999}, "schema version"),
-        ({"repeat_index": -1}, "non-negative"),
-        ({"plan": object()}, "plan"),
-        ({"readback": object()}, "physical readback"),
-        ({"continuation_readback": object()}, "physical continuation"),
-    ):
-        with pytest.raises(failures.RecoveryFailureSchemaError, match=message):
-            values = {
-                "schema_version": failures.RECOVERY_REPLAY_EVIDENCE_SCHEMA_VERSION,
-                "repeat_index": 0,
-                "plan": plan,
-                "readback": context,
-                "continuation_readback": context,
-            }
-            values.update(overrides)
-            failures.FailureReplayRecord(**values)
-
-
-def test_runtime_evidence_digest_is_content_derived_and_stale_replays_fail_closed(
-    modules,
-) -> None:
-    _state, telemetry, failures = modules
+    _state, _telemetry, failures = modules
     category = "misaligned"
     evidence = _runtime_evidence(failures, category)
     identical = _runtime_evidence(failures, category)
-    descriptor = failures.RecoveryFailureDescriptor.from_mapping(
-        _descriptor_payload(failures, category)
-    )
-    plan = failures.build_failure_injection_plan(descriptor, evidence)
-    records = (
-        _replay_record(failures, telemetry, plan, repeat_index=0),
-        _replay_record(failures, telemetry, plan, repeat_index=1),
-    )
 
     assert evidence.evidence_digest == identical.evidence_digest
 
@@ -1180,18 +880,13 @@ def test_runtime_evidence_digest_is_content_derived_and_stale_replays_fail_close
         evidence.validated_capabilities - {"verified_grasp_preserving_anchor"}
     )
     mutations = (
-        replace(evidence, target_shelf=shifted_shelf, replay_records=records),
-        replace(evidence, verified_anchor=shifted_anchor, replay_records=records),
-        replace(
-            evidence,
-            validated_capabilities=reduced_capabilities,
-            replay_records=records,
-        ),
+        replace(evidence, target_shelf=shifted_shelf),
+        replace(evidence, verified_anchor=shifted_anchor),
+        replace(evidence, validated_capabilities=reduced_capabilities),
     )
 
     for mutated in mutations:
         assert mutated.evidence_digest != evidence.evidence_digest
-        assert failures.effective_failure_catalog({category: mutated}) == {}
 
 
 class _RawSceneTrapEnv:
@@ -1220,6 +915,404 @@ class _InjectionHooks:
         self.read_count += 1
         self.events.append("readback")
         return self._readback(plan)
+
+
+class _QualificationContinuationRunner:
+    def __init__(
+        self,
+        modules,
+        events: list[str],
+        *,
+        drift_second_execution: bool = False,
+    ) -> None:
+        self.state, self.telemetry, self.failures = modules
+        self.events = events
+        self.step_count = 0
+        self.drift_second_execution = drift_second_execution
+
+    def run_failure_continuation(self, plan, fixed_action40):
+        self.step_count += 1
+        self.events.append("primitive_step")
+        continuation_readback = _replay_context(self.failures, self.telemetry, plan)
+        self.events.append("continuation_readback")
+
+        def rng_state(seed: int):
+            return self.state.RecoveryRngState(
+                python=random.Random(seed).getstate(),
+                numpy=np.random.RandomState(seed + 1).get_state(),
+                torch_cpu=torch.Generator().manual_seed(seed + 2).get_state(),
+                torch_cuda=None,
+                task_local=None,
+                wrapper=None,
+            )
+
+        def contacts(offset: float):
+            return tuple(
+                {
+                    "sensor_index": index,
+                    "sensor_scene_key": f"hand_box_contact_{index}",
+                    "force_matrix_w": torch.tensor(
+                        [[offset + float(index), 0.0, 1.0]], dtype=torch.float32
+                    ),
+                }
+                for index in range(16)
+            )
+
+        return self.failures.FailureContinuationRaw(
+            schema_version=self.failures.RECOVERY_RAW_RECEIPT_SCHEMA_VERSION,
+            env_index=0,
+            runtime_identity_digest="9" * 64,
+            fixed_action40=fixed_action40,
+            applied_action40=fixed_action40,
+            observation_before={
+                "policy": torch.arange(6, dtype=torch.float32).reshape(1, 6)
+            },
+            observation_after={
+                "policy": torch.arange(6, dtype=torch.float32).reshape(1, 6)
+                + 1.0
+                + float(self.drift_second_execution and self.step_count == 2)
+            },
+            reward=1.25,
+            reward_terms={
+                "distance": 0.1,
+                "grasp": 0.2,
+                "placement": 0.3,
+                "articulation": 0.0,
+            },
+            terminated=False,
+            truncated=False,
+            terminal_context=self.telemetry.DriverTerminalContext(
+                control_step_count=21,
+                max_control_steps=2000,
+                fall_streak=0,
+                fall_confirm_steps=5,
+                time_limit=False,
+                fall_confirmed=False,
+            ),
+            task_state_before={
+                "episode_length_buf": torch.tensor([20]),
+                "hand_state": torch.tensor([[0.0, 1.0]]),
+            },
+            task_state_after={
+                "episode_length_buf": torch.tensor([21]),
+                "hand_state": torch.tensor([[0.0, 1.0]]),
+            },
+            rng_before=rng_state(301),
+            rng_after=rng_state(302),
+            contact16_before=contacts(0.0),
+            contact16_after=contacts(0.5),
+            live_fall_evidence_before={"producer_step": 20, "fall": False},
+            live_fall_evidence_after={"producer_step": 21, "fall": False},
+            continuation_readback=continuation_readback,
+        )
+
+
+def _execute_qualification(
+    modules,
+    monkeypatch,
+    *,
+    category="near-shelf-misplaced",
+    drift_second_execution: bool = False,
+    events: list[str] | None = None,
+):
+    state, telemetry, failures = modules
+    snapshot = _recovery_snapshot(state)
+    descriptor = replace(
+        failures.RecoveryFailureDescriptor.from_mapping(
+            _descriptor_payload(failures, category)
+        ),
+        snapshot_digest=state.recovery_state_digest(snapshot),
+    )
+    evidence = _runtime_evidence(failures, category)
+    events = [] if events is None else events
+    monkeypatch.setattr(
+        failures.recovery_state,
+        "restore_recovery_state",
+        lambda env, restored_snapshot, **kwargs: events.append("restore"),
+    )
+
+    def readback(plan):
+        return _replay_context(failures, telemetry, plan)
+
+    hooks = _InjectionHooks(events, readback)
+    runner = _QualificationContinuationRunner(
+        modules,
+        events,
+        drift_second_execution=drift_second_execution,
+    )
+    fixed_action40 = tuple(float(index) / 100.0 for index in range(40))
+    qualification = failures.qualify_failure_catalog_entry(
+        env=_RawSceneTrapEnv(),
+        snapshot=snapshot,
+        descriptor=descriptor,
+        runtime_evidence=evidence,
+        writer=hooks,
+        settler=hooks,
+        reader=hooks,
+        continuation_runner=runner,
+        fixed_action40=fixed_action40,
+    )
+    return qualification, evidence, events, hooks, runner
+
+
+def test_effective_catalog_requires_factory_executed_canonical_receipts(
+    modules,
+    monkeypatch,
+) -> None:
+    _state, _telemetry, failures = modules
+    qualification, evidence, events, hooks, runner = _execute_qualification(
+        modules, monkeypatch
+    )
+
+    assert not hasattr(evidence, "replay_records")
+    assert len(qualification.receipts) == 2
+    assert tuple(receipt.repeat_index for receipt in qualification.receipts) == (0, 1)
+    assert events == [
+        "restore",
+        "write",
+        "settle",
+        "readback",
+        "primitive_step",
+        "continuation_readback",
+    ] * 2
+    assert (hooks.write_count, hooks.settle_count, hooks.read_count) == (2, 2, 2)
+    assert runner.step_count == 2
+    expected_trace = (
+        "restore",
+        "write",
+        "settle",
+        "readback",
+        "primitive_step",
+        "readback",
+    )
+    assert all(receipt.operation_trace == expected_trace for receipt in qualification.receipts)
+    assert all(len(receipt.continuation.fixed_action40) == 40 for receipt in qualification.receipts)
+    assert all(len(receipt.continuation.contact16_before) == 16 for receipt in qualification.receipts)
+    assert all(len(receipt.continuation.contact16_after) == 16 for receipt in qualification.receipts)
+    assert set(
+        failures.effective_failure_catalog(
+            {qualification.category: qualification}
+        )
+    ) == {qualification.category}
+    with pytest.raises(failures.RecoveryFailureSchemaError, match="qualification"):
+        failures.effective_failure_catalog({evidence.category: evidence})
+    with pytest.raises(TypeError):
+        failures.RawInjectorExecutionReceipt(
+            schema_version=failures.RECOVERY_RAW_RECEIPT_SCHEMA_VERSION,
+            repeat_index=0,
+            task_identity=failures.PP_BOX_TASK_IDENTITY,
+            env_index=0,
+            runtime_identity_digest="9" * 64,
+            source_snapshot_digest="a" * 64,
+            plan=qualification.receipts[0].plan,
+            injection_readback=qualification.receipts[0].injection_readback,
+            continuation=qualification.receipts[0].continuation,
+        )
+    with pytest.raises(TypeError):
+        failures.FailureCatalogQualification(
+            schema_version=failures.RECOVERY_CATALOG_QUALIFICATION_SCHEMA_VERSION,
+            task_identity=failures.PP_BOX_TASK_IDENTITY,
+            category=qualification.category,
+            runtime_evidence=evidence,
+            receipts=qualification.receipts,
+        )
+
+
+@pytest.mark.parametrize("category", sorted(DECLARED_CATEGORIES))
+def test_factory_qualification_activates_each_declared_category(
+    modules,
+    monkeypatch,
+    category: str,
+) -> None:
+    _state, _telemetry, failures = modules
+    qualification, _evidence, _events, _hooks, _runner = _execute_qualification(
+        modules,
+        monkeypatch,
+        category=category,
+    )
+
+    assert set(failures.effective_failure_catalog({category: qualification})) == {
+        category
+    }
+
+
+def test_factory_rejects_nonidentical_executions_only_after_both_real_runs(
+    modules,
+    monkeypatch,
+) -> None:
+    _state, _telemetry, failures = modules
+    events: list[str] = []
+
+    with pytest.raises(
+        failures.RecoveryFailureVerificationError,
+        match="not identical",
+    ):
+        _execute_qualification(
+            modules,
+            monkeypatch,
+            drift_second_execution=True,
+            events=events,
+        )
+
+    assert events == [
+        "restore",
+        "write",
+        "settle",
+        "readback",
+        "primitive_step",
+        "continuation_readback",
+    ] * 2
+
+
+@pytest.mark.parametrize(
+    "payload_name",
+    [
+        "fixed_action40",
+        "applied_action40",
+        "observation_before",
+        "observation_after",
+        "reward",
+        "reward_terms",
+        "terminated",
+        "truncated",
+        "terminal_context",
+        "task_state_before",
+        "task_state_after",
+        "rng_before",
+        "rng_after",
+        "contact16_before",
+        "contact16_after",
+        "live_fall_evidence_before",
+        "live_fall_evidence_after",
+        "continuation_readback",
+    ],
+)
+def test_effective_catalog_rejects_any_raw_continuation_mutation(
+    modules,
+    monkeypatch,
+    payload_name: str,
+) -> None:
+    state, telemetry, failures = modules
+    qualification, _evidence, _events, _hooks, _runner = _execute_qualification(
+        modules, monkeypatch
+    )
+    continuation = qualification.receipts[1].continuation
+    if payload_name in {"fixed_action40", "applied_action40"}:
+        value = list(getattr(continuation, payload_name))
+        value[20] += 0.01
+        mutated = tuple(value)
+    elif payload_name in {"observation_before", "observation_after"}:
+        mutated = {"policy": torch.full((1, 6), 99.0)}
+    elif payload_name == "reward":
+        mutated = 99.0
+    elif payload_name == "reward_terms":
+        mutated = {
+            "distance": 9.0,
+            "grasp": 0.2,
+            "placement": 0.3,
+            "articulation": 0.0,
+        }
+    elif payload_name in {"terminated", "truncated"}:
+        mutated = True
+    elif payload_name == "terminal_context":
+        mutated = telemetry.DriverTerminalContext(
+            control_step_count=22,
+            max_control_steps=2000,
+            fall_streak=0,
+            fall_confirm_steps=5,
+            time_limit=False,
+            fall_confirmed=False,
+        )
+    elif payload_name in {"task_state_before", "task_state_after"}:
+        mutated = {"episode_length_buf": torch.tensor([999]), "hand_state": torch.zeros(1, 2)}
+    elif payload_name in {"rng_before", "rng_after"}:
+        mutated = state.RecoveryRngState(
+            python=random.Random(999).getstate(),
+            numpy=np.random.RandomState(999).get_state(),
+            torch_cpu=torch.Generator().manual_seed(999).get_state(),
+            torch_cuda=None,
+            task_local=None,
+            wrapper=None,
+        )
+    elif payload_name in {"contact16_before", "contact16_after"}:
+        mutated_rows = list(getattr(continuation, payload_name))
+        mutated_rows[7] = {
+            "sensor_index": 7,
+            "sensor_scene_key": "hand_box_contact_7",
+            "force_matrix_w": torch.tensor([[999.0, 0.0, 0.0]]),
+        }
+        mutated = tuple(mutated_rows)
+    elif payload_name in {"live_fall_evidence_before", "live_fall_evidence_after"}:
+        mutated = {"producer_step": 999, "fall": False}
+    else:
+        base = _replay_context(
+            failures,
+            telemetry,
+            qualification.receipts[1].plan,
+        )
+        mutated = replace(base, telemetry=replace(base.telemetry, xy_mismatch_m=0.3))
+    object.__setattr__(continuation, payload_name, mutated)
+
+    assert (
+        failures.effective_failure_catalog(
+            {qualification.category: qualification}
+        )
+        == {}
+    )
+
+
+@pytest.mark.parametrize(
+    "payload_name",
+    [
+        "operation_trace",
+        "source_snapshot_digest",
+        "injection_readback",
+        "injection_readback_digest",
+        "continuation_digest",
+        "execution_digest",
+        "receipt_digest",
+    ],
+)
+def test_effective_catalog_rejects_receipt_or_cached_digest_forgery(
+    modules,
+    monkeypatch,
+    payload_name: str,
+) -> None:
+    _state, _telemetry, failures = modules
+    qualification, _evidence, _events, _hooks, _runner = _execute_qualification(
+        modules,
+        monkeypatch,
+    )
+    receipt = qualification.receipts[1]
+    if payload_name == "operation_trace":
+        mutated = ("restore", "write")
+    elif payload_name == "source_snapshot_digest":
+        mutated = "f" * 64
+    elif payload_name == "injection_readback":
+        base = receipt.injection_readback
+        mutated = replace(base, telemetry=replace(base.telemetry, xy_mismatch_m=0.3))
+    else:
+        mutated = "f" * 64
+    object.__setattr__(receipt, payload_name, mutated)
+
+    assert failures.effective_failure_catalog({qualification.category: qualification}) == {}
+
+
+@pytest.mark.parametrize("payload_name", ["qualification_digest", "evidence_digest"])
+def test_effective_catalog_rejects_qualification_or_evidence_digest_forgery(
+    modules,
+    monkeypatch,
+    payload_name: str,
+) -> None:
+    _state, _telemetry, failures = modules
+    qualification, evidence, _events, _hooks, _runner = _execute_qualification(
+        modules,
+        monkeypatch,
+    )
+    target = qualification if payload_name == "qualification_digest" else evidence
+    object.__setattr__(target, payload_name, "f" * 64)
+
+    assert failures.effective_failure_catalog({qualification.category: qualification}) == {}
 
 
 def test_snapshot_digest_mismatch_fails_before_restore_rng_or_hooks(
@@ -1323,29 +1416,6 @@ def test_injection_delegates_restore_before_explicit_write_settle_readback_witho
     assert result.readback_passed is True
     assert events == ["restore", "write", "settle", "readback"]
     assert (hooks.write_count, hooks.settle_count, hooks.read_count) == (1, 1, 1)
-
-    continuation = replace(result.readback)
-    replay = failures.build_failure_replay_record(
-        result,
-        repeat_index=0,
-        continuation_readback=continuation,
-    )
-    assert replay.category == result.category
-    assert replay.failure_seed == result.plan.failure_seed
-    assert replay.plan_transform_digest == result.plan.transform_digest
-    assert replay.readback_state_digest == state.recovery_value_digest(result.readback)
-    assert replay.continuation_digest == state.recovery_value_digest(continuation)
-    assert replay.predicate_passed is True
-    assert replay.observed_category == result.category
-    assert replay.continuation_category == result.category
-    assert replay.category_passed is True
-
-    with pytest.raises(failures.RecoveryFailureSchemaError, match="continuation"):
-        failures.build_failure_replay_record(
-            result,
-            repeat_index=1,
-            continuation_readback={"caller": "digest-only"},
-        )
 
 
 def test_failed_readback_raises_once_without_retry_or_seed_change(
