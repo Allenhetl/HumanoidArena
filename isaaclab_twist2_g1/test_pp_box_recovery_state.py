@@ -161,6 +161,14 @@ class _CacheEnv(_FakeEnv):
         self.restore_events.append(f"solver:{state['solver_epoch']}")
 
 
+class _BothCacheEnv(_CacheEnv):
+    def capture_contact_cache(self) -> dict[str, int]:
+        return {"contact_epoch": 6}
+
+    def restore_contact_cache(self, state: dict[str, int]) -> None:
+        self.restore_events.append(f"contact:{state['contact_epoch']}")
+
+
 class _CaptureOnlyTaskStateEnv(_FakeEnv):
     restore_recovery_task_state = None
 
@@ -578,6 +586,34 @@ def test_restore_rejects_missing_required_cache_payload_before_reset(recovery_st
 
     assert exc_info.value.missing_capabilities == ("physics_solver_cache",)
     assert env.restore_events == []
+
+
+@pytest.mark.parametrize(
+    "runtime_state",
+    [None, ["physics_solver_cache", "contact_cache"]],
+)
+def test_restore_rejects_non_mapping_runtime_cache_state_before_any_mutation(
+    recovery_state,
+    runtime_state: object,
+) -> None:
+    env = _BothCacheEnv()
+    snapshot = recovery_state.capture_recovery_state(
+        env,
+        required_capabilities={"physics_solver_cache", "contact_cache"},
+    )
+    incomplete = replace(snapshot, runtime_state=runtime_state)
+    env_before = _env_state(env)
+    rng_before = _global_rng_state()
+
+    with pytest.raises(recovery_state.RecoveryStateIncompleteError) as exc_info:
+        recovery_state.restore_recovery_state(env, incomplete)
+
+    assert exc_info.value.missing_capabilities == (
+        "contact_cache",
+        "physics_solver_cache",
+    )
+    _assert_env_state_equal(_env_state(env), env_before)
+    _assert_global_rng_state_equal(_global_rng_state(), rng_before)
 
 
 def test_capture_records_scene_task_counters_and_optional_task_state(recovery_state) -> None:

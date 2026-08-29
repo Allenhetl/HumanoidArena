@@ -588,9 +588,15 @@ def _missing_snapshot_payloads(snapshot: RecoveryStateSnapshot, env: Any) -> set
             snapshot.capabilities.task_state_schema,
         ):
             missing.add("task_state")
-    for name in _RUNTIME_CACHE_NAMES:
-        if snapshot.capabilities.available.get(name, False) and name not in snapshot.runtime_state:
-            missing.add(name)
+    advertised_caches = {
+        name
+        for name in _RUNTIME_CACHE_NAMES
+        if snapshot.capabilities.available.get(name, False)
+    }
+    if advertised_caches and not isinstance(snapshot.runtime_state, MappingABC):
+        missing.update(advertised_caches)
+    else:
+        missing.update(name for name in advertised_caches if name not in snapshot.runtime_state)
     return missing
 
 
