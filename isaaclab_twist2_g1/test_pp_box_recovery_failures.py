@@ -1019,6 +1019,26 @@ class _InjectionHooks:
         return self._readback(plan)
 
 
+class _StaticDigestAttestedSnapshotEndpoint:
+    def __init__(self, state, events: list[str], *, restore_attestation=None) -> None:
+        self.state = state
+        self.events = events
+        self.restore_attestation = restore_attestation
+        self.digest_calls = []
+        self.restore_calls = []
+
+    def recovery_failure_snapshot_digest(self, snapshot):
+        digest = self.state.recovery_state_digest(snapshot)
+        self.digest_calls.append(digest)
+        return digest
+
+    def restore_recovery_failure_snapshot(self, snapshot, *, snapshot_digest):
+        actual = self.state.recovery_state_digest(snapshot)
+        self.restore_calls.append((snapshot_digest, actual))
+        self.events.append("restore")
+        return actual if self.restore_attestation is None else self.restore_attestation
+
+
 class _QualificationContinuationRunner:
     def __init__(
         self,
@@ -1036,7 +1056,7 @@ class _QualificationContinuationRunner:
         self.skip_primitive_step = skip_primitive_step
         self.applied_action_offset = applied_action_offset
 
-    def execute_recovery_primitive_step(self, fixed_action40):
+    def execute_qualification_primitive_step(self, fixed_action40):
         self.step_count += 1
         self.events.append("primitive_step")
         applied_action40 = list(fixed_action40)
@@ -1123,7 +1143,7 @@ class _QualificationContinuationRunner:
 
 def _execute_qualification(
     modules,
-    monkeypatch,
+    _monkeypatch,
     *,
     category="near-shelf-misplaced",
     drift_second_execution: bool = False,
@@ -1149,11 +1169,7 @@ def _execute_qualification(
     )
     evidence = _runtime_evidence(failures, category)
     events = [] if events is None else events
-    monkeypatch.setattr(
-        failures.recovery_state,
-        "restore_recovery_state",
-        lambda env, restored_snapshot, **kwargs: events.append("restore"),
-    )
+    snapshot_endpoint = _StaticDigestAttestedSnapshotEndpoint(state, events)
 
     def readback(plan):
         return _replay_context(failures, telemetry, plan)
@@ -1166,17 +1182,19 @@ def _execute_qualification(
         skip_primitive_step=skip_primitive_step,
         applied_action_offset=applied_action_offset,
     )
+    runner.snapshot_endpoint = snapshot_endpoint
     fixed_action40 = tuple(float(index) / 100.0 for index in range(40))
     qualification = failures.qualify_failure_catalog_entry(
         env=_RawSceneTrapEnv(),
         snapshot=snapshot,
         descriptor=descriptor,
         runtime_evidence=evidence,
+        snapshot_endpoint=snapshot_endpoint,
         writer=hooks,
         settler=hooks,
         reader=hooks,
         continuation_runner=runner,
-        primitive_step_executor=runner,
+        qualification_step_executor=runner,
         fixed_action40=fixed_action40,
     )
     return qualification, evidence, events, hooks, runner
@@ -1214,6 +1232,19 @@ def test_qualification_rejects_applied_action_that_differs_from_fixed_action(
             monkeypatch,
             applied_action_offset=0.5,
         )
+
+
+def test_qualification_step_protocol_excludes_residual_only_executor(modules) -> None:
+    _state, _telemetry, failures = modules
+
+    class _ResidualOnly:
+        def execute_residual_primitive_step(self, base_action40, applied_action40):
+            return applied_action40
+
+    assert not isinstance(
+        _ResidualOnly(),
+        failures.RecoveryFailureQualificationStepExecutor,
+    )
 
 
 def test_qualification_binds_descriptor_confidence_and_reward_mask(
@@ -1267,6 +1298,7 @@ def test_effective_catalog_requires_factory_executed_canonical_receipts(
     qualification, evidence, events, hooks, runner = _execute_qualification(
         modules, monkeypatch
     )
+    endpoint = runner.snapshot_endpoint
 
     assert not hasattr(evidence, "replay_records")
     assert len(qualification.receipts) == 2
@@ -1281,6 +1313,11 @@ def test_effective_catalog_requires_factory_executed_canonical_receipts(
     ] * 2
     assert (hooks.write_count, hooks.settle_count, hooks.read_count) == (2, 2, 2)
     assert runner.step_count == 2
+    source_snapshot_digest = qualification.receipts[0].source_snapshot_digest
+    assert endpoint.digest_calls == [source_snapshot_digest] * 2
+    assert endpoint.restore_calls == [
+        (source_snapshot_digest, source_snapshot_digest)
+    ] * 2
     expected_trace = (
         "restore",
         "write",
@@ -1520,7 +1557,7 @@ def test_effective_catalog_rejects_qualification_or_evidence_digest_forgery(
 
 
 def test_snapshot_digest_mismatch_fails_before_restore_rng_or_hooks(
-    modules, monkeypatch
+    modules,
 ) -> None:
     state, _telemetry, failures = modules
     snapshot = _recovery_snapshot(state)
@@ -1531,11 +1568,7 @@ def test_snapshot_digest_mismatch_fails_before_restore_rng_or_hooks(
     )
     evidence = _runtime_evidence(failures, "near-shelf-misplaced")
     events: list[str] = []
-    monkeypatch.setattr(
-        failures.recovery_state,
-        "restore_recovery_state",
-        lambda env, restored_snapshot, **kwargs: events.append("restore"),
-    )
+    endpoint = _StaticDigestAttestedSnapshotEndpoint(state, events)
     hooks = _InjectionHooks(
         events,
         lambda plan: pytest.fail("readback must not run for a mismatched snapshot"),
@@ -1550,6 +1583,7 @@ def test_snapshot_digest_mismatch_fails_before_restore_rng_or_hooks(
             snapshot,
             descriptor,
             evidence,
+            snapshot_endpoint=endpoint,
             writer=hooks,
             settler=hooks,
             reader=hooks,
@@ -1567,9 +1601,89 @@ def test_snapshot_digest_mismatch_fails_before_restore_rng_or_hooks(
     assert torch.equal(torch.random.get_rng_state(), torch_rng_before)
 
 
+def test_injection_uses_digest_attested_snapshot_endpoint(modules, monkeypatch) -> None:
+    state, telemetry, failures = modules
+    snapshot = _recovery_snapshot(state)
+    snapshot_digest = state.recovery_state_digest(snapshot)
+    descriptor = replace(
+        failures.RecoveryFailureDescriptor.from_mapping(
+            _descriptor_payload(failures, "near-shelf-misplaced")
+        ),
+        snapshot_digest=snapshot_digest,
+    )
+    evidence = _runtime_evidence(failures, "near-shelf-misplaced")
+    events: list[str] = []
+    endpoint = _StaticDigestAttestedSnapshotEndpoint(state, events)
+    monkeypatch.setattr(
+        failures.recovery_state,
+        "restore_recovery_state",
+        lambda *args, **kwargs: pytest.fail("local HA restore must not be used"),
+    )
+    hooks = _InjectionHooks(
+        events,
+        lambda plan: _replay_context(failures, telemetry, plan),
+    )
+
+    result = failures.inject_recovery_failure(
+        _RawSceneTrapEnv(),
+        snapshot,
+        descriptor,
+        evidence,
+        snapshot_endpoint=endpoint,
+        writer=hooks,
+        settler=hooks,
+        reader=hooks,
+    )
+
+    assert result.readback_passed is True
+    assert endpoint.digest_calls == [snapshot_digest]
+    assert endpoint.restore_calls == [(snapshot_digest, snapshot_digest)]
+    assert events == ["restore", "write", "settle", "readback"]
+
+
+def test_restore_attestation_mismatch_stops_before_injection_or_step(modules) -> None:
+    state, _telemetry, failures = modules
+    snapshot = _recovery_snapshot(state)
+    snapshot_digest = state.recovery_state_digest(snapshot)
+    descriptor = replace(
+        failures.RecoveryFailureDescriptor.from_mapping(
+            _descriptor_payload(failures, "near-shelf-misplaced")
+        ),
+        snapshot_digest=snapshot_digest,
+    )
+    evidence = _runtime_evidence(failures, "near-shelf-misplaced")
+    events: list[str] = []
+    endpoint = _StaticDigestAttestedSnapshotEndpoint(
+        state,
+        events,
+        restore_attestation="f" * 64,
+    )
+    hooks = _InjectionHooks(
+        events,
+        lambda plan: pytest.fail("readback must not run after attestation mismatch"),
+    )
+
+    with pytest.raises(failures.RecoveryFailureSnapshotDigestError) as exc_info:
+        failures.inject_recovery_failure(
+            _RawSceneTrapEnv(),
+            snapshot,
+            descriptor,
+            evidence,
+            snapshot_endpoint=endpoint,
+            writer=hooks,
+            settler=hooks,
+            reader=hooks,
+        )
+
+    assert exc_info.value.expected_digest == snapshot_digest
+    assert exc_info.value.actual_digest == "f" * 64
+    assert endpoint.restore_calls == [(snapshot_digest, snapshot_digest)]
+    assert events == ["restore"]
+    assert (hooks.write_count, hooks.settle_count, hooks.read_count) == (0, 0, 0)
+
+
 def test_injection_delegates_restore_before_explicit_write_settle_readback_without_raw_mutation(
     modules,
-    monkeypatch,
 ) -> None:
     state, telemetry, failures = modules
     snapshot = _recovery_snapshot(state)
@@ -1581,11 +1695,7 @@ def test_injection_delegates_restore_before_explicit_write_settle_readback_witho
     )
     evidence = _runtime_evidence(failures, "near-shelf-misplaced")
     events: list[str] = []
-    monkeypatch.setattr(
-        failures.recovery_state,
-        "restore_recovery_state",
-        lambda env, snapshot, **kwargs: events.append("restore"),
-    )
+    endpoint = _StaticDigestAttestedSnapshotEndpoint(state, events)
 
     def readback(plan):
         return _predicate_context(
@@ -1611,6 +1721,7 @@ def test_injection_delegates_restore_before_explicit_write_settle_readback_witho
         snapshot,
         descriptor,
         evidence,
+        snapshot_endpoint=endpoint,
         writer=hooks,
         settler=hooks,
         reader=hooks,
@@ -1623,7 +1734,7 @@ def test_injection_delegates_restore_before_explicit_write_settle_readback_witho
 
 
 def test_failed_readback_raises_once_without_retry_or_seed_change(
-    modules, monkeypatch
+    modules,
 ) -> None:
     state, telemetry, failures = modules
     snapshot = _recovery_snapshot(state)
@@ -1635,11 +1746,7 @@ def test_failed_readback_raises_once_without_retry_or_seed_change(
     )
     evidence = _runtime_evidence(failures, "dropped")
     events: list[str] = []
-    monkeypatch.setattr(
-        failures.recovery_state,
-        "restore_recovery_state",
-        lambda env, snapshot, **kwargs: events.append("restore"),
-    )
+    endpoint = _StaticDigestAttestedSnapshotEndpoint(state, events)
 
     def readback(plan):
         return _predicate_context(
@@ -1665,6 +1772,7 @@ def test_failed_readback_raises_once_without_retry_or_seed_change(
             snapshot,
             descriptor,
             evidence,
+            snapshot_endpoint=endpoint,
             writer=hooks,
             settler=hooks,
             reader=hooks,

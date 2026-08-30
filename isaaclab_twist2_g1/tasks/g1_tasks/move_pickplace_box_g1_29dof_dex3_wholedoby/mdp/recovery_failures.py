@@ -12,10 +12,10 @@ import json
 import math
 import random
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, fields
 from types import MappingProxyType
-from typing import Any, Callable, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from . import recovery_state, rewards
 from .recovery_telemetry import (
@@ -85,7 +85,6 @@ _KNOWN_RUNTIME_CAPABILITIES = frozenset(
     _COMMON_RUNTIME_CAPABILITIES
     | frozenset().union(*_CATEGORY_RUNTIME_CAPABILITIES.values())
 )
-_SNAPSHOT_RESTORE_REQUIRED_CAPABILITIES = frozenset({"task_state", "wrapper_rng"})
 _QUALIFICATION_OPERATION_TRACE = (
     "restore",
     "write",
@@ -143,7 +142,7 @@ class RecoveryFailureVerificationError(RecoveryFailureError):
 
 
 class RecoveryFailureSnapshotDigestError(RecoveryFailureError):
-    """Raised before injection when a descriptor does not bind the actual snapshot."""
+    """Raised when descriptor, endpoint, or restore snapshot digests disagree."""
 
     def __init__(self, *, expected_digest: str, actual_digest: str) -> None:
         self.expected_digest = expected_digest
@@ -2102,6 +2101,23 @@ class RecoveryFailureWriter(Protocol):
 
 
 @runtime_checkable
+class RecoveryFailureSnapshotEndpoint(Protocol):
+    """Owns pure digest and transactional restore of a complete continuation."""
+
+    def recovery_failure_snapshot_digest(self, snapshot: object) -> str: ...
+
+    def restore_recovery_failure_snapshot(
+        self,
+        snapshot: object,
+        *,
+        snapshot_digest: str,
+    ) -> str:
+        """Preflight, restore transactionally, then return the recomputed digest."""
+
+        ...
+
+
+@runtime_checkable
 class RecoveryFailureSettler(Protocol):
     """Performs the runtime-validated deterministic settle procedure."""
 
@@ -2130,10 +2146,10 @@ class RecoveryFailureContinuationRunner(Protocol):
 
 
 @runtime_checkable
-class RecoveryFailurePrimitiveStepExecutor(Protocol):
-    """Executes the already-committed action through the production provider."""
+class RecoveryFailureQualificationStepExecutor(Protocol):
+    """Executes the committed Base row used only for catalog qualification."""
 
-    def execute_recovery_primitive_step(
+    def execute_qualification_primitive_step(
         self,
         fixed_action40: tuple[float, ...],
     ) -> Sequence[float]: ...
@@ -2153,6 +2169,7 @@ def inject_recovery_failure(
     descriptor: RecoveryFailureDescriptor,
     evidence: FailureRuntimeCapabilityEvidence,
     *,
+    snapshot_endpoint: RecoveryFailureSnapshotEndpoint,
     writer: RecoveryFailureWriter,
     settler: RecoveryFailureSettler,
     reader: RecoveryFailureReader,
@@ -2161,14 +2178,9 @@ def inject_recovery_failure(
 
     if not isinstance(descriptor, RecoveryFailureDescriptor):
         raise RecoveryFailureSchemaError("injection descriptor is invalid")
-    actual_snapshot_digest = recovery_state.recovery_state_digest(snapshot)
-    if descriptor.snapshot_digest != actual_snapshot_digest:
-        raise RecoveryFailureSnapshotDigestError(
-            expected_digest=descriptor.snapshot_digest,
-            actual_digest=actual_snapshot_digest,
-        )
-    plan = build_failure_injection_plan(descriptor, evidence)
     missing_hooks = []
+    if not isinstance(snapshot_endpoint, RecoveryFailureSnapshotEndpoint):
+        missing_hooks.append("digest_attested_snapshot_endpoint")
     if not isinstance(writer, RecoveryFailureWriter):
         missing_hooks.append("explicit_failure_writer")
     if not isinstance(settler, RecoveryFailureSettler):
@@ -2176,15 +2188,33 @@ def inject_recovery_failure(
     if not isinstance(reader, RecoveryFailureReader):
         missing_hooks.append("privileged_readback")
     if missing_hooks:
-        raise RecoveryFailureCapabilityError(plan.category, missing_hooks)
+        raise RecoveryFailureCapabilityError(descriptor.category, missing_hooks)
 
-    recovery_state.restore_recovery_state(
-        env,
-        snapshot,
-        snapshot_digest=actual_snapshot_digest,
-        required_capabilities=_SNAPSHOT_RESTORE_REQUIRED_CAPABILITIES,
-        task_identity=PP_BOX_TASK_IDENTITY,
+    actual_snapshot_digest = _digest(
+        snapshot_endpoint.recovery_failure_snapshot_digest(snapshot),
+        name="snapshot endpoint digest",
     )
+    assert actual_snapshot_digest is not None
+    if descriptor.snapshot_digest != actual_snapshot_digest:
+        raise RecoveryFailureSnapshotDigestError(
+            expected_digest=descriptor.snapshot_digest,
+            actual_digest=actual_snapshot_digest,
+        )
+    plan = build_failure_injection_plan(descriptor, evidence)
+
+    restore_attestation = _digest(
+        snapshot_endpoint.restore_recovery_failure_snapshot(
+            snapshot,
+            snapshot_digest=actual_snapshot_digest,
+        ),
+        name="snapshot restore attestation",
+    )
+    assert restore_attestation is not None
+    if restore_attestation != actual_snapshot_digest:
+        raise RecoveryFailureSnapshotDigestError(
+            expected_digest=actual_snapshot_digest,
+            actual_digest=restore_attestation,
+        )
     writer.write_recovery_failure(plan)
     settler.settle_recovery_failure(plan)
     readback = reader.read_recovery_failure(plan)
@@ -2236,11 +2266,12 @@ def qualify_failure_catalog_entry(
     snapshot: object,
     descriptor: RecoveryFailureDescriptor,
     runtime_evidence: FailureRuntimeCapabilityEvidence,
+    snapshot_endpoint: RecoveryFailureSnapshotEndpoint,
     writer: RecoveryFailureWriter,
     settler: RecoveryFailureSettler,
     reader: RecoveryFailureReader,
     continuation_runner: RecoveryFailureContinuationRunner,
-    primitive_step_executor: RecoveryFailurePrimitiveStepExecutor,
+    qualification_step_executor: RecoveryFailureQualificationStepExecutor,
     fixed_action40: Sequence[float],
 ) -> FailureCatalogQualification:
     """Issue a catalog proof from exactly two real injector/step executions."""
@@ -2250,8 +2281,8 @@ def qualify_failure_catalog_entry(
     if not isinstance(continuation_runner, RecoveryFailureContinuationRunner):
         missing_continuation_capabilities.append("continuation_capture")
     if not isinstance(
-        primitive_step_executor,
-        RecoveryFailurePrimitiveStepExecutor,
+        qualification_step_executor,
+        RecoveryFailureQualificationStepExecutor,
     ):
         missing_continuation_capabilities.append("production_primitive_step")
     if missing_continuation_capabilities:
@@ -2271,19 +2302,22 @@ def qualify_failure_catalog_entry(
             snapshot,
             descriptor,
             runtime_evidence,
+            snapshot_endpoint=snapshot_endpoint,
             writer=writer,
             settler=settler,
             reader=reader,
         )
         executed_actions: list[tuple[float, ...]] = []
 
-        def execute_primitive_step_once() -> tuple[float, ...]:
+        def execute_primitive_step_once(
+            executed_actions=executed_actions,
+        ) -> tuple[float, ...]:
             if executed_actions:
                 raise RecoveryFailureSchemaError(
                     "catalog qualification may execute exactly one primitive step per repeat"
                 )
             applied_action = _finite_tuple(
-                primitive_step_executor.execute_recovery_primitive_step(
+                qualification_step_executor.execute_qualification_primitive_step(
                     fixed_action
                 ),
                 length=40,
@@ -2384,11 +2418,12 @@ __all__ = [
     "RecoveryFailureDescriptor",
     "RecoveryFailureError",
     "RecoveryFailurePredicateConflictError",
-    "RecoveryFailurePrimitiveStepExecutor",
+    "RecoveryFailureQualificationStepExecutor",
     "RecoveryFailureReader",
     "RecoveryFailureSchemaError",
     "RecoveryFailureSettler",
     "RecoveryFailureSnapshotDigestError",
+    "RecoveryFailureSnapshotEndpoint",
     "RecoveryFailureVerificationError",
     "RecoveryFailureWriter",
     "RecoveryRewardBinding",
