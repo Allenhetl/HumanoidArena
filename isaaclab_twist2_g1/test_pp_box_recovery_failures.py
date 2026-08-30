@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.util
 import math
 import random
+import struct
 import sys
 import types
 from dataclasses import replace
@@ -1100,6 +1102,27 @@ def test_public_objects_cannot_activate_the_formal_catalog(modules) -> None:
     assert not hasattr(failures, "_RUNTIME_CONFORMANCE_QUALIFICATION_DIGESTS")
 
 
+def test_rebinding_internal_diagnostic_checker_cannot_activate_catalog(
+    modules,
+    monkeypatch,
+) -> None:
+    _state, _telemetry, failures = modules
+    category = "near-shelf-misplaced"
+    qualification, _evidence, _events, _hooks, _runner = _execute_qualification(
+        modules,
+        monkeypatch,
+        category=category,
+    )
+    monkeypatch.setattr(
+        failures,
+        "_qualification_is_effective",
+        lambda _value: True,
+        raising=False,
+    )
+
+    assert failures.effective_failure_catalog({category: qualification}) == {}
+
+
 class _RawSceneTrapEnv:
     @property
     def scene(self):
@@ -1198,27 +1221,79 @@ class _QualificationContinuationRunner:
             )
         self.events.append("continuation_readback")
 
-        def rng_state(seed: int):
-            return self.state.RecoveryRngState(
-                python=random.Random(seed).getstate(),
-                numpy=np.random.RandomState(seed + 1).get_state(),
-                torch_cpu=torch.Generator().manual_seed(seed + 2).get_state(),
+        injection_readback = self.injection_readbacks[-1]
+
+        def observation_streams(context, *, offset: float):
+            policy = {
+                "robot_joint_state": torch.arange(29, dtype=torch.float32).reshape(
+                    1, 29
+                )
+                + offset,
+                "robot_gipper_state": torch.arange(14, dtype=torch.float32).reshape(
+                    1, 14
+                )
+                + offset,
+                "camera_image": torch.full((1, 2, 2, 3), offset, dtype=torch.float32),
+            }
+            term_names = (
+                "robot_joint_state",
+                "robot_gipper_state",
+                "camera_image",
+            )
+            actor = {
+                "schema_version": 1,
+                "task_identity": self.failures.PP_BOX_TASK_IDENTITY,
+                "policy_term_names": term_names,
+                "policy": policy,
+                "payload_digest": self.failures._continuation_actor_payload_digest(
+                    self.failures.PP_BOX_TASK_IDENTITY,
+                    term_names,
+                    policy,
+                ),
+            }
+            critic = {
+                "schema_version": self.telemetry.RECOVERY_TELEMETRY_SCHEMA_VERSION,
+                "task_identity": self.failures.PP_BOX_TASK_IDENTITY,
+                "privileged": context.telemetry,
+                "payload_digest": self.failures._continuation_critic_payload_digest(
+                    self.failures.PP_BOX_TASK_IDENTITY,
+                    context.telemetry,
+                ),
+            }
+            return {"actor": actor, "critic": critic}
+
+        def snapshot_record(snapshot):
+            return {
+                "snapshot": snapshot,
+                "snapshot_digest": self.state.recovery_state_digest(snapshot),
+            }
+
+        def contacts(offset: float):
+            runtime_identity_digest = "9" * 64
+            return tuple(
+                self._contact_row(
+                    index=index,
+                    force_w=(offset + float(index), 0.0, 1.0),
+                    runtime_identity_digest=runtime_identity_digest,
+                )
+                for index in range(16)
+            )
+
+        before_snapshot = _recovery_snapshot(self.state)
+        after_snapshot = replace(
+            before_snapshot,
+            task_counters={"episode_length_buf": torch.tensor([21])},
+            rng_state=self.state.RecoveryRngState(
+                python=random.Random(401).getstate(),
+                numpy=np.random.RandomState(402).get_state(),
+                torch_cpu=torch.Generator().manual_seed(403).get_state(),
                 torch_cuda=None,
                 task_local=None,
                 wrapper=None,
-            )
-
-        def contacts(offset: float):
-            return tuple(
-                {
-                    "sensor_index": index,
-                    "sensor_scene_key": f"hand_box_contact_{index}",
-                    "force_matrix_w": torch.tensor(
-                        [[offset + float(index), 0.0, 1.0]], dtype=torch.float32
-                    ),
-                }
-                for index in range(16)
-            )
+            ),
+        )
+        before_fall = self._live_fall_record(control_step_count=20)
+        after_fall = self._live_fall_record(control_step_count=21)
 
         continuation = self.failures.FailureContinuationRaw(
             schema_version=self.failures.RECOVERY_RAW_RECEIPT_SCHEMA_VERSION,
@@ -1226,23 +1301,13 @@ class _QualificationContinuationRunner:
             runtime_identity_digest="9" * 64,
             fixed_action40=fixed_action40,
             applied_action40=applied_action40,
-            observation_before={
-                "actor": {"policy": torch.arange(6, dtype=torch.float32).reshape(1, 6)},
-                "critic": {
-                    "privileged": torch.arange(8, dtype=torch.float32).reshape(1, 8)
-                },
-            },
-            observation_after={
-                "actor": {
-                    "policy": torch.arange(6, dtype=torch.float32).reshape(1, 6)
-                    + 1.0
-                    + float(self.drift_second_execution and self.step_count == 2)
-                },
-                "critic": {
-                    "privileged": torch.arange(8, dtype=torch.float32).reshape(1, 8)
-                    + 1.0
-                },
-            },
+            observation_before=observation_streams(injection_readback, offset=0.0),
+            observation_after=observation_streams(
+                continuation_readback,
+                offset=(
+                    1.0 + float(self.drift_second_execution and self.step_count == 2)
+                ),
+            ),
             reward=1.25,
             reward_terms={
                 "distance": 0.1,
@@ -1261,20 +1326,14 @@ class _QualificationContinuationRunner:
                 time_limit=False,
                 fall_confirmed=False,
             ),
-            task_state_before={
-                "episode_length_buf": torch.tensor([20]),
-                "hand_state": torch.tensor([[0.0, 1.0]]),
-            },
-            task_state_after={
-                "episode_length_buf": torch.tensor([21]),
-                "hand_state": torch.tensor([[0.0, 1.0]]),
-            },
-            rng_before=rng_state(301),
-            rng_after=rng_state(302),
+            task_state_before=snapshot_record(before_snapshot),
+            task_state_after=snapshot_record(after_snapshot),
+            rng_before=before_snapshot.rng_state,
+            rng_after=after_snapshot.rng_state,
             contact16_before=contacts(0.0),
             contact16_after=contacts(0.5),
-            live_fall_evidence_before={"producer_step": 20, "fall": False},
-            live_fall_evidence_after={"producer_step": 21, "fall": False},
+            live_fall_evidence_before=before_fall,
+            live_fall_evidence_after=after_fall,
             continuation_readback=continuation_readback,
         )
         if (
@@ -1284,6 +1343,60 @@ class _QualificationContinuationRunner:
             return self.first_continuation
         self.first_continuation = continuation
         return continuation
+
+    def _contact_row(
+        self,
+        *,
+        index: int,
+        force_w: tuple[float, float, float],
+        runtime_identity_digest: str,
+    ) -> dict[str, object]:
+        prefix = "<" if sys.byteorder == "little" else ">"
+        raw_force_bytes = struct.pack(prefix + "fff", *force_w)
+        magnitude = math.sqrt(sum(component * component for component in force_w))
+        return {
+            "schema_version": 1,
+            "sensor_index": index,
+            "side": "left" if index < 8 else "right",
+            "sensor_scene_key": f"hand_box_contact_{index}",
+            "sensor_body_name": f"{'left' if index < 8 else 'right'}_hand_link_{index % 8}",
+            "filtered_body_name": "Box",
+            "force_shape": (1, 1, 1, 3),
+            "force_dtype": "torch.float32",
+            "force_byte_order": sys.byteorder,
+            "force_w": force_w,
+            "magnitude_n": magnitude,
+            "threshold_n": 1.0,
+            "in_contact": magnitude >= 1.0,
+            "runtime_identity_digest": runtime_identity_digest,
+            "sensor_identity_digest": hashlib.sha256(
+                f"sensor-{index}".encode()
+            ).hexdigest(),
+            "calibration_receipt_digest": hashlib.sha256(
+                f"calibration-{index}".encode()
+            ).hexdigest(),
+            "raw_force_bytes": raw_force_bytes,
+            "raw_force_sha256": hashlib.sha256(raw_force_bytes).hexdigest(),
+        }
+
+    def _live_fall_record(self, *, control_step_count: int) -> dict[str, object]:
+        record: dict[str, object] = {
+            "schema_version": 1,
+            "task_identity": self.failures.PP_BOX_TASK_IDENTITY,
+            "runtime_identity_digest": "9" * 64,
+            "detector_config_digest": "7" * 64,
+            "producer_evidence_digest": hashlib.sha256(
+                f"fall-{control_step_count}".encode()
+            ).hexdigest(),
+            "env_index": 0,
+            "control_step_count": control_step_count,
+            "root_quat_wxyz": (1.0, 0.0, 0.0, 0.0),
+            "root_up_alignment": 1.0,
+            "critical_body_contact": False,
+            "fall_candidate": False,
+        }
+        record["raw_digest"] = self.failures._continuation_live_fall_raw_digest(record)
+        return record
 
 
 def _execute_qualification(
@@ -1608,6 +1721,60 @@ def test_continuation_schema_requires_actor_critic_and_terminal_reason(
         match="terminal flags",
     ):
         replace(continuation, terminal_reason="fall")
+
+
+@pytest.mark.parametrize(
+    ("field_name", "incomplete_value", "message"),
+    [
+        (
+            "observation_before",
+            {
+                "actor": {"policy": torch.zeros(1, 6)},
+                "critic": {"privileged": torch.zeros(1, 8)},
+            },
+            "actor stream schema",
+        ),
+        (
+            "task_state_before",
+            {"episode_length_buf": torch.tensor([20])},
+            "digest-bound recovery snapshot",
+        ),
+        (
+            "contact16_before",
+            tuple(
+                {
+                    "sensor_index": index,
+                    "sensor_scene_key": f"hand_box_contact_{index}",
+                }
+                for index in range(16)
+            ),
+            "contact row schema",
+        ),
+        (
+            "live_fall_evidence_before",
+            {"producer_step": 20, "fall": False},
+            "live fall schema",
+        ),
+    ],
+)
+def test_continuation_rejects_semantically_incomplete_raw_payloads(
+    modules,
+    monkeypatch,
+    field_name: str,
+    incomplete_value: object,
+    message: str,
+) -> None:
+    _state, _telemetry, _failures = modules
+    diagnostic, _evidence, _events, _hooks, _runner = _execute_qualification(
+        modules,
+        monkeypatch,
+    )
+
+    with pytest.raises(_failures.RecoveryFailureSchemaError, match=message):
+        replace(
+            diagnostic.receipts[0].continuation,
+            **{field_name: incomplete_value},
+        )
 
 
 def test_factory_rejects_nonidentical_executions_only_after_both_real_runs(

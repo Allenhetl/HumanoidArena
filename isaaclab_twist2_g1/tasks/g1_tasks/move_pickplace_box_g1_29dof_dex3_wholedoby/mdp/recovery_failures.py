@@ -12,6 +12,8 @@ import json
 import math
 import random
 import re
+import struct
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, fields
 from types import MappingProxyType
@@ -54,6 +56,59 @@ _CONTINUATION_REWARD_TERMS = (
     "placement",
 )
 _CONTINUATION_OBSERVATION_STREAMS = frozenset({"actor", "critic"})
+_CONTINUATION_ACTOR_TERMS = (
+    "robot_joint_state",
+    "robot_gipper_state",
+    "camera_image",
+)
+_CONTINUATION_ACTOR_STREAM_KEYS = {
+    "schema_version",
+    "task_identity",
+    "policy_term_names",
+    "policy",
+    "payload_digest",
+}
+_CONTINUATION_CRITIC_STREAM_KEYS = {
+    "schema_version",
+    "task_identity",
+    "privileged",
+    "payload_digest",
+}
+_CONTINUATION_TASK_STATE_KEYS = {"snapshot", "snapshot_digest"}
+_CONTINUATION_CONTACT_KEYS = {
+    "schema_version",
+    "sensor_index",
+    "side",
+    "sensor_scene_key",
+    "sensor_body_name",
+    "filtered_body_name",
+    "force_shape",
+    "force_dtype",
+    "force_byte_order",
+    "force_w",
+    "magnitude_n",
+    "threshold_n",
+    "in_contact",
+    "runtime_identity_digest",
+    "sensor_identity_digest",
+    "calibration_receipt_digest",
+    "raw_force_bytes",
+    "raw_force_sha256",
+}
+_CONTINUATION_LIVE_FALL_KEYS = {
+    "schema_version",
+    "task_identity",
+    "runtime_identity_digest",
+    "detector_config_digest",
+    "producer_evidence_digest",
+    "env_index",
+    "control_step_count",
+    "root_quat_wxyz",
+    "root_up_alignment",
+    "critical_body_contact",
+    "fall_candidate",
+    "raw_digest",
+}
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 BOX_HALF_EXTENTS_M = rewards.BOX_HALF_EXTENTS_M
 BOX_HALF_EXTENT_M = BOX_HALF_EXTENTS_M[0]
@@ -693,32 +748,10 @@ def declared_failure_catalog() -> Mapping[str, RecoveryFailureCatalogEntry]:
 def effective_failure_catalog(
     qualifications: Mapping[str, object] | None = None,
 ) -> Mapping[str, RecoveryFailureCatalogEntry]:
-    """Return only entries backed by installed runtime conformance artifacts."""
+    """Fail closed until a separately reviewed live catalog artifact is installed."""
 
-    if qualifications is None:
-        return {}
-    if not isinstance(qualifications, Mapping):
-        return {}
-    unknown = set(qualifications) - set(DECLARED_FAILURE_CATEGORIES)
-    if unknown:
-        return {}
-    effective: dict[str, RecoveryFailureCatalogEntry] = {}
-    for category, value in qualifications.items():
-        if not isinstance(value, FailureCatalogQualification):
-            continue
-        if getattr(value, "category", None) != category:
-            continue
-        if _qualification_is_effective(value):
-            candidate = _DECLARED_CATALOG[category]
-            effective[category] = RecoveryFailureCatalogEntry(
-                category=candidate.category,
-                initial_stage=candidate.initial_stage,
-                reward_bindings=candidate.reward_bindings,
-                required_capabilities=candidate.required_capabilities,
-                declared=candidate.declared,
-                recoverable=True,
-            )
-    return MappingProxyType(effective)
+    del qualifications
+    return MappingProxyType({})
 
 
 @dataclass(frozen=True)
@@ -1211,6 +1244,292 @@ class FailureInjectionPlan:
         object.__setattr__(self, "transform_digest", transform_digest)
 
 
+def _continuation_actor_payload_digest(
+    task_identity: str,
+    term_names: tuple[str, ...],
+    policy: Mapping[str, object],
+) -> str:
+    return recovery_state.recovery_value_digest(
+        ("failure-continuation-actor-v1", task_identity, term_names, policy)
+    )
+
+
+def _continuation_critic_payload_digest(
+    task_identity: str,
+    privileged: PrivilegedRecoveryTelemetry,
+) -> str:
+    return recovery_state.recovery_value_digest(
+        ("failure-continuation-critic-v1", task_identity, privileged)
+    )
+
+
+def _validate_continuation_observation(
+    value: object,
+    *,
+    name: str,
+    env_index: int,
+) -> Mapping[str, object]:
+    if not isinstance(value, Mapping) or set(value) != set(
+        _CONTINUATION_OBSERVATION_STREAMS
+    ):
+        raise RecoveryFailureSchemaError(
+            f"continuation {name.replace('_', ' ')} must contain exactly actor and critic streams"
+        )
+    streams = _exact_mapping(
+        value,
+        required=set(_CONTINUATION_OBSERVATION_STREAMS),
+        name=f"continuation {name.replace('_', ' ')}",
+    )
+    actor = _exact_mapping(
+        streams["actor"],
+        required=_CONTINUATION_ACTOR_STREAM_KEYS,
+        name="continuation actor stream",
+    )
+    term_names = tuple(actor["policy_term_names"])
+    policy = actor["policy"]
+    if (
+        actor["schema_version"] != 1
+        or actor["task_identity"] != PP_BOX_TASK_IDENTITY
+        or term_names != _CONTINUATION_ACTOR_TERMS
+        or not isinstance(policy, Mapping)
+        or set(policy) != set(_CONTINUATION_ACTOR_TERMS)
+        or actor["payload_digest"]
+        != _continuation_actor_payload_digest(
+            PP_BOX_TASK_IDENTITY,
+            term_names,
+            policy,
+        )
+    ):
+        raise RecoveryFailureSchemaError(
+            f"continuation {name.replace('_', ' ')} actor stream schema is invalid"
+        )
+    critic = _exact_mapping(
+        streams["critic"],
+        required=_CONTINUATION_CRITIC_STREAM_KEYS,
+        name="continuation critic stream",
+    )
+    privileged = critic["privileged"]
+    if (
+        critic["schema_version"] != RECOVERY_TELEMETRY_SCHEMA_VERSION
+        or critic["task_identity"] != PP_BOX_TASK_IDENTITY
+        or not isinstance(privileged, PrivilegedRecoveryTelemetry)
+        or privileged.env_index != env_index
+        or critic["payload_digest"]
+        != _continuation_critic_payload_digest(
+            PP_BOX_TASK_IDENTITY,
+            privileged,
+        )
+    ):
+        raise RecoveryFailureSchemaError(
+            f"continuation {name.replace('_', ' ')} critic stream schema is invalid"
+        )
+    return _freeze_recovery_value(streams)  # type: ignore[return-value]
+
+
+def _validate_continuation_task_state(
+    value: object,
+    *,
+    name: str,
+) -> Mapping[str, object]:
+    if not isinstance(value, Mapping) or set(value) != _CONTINUATION_TASK_STATE_KEYS:
+        raise RecoveryFailureSchemaError(
+            f"continuation {name.replace('_', ' ')} must contain a "
+            "digest-bound recovery snapshot"
+        )
+    record = _exact_mapping(
+        value,
+        required=_CONTINUATION_TASK_STATE_KEYS,
+        name=f"continuation {name.replace('_', ' ')}",
+    )
+    snapshot = record["snapshot"]
+    digest = record["snapshot_digest"]
+    if (
+        not isinstance(snapshot, recovery_state.RecoveryStateSnapshot)
+        or snapshot.task_identity != PP_BOX_TASK_IDENTITY
+        or snapshot.scope.num_envs != 1
+        or snapshot.scope.env_ids != (0,)
+        or snapshot.scope.is_relative is not True
+        or _digest(digest, name=f"continuation {name} snapshot digest")
+        != recovery_state.recovery_state_digest(snapshot)
+    ):
+        raise RecoveryFailureSchemaError(
+            f"continuation {name.replace('_', ' ')} must contain a "
+            "digest-bound recovery snapshot"
+        )
+    return MappingProxyType(
+        {
+            "snapshot": snapshot,
+            "snapshot_digest": digest,
+        }
+    )
+
+
+def _validate_continuation_contacts(
+    value: object,
+    *,
+    name: str,
+    runtime_identity_digest: str,
+) -> tuple[Mapping[str, object], ...]:
+    if not isinstance(value, (tuple, list)) or len(value) != 16:
+        raise RecoveryFailureSchemaError(
+            f"continuation {name.replace('_', ' ')} must contain 16 rows"
+        )
+    indices: list[int] = []
+    scene_keys: list[str] = []
+    frozen_rows: list[Mapping[str, object]] = []
+    for row_index, raw_row in enumerate(value):
+        try:
+            row = _exact_mapping(
+                raw_row,
+                required=_CONTINUATION_CONTACT_KEYS,
+                name=f"continuation {name} contact row schema",
+            )
+            sensor_index = _strict_int(
+                row["sensor_index"],
+                name=f"continuation {name} sensor index",
+            )
+            side = row["side"]
+            expected_side = "left" if sensor_index < 8 else "right"
+            scene_key = row["sensor_scene_key"]
+            sensor_body = row["sensor_body_name"]
+            filtered_body = row["filtered_body_name"]
+            force_shape = tuple(row["force_shape"])
+            force_w = _finite_tuple(
+                row["force_w"],
+                length=3,
+                name=f"continuation {name} force",
+            )
+            magnitude = float(row["magnitude_n"])
+            threshold = float(row["threshold_n"])
+            raw_force_bytes = row["raw_force_bytes"]
+            valid = (
+                row["schema_version"] == 1
+                and side == expected_side
+                and isinstance(scene_key, str)
+                and bool(scene_key)
+                and isinstance(sensor_body, str)
+                and bool(sensor_body)
+                and filtered_body == "Box"
+                and force_shape == (1, 1, 1, 3)
+                and row["force_dtype"] == "torch.float32"
+                and row["force_byte_order"] == sys.byteorder
+                and math.isfinite(magnitude)
+                and math.isfinite(threshold)
+                and threshold > 0.0
+                and math.isclose(
+                    magnitude,
+                    math.sqrt(sum(component * component for component in force_w)),
+                    rel_tol=1e-6,
+                    abs_tol=1e-6,
+                )
+                and type(row["in_contact"]) is bool
+                and row["in_contact"] == (magnitude >= threshold)
+                and row["runtime_identity_digest"] == runtime_identity_digest
+                and _digest(
+                    row["sensor_identity_digest"],
+                    name=f"continuation {name} sensor identity digest",
+                )
+                is not None
+                and _digest(
+                    row["calibration_receipt_digest"],
+                    name=f"continuation {name} calibration receipt digest",
+                )
+                is not None
+                and isinstance(raw_force_bytes, bytes)
+                and len(raw_force_bytes) == 12
+                and hashlib.sha256(raw_force_bytes).hexdigest()
+                == row["raw_force_sha256"]
+            )
+            if not valid:
+                raise ValueError("invalid contact row")
+            prefix = "<" if sys.byteorder == "little" else ">"
+            decoded = struct.unpack(prefix + "fff", raw_force_bytes)
+            if any(
+                struct.pack(prefix + "f", decoded[index])
+                != struct.pack(prefix + "f", force_w[index])
+                for index in range(3)
+            ):
+                raise ValueError("raw force bytes do not match force vector")
+        except (TypeError, ValueError, RecoveryFailureSchemaError) as exc:
+            raise RecoveryFailureSchemaError(
+                f"continuation {name} contact row schema is invalid at {row_index}"
+            ) from exc
+        indices.append(sensor_index)
+        scene_keys.append(scene_key)
+        frozen_rows.append(_freeze_recovery_value(row))  # type: ignore[arg-type]
+    if indices != list(range(16)) or len(set(scene_keys)) != 16:
+        raise RecoveryFailureSchemaError(
+            f"continuation {name} contact row schema must cover unique indices 0..15"
+        )
+    return tuple(frozen_rows)
+
+
+def _continuation_live_fall_raw_digest(value: Mapping[str, object]) -> str:
+    return recovery_state.recovery_value_digest(
+        (
+            "failure-continuation-live-fall-v1",
+            tuple((key, value[key]) for key in sorted(value) if key != "raw_digest"),
+        )
+    )
+
+
+def _validate_continuation_live_fall(
+    value: object,
+    *,
+    name: str,
+    env_index: int,
+    runtime_identity_digest: str,
+) -> Mapping[str, object]:
+    try:
+        record = _exact_mapping(
+            value,
+            required=_CONTINUATION_LIVE_FALL_KEYS,
+            name=f"continuation {name} live fall schema",
+        )
+        quaternion = _finite_tuple(
+            record["root_quat_wxyz"],
+            length=4,
+            name=f"continuation {name} root quaternion",
+        )
+        alignment = float(record["root_up_alignment"])
+        valid = (
+            record["schema_version"] == 1
+            and record["task_identity"] == PP_BOX_TASK_IDENTITY
+            and record["runtime_identity_digest"] == runtime_identity_digest
+            and _digest(
+                record["detector_config_digest"],
+                name=f"continuation {name} detector digest",
+            )
+            is not None
+            and _digest(
+                record["producer_evidence_digest"],
+                name=f"continuation {name} producer evidence digest",
+            )
+            is not None
+            and _strict_int(record["env_index"], name=f"continuation {name} env index")
+            == env_index
+            and _strict_int(
+                record["control_step_count"],
+                name=f"continuation {name} control step",
+            )
+            >= 0
+            and math.isfinite(alignment)
+            and -1.0 <= alignment <= 1.0
+            and type(record["critical_body_contact"]) in {bool, type(None)}
+            and type(record["fall_candidate"]) is bool
+            and _digest(record["raw_digest"], name=f"continuation {name} raw digest")
+            == _continuation_live_fall_raw_digest(record)
+            and math.isfinite(sum(component * component for component in quaternion))
+        )
+        if not valid:
+            raise ValueError("invalid live fall record")
+    except (TypeError, ValueError, RecoveryFailureSchemaError) as exc:
+        raise RecoveryFailureSchemaError(
+            f"continuation {name.replace('_', ' ')} live fall schema is invalid"
+        ) from exc
+    return _freeze_recovery_value(record)  # type: ignore[return-value]
+
+
 @dataclass(frozen=True)
 class FailureContinuationRaw:
     """Full primitive-step continuation captured after one real injection."""
@@ -1263,23 +1582,14 @@ class FailureContinuationRaw:
             raise RecoveryFailureSchemaError(
                 "continuation applied action40 must exactly match fixed action40"
             )
+        assert runtime_digest is not None
         observations: dict[str, object] = {}
         for name in ("observation_before", "observation_after"):
-            value = getattr(self, name)
-            if not isinstance(value, Mapping) or set(value) != set(
-                _CONTINUATION_OBSERVATION_STREAMS
-            ):
-                raise RecoveryFailureSchemaError(
-                    f"continuation {name.replace('_', ' ')} must contain exactly "
-                    "actor and critic streams"
-                )
-            for stream in _CONTINUATION_OBSERVATION_STREAMS:
-                if not isinstance(value[stream], Mapping) or not value[stream]:
-                    raise RecoveryFailureSchemaError(
-                        f"continuation {name.replace('_', ' ')} {stream} stream "
-                        "must be a non-empty mapping"
-                    )
-            observations[name] = _freeze_recovery_value(value)
+            observations[name] = _validate_continuation_observation(
+                getattr(self, name),
+                name=name,
+                env_index=env_index,
+            )
         if isinstance(self.reward, bool) or not isinstance(self.reward, (int, float)):
             raise RecoveryFailureSchemaError("continuation reward must be finite")
         reward = float(self.reward)
@@ -1333,12 +1643,10 @@ class FailureContinuationRaw:
             ) from exc
         task_states: dict[str, object] = {}
         for name in ("task_state_before", "task_state_after"):
-            value = getattr(self, name)
-            if not isinstance(value, Mapping) or not value:
-                raise RecoveryFailureSchemaError(
-                    f"continuation {name.replace('_', ' ')} must be a non-empty mapping"
-                )
-            task_states[name] = _freeze_recovery_value(value)
+            task_states[name] = _validate_continuation_task_state(
+                getattr(self, name),
+                name=name,
+            )
         rng_states: dict[str, recovery_state.RecoveryRngState] = {}
         for name in ("rng_before", "rng_after"):
             value = getattr(self, name)
@@ -1347,49 +1655,42 @@ class FailureContinuationRaw:
                     f"continuation {name.replace('_', ' ')} is invalid"
                 )
             rng_states[name] = _freeze_recovery_value(value)  # type: ignore[assignment]
+        for suffix in ("before", "after"):
+            snapshot = task_states[f"task_state_{suffix}"]["snapshot"]  # type: ignore[index]
+            if recovery_state.recovery_value_digest(rng_states[f"rng_{suffix}"]) != (
+                recovery_state.recovery_value_digest(snapshot.rng_state)
+            ):
+                raise RecoveryFailureSchemaError(
+                    f"continuation rng {suffix} does not match its recovery snapshot"
+                )
         contacts: dict[str, tuple[Mapping[str, object], ...]] = {}
         for name in ("contact16_before", "contact16_after"):
-            value = getattr(self, name)
-            if not isinstance(value, (tuple, list)) or len(value) != 16:
-                raise RecoveryFailureSchemaError(
-                    f"continuation {name.replace('_', ' ')} must contain 16 rows"
-                )
-            indices: list[int] = []
-            frozen_rows: list[Mapping[str, object]] = []
-            for row_index, row in enumerate(value):
-                if not isinstance(row, Mapping) or not row:
-                    raise RecoveryFailureSchemaError(
-                        f"continuation {name} row {row_index} must be a non-empty mapping"
-                    )
-                if "sensor_index" not in row or "sensor_scene_key" not in row:
-                    raise RecoveryFailureSchemaError(
-                        f"continuation {name} row {row_index} lacks sensor identity"
-                    )
-                indices.append(
-                    _strict_int(
-                        row["sensor_index"],
-                        name=f"continuation {name} sensor index",
-                    )
-                )
-                scene_key = row["sensor_scene_key"]
-                if not isinstance(scene_key, str) or not scene_key:
-                    raise RecoveryFailureSchemaError(
-                        f"continuation {name} sensor scene key must be non-empty"
-                    )
-                frozen_rows.append(_freeze_recovery_value(row))  # type: ignore[arg-type]
-            if set(indices) != set(range(16)):
-                raise RecoveryFailureSchemaError(
-                    f"continuation {name.replace('_', ' ')} must cover sensor indices 0..15"
-                )
-            contacts[name] = tuple(frozen_rows)
+            contacts[name] = _validate_continuation_contacts(
+                getattr(self, name),
+                name=name,
+                runtime_identity_digest=runtime_digest,
+            )
         fall_evidence: dict[str, object] = {}
         for name in ("live_fall_evidence_before", "live_fall_evidence_after"):
-            value = getattr(self, name)
-            if not isinstance(value, Mapping) or not value:
-                raise RecoveryFailureSchemaError(
-                    f"continuation {name.replace('_', ' ')} must be a non-empty mapping"
-                )
-            fall_evidence[name] = _freeze_recovery_value(value)
+            fall_evidence[name] = _validate_continuation_live_fall(
+                getattr(self, name),
+                name=name,
+                env_index=env_index,
+                runtime_identity_digest=runtime_digest,
+            )
+        before_step = fall_evidence["live_fall_evidence_before"][  # type: ignore[index]
+            "control_step_count"
+        ]
+        after_step = fall_evidence["live_fall_evidence_after"][  # type: ignore[index]
+            "control_step_count"
+        ]
+        if (
+            after_step != before_step + 1
+            or after_step != self.terminal_context.control_step_count
+        ):
+            raise RecoveryFailureSchemaError(
+                "continuation live fall steps do not match the primitive transition"
+            )
         if not isinstance(self.continuation_readback, FailurePredicateContext):
             raise RecoveryFailureSchemaError(
                 "continuation readback must be FailurePredicateContext"
@@ -1399,7 +1700,11 @@ class FailureContinuationRaw:
             raise RecoveryFailureSchemaError(
                 "continuation terminal reason contradicts privileged readback"
             )
-        assert runtime_digest is not None
+        after_critic = observations["observation_after"]["critic"]  # type: ignore[index]
+        if after_critic["privileged"] != continuation_readback.telemetry:
+            raise RecoveryFailureSchemaError(
+                "continuation critic readback does not match privileged predicate truth"
+            )
         object.__setattr__(self, "env_index", env_index)
         object.__setattr__(self, "runtime_identity_digest", runtime_digest)
         object.__setattr__(self, "fixed_action40", fixed_action)
@@ -2170,27 +2475,6 @@ def _qualification_has_canonical_diagnostic_receipts(
         recovery_state.RecoveryStateSchemaError,
     ):
         return False
-
-
-def _build_runtime_conformance_checker() -> Callable[[object], bool]:
-    # No public API can populate this registry. A later controlled headless
-    # integration must replace this checker through a separately reviewed path.
-    runtime_registry: Mapping[str, str] = MappingProxyType({})
-
-    def is_effective(qualification: object) -> bool:
-        if not _qualification_has_canonical_diagnostic_receipts(qualification):
-            return False
-        assert isinstance(qualification, FailureCatalogQualification)
-        return (
-            runtime_registry.get(qualification.category)
-            == qualification.qualification_digest
-        )
-
-    return is_effective
-
-
-_qualification_is_effective = _build_runtime_conformance_checker()
-del _build_runtime_conformance_checker
 
 
 def recovery_succeeded(telemetry: PrivilegedRecoveryTelemetry) -> bool:
