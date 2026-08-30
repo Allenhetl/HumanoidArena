@@ -8,7 +8,7 @@ import torch
 
 try:
     from tasks.common_scene.base_scene_pickplace_box import SHELF_INIT_POS
-except Exception:
+except Exception:  # noqa: BLE001 - lightweight tests intentionally omit Isaac Lab.
     # Keep this module importable in lightweight unit tests where Isaac Lab is unavailable.
     SHELF_INIT_POS = [-2.7, -0.15, 0.0]
 
@@ -42,7 +42,9 @@ class BoxSupportEvidence:
     dx_outside_m: float
     dy_outside_m: float
     xy_mismatch_m: float
+    z_gap_m: float
     z_mismatch_m: float
+    placement_distance_m: float
     inside_xy: bool
     aligned_z: bool
     placed: bool
@@ -62,7 +64,7 @@ def _read_prim_world_aabb_from_prim(
 
     try:
         aligned_range = bbox_cache.ComputeWorldBound(prim).ComputeAlignedRange()
-    except Exception:
+    except Exception:  # noqa: BLE001 - USD adapters expose backend-specific errors.
         return None
 
     mn = aligned_range.GetMin()
@@ -81,14 +83,16 @@ def _read_prim_world_aabb_from_prim(
 
 
 def _load_shelf_support_surfaces_world_from_stage(
-    env: "ManagerBasedRLEnv",
+    env: ManagerBasedRLEnv,
 ) -> list[list[tuple[float, float, float, float, float]]]:
-    surfaces_by_env: list[list[tuple[float, float, float, float, float]]] = [[] for _ in range(env.num_envs)]
+    surfaces_by_env: list[list[tuple[float, float, float, float, float]]] = [
+        [] for _ in range(env.num_envs)
+    ]
 
     try:
         import omni.usd
         from pxr import Usd, UsdGeom
-    except Exception:
+    except Exception:  # noqa: BLE001 - importing optional Kit modules may fail broadly.
         return surfaces_by_env
 
     stage = omni.usd.get_context().get_stage()
@@ -98,21 +102,29 @@ def _load_shelf_support_surfaces_world_from_stage(
     try:
         bbox_cache = UsdGeom.BBoxCache(
             Usd.TimeCode.Default(),
-            includedPurposes=[UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.proxy],
+            includedPurposes=[
+                UsdGeom.Tokens.default_,
+                UsdGeom.Tokens.render,
+                UsdGeom.Tokens.proxy,
+            ],
             useExtentsHint=True,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - USD adapters expose backend-specific errors.
         return surfaces_by_env
 
     for env_idx in range(env.num_envs):
         for path in _candidate_shelf_paths(env_idx):
             shelf_root = stage.GetPrimAtPath(path)
-            if shelf_root is None or not shelf_root.IsValid() or not shelf_root.IsActive():
+            if (
+                shelf_root is None
+                or not shelf_root.IsValid()
+                or not shelf_root.IsActive()
+            ):
                 continue
 
             try:
                 prim_range = Usd.PrimRange(shelf_root)
-            except Exception:
+            except Exception:  # noqa: BLE001, S112 - try the next valid shelf root.
                 continue
 
             for prim in prim_range:
@@ -132,7 +144,7 @@ def _load_shelf_support_surfaces_world_from_stage(
     return surfaces_by_env
 
 
-def _scene_env_origins_w(env: "ManagerBasedRLEnv") -> torch.Tensor:
+def _scene_env_origins_w(env: ManagerBasedRLEnv) -> torch.Tensor:
     env_origins = getattr(env.scene, "env_origins", None)
     if env_origins is None:
         return torch.zeros(env.num_envs, 3, device=env.device, dtype=torch.float32)
@@ -140,17 +152,21 @@ def _scene_env_origins_w(env: "ManagerBasedRLEnv") -> torch.Tensor:
 
 
 def _fallback_shelf_support_surfaces_world(
-    env: "ManagerBasedRLEnv",
+    env: ManagerBasedRLEnv,
 ) -> list[list[tuple[float, float, float, float, float]]]:
     env_origins = _scene_env_origins_w(env)
-    support_top_z_offset = _SHELF_BASE_SUPPORT_TOP_Z_AT_DEFAULT_M - float(SHELF_INIT_POS[2])
+    support_top_z_offset = _SHELF_BASE_SUPPORT_TOP_Z_AT_DEFAULT_M - float(
+        SHELF_INIT_POS[2]
+    )
 
     surfaces_by_env: list[list[tuple[float, float, float, float, float]]] = []
     for env_idx in range(env.num_envs):
         origin = env_origins[env_idx]
         center_x = float(origin[0].item()) + float(SHELF_INIT_POS[0])
         center_y = float(origin[1].item()) + float(SHELF_INIT_POS[1])
-        support_top_z = float(origin[2].item()) + float(SHELF_INIT_POS[2]) + support_top_z_offset
+        support_top_z = (
+            float(origin[2].item()) + float(SHELF_INIT_POS[2]) + support_top_z_offset
+        )
         surfaces_by_env.append(
             [
                 (
@@ -166,13 +182,15 @@ def _fallback_shelf_support_surfaces_world(
 
 
 def _get_shelf_support_surfaces_world(
-    env: "ManagerBasedRLEnv",
+    env: ManagerBasedRLEnv,
 ) -> list[list[tuple[float, float, float, float, float]]]:
     stage_surfaces = _load_shelf_support_surfaces_world_from_stage(env)
     fallback_surfaces = _fallback_shelf_support_surfaces_world(env)
     resolved_surfaces = []
     surface_sources = []
-    for stage_surface, fallback_surface in zip(stage_surfaces, fallback_surfaces, strict=False):
+    for stage_surface, fallback_surface in zip(
+        stage_surfaces, fallback_surfaces, strict=False
+    ):
         if stage_surface:
             resolved_surfaces.append(stage_surface)
             surface_sources.append("stage")
@@ -183,16 +201,16 @@ def _get_shelf_support_surfaces_world(
     return resolved_surfaces
 
 
-def _resolve_box_asset(env: "ManagerBasedRLEnv"):
+def _resolve_box_asset(env: ManagerBasedRLEnv):
     for scene_key in ("box", "Box"):
         try:
             return env.scene[scene_key]
-        except Exception:
+        except Exception:  # noqa: BLE001, S112 - try the alternate scene key.
             continue
     raise KeyError("failed to locate box asset in env.scene using keys 'box' or 'Box'")
 
 
-def _get_box_centers_world(env: "ManagerBasedRLEnv") -> torch.Tensor:
+def _get_box_centers_world(env: ManagerBasedRLEnv) -> torch.Tensor:
     box_asset = _resolve_box_asset(env)
     data = box_asset.data
 
@@ -230,7 +248,9 @@ def _is_box_on_support_surface(
         and (center_y >= y_lo + BOX_HALF_EXTENTS_M[1])
         and (center_y <= y_hi - BOX_HALF_EXTENTS_M[1])
     )
-    aligned_z = abs(box_bottom_z - target_support_top_z) <= BOX_BOTTOM_SURFACE_TOLERANCE_M
+    aligned_z = (
+        abs(box_bottom_z - target_support_top_z) <= BOX_BOTTOM_SURFACE_TOLERANCE_M
+    )
     return bool(inside_xy and aligned_z)
 
 
@@ -279,7 +299,7 @@ def _surface_debug_metrics(
 
 
 def _estimate_target_support_top_z(
-    env: "ManagerBasedRLEnv",
+    env: ManagerBasedRLEnv,
     env_idx: int,
     box_center_w: torch.Tensor,
     surfaces_w: list[tuple[float, float, float, float, float]],
@@ -313,7 +333,9 @@ def _candidate_surface_debug_list(
     target_support_top_z: float | None = None,
     limit: int = 5,
 ) -> list[dict[str, float | bool | int]]:
-    ranked: list[tuple[tuple[int, int, float, float, float], dict[str, float | bool | int]]] = []
+    ranked: list[
+        tuple[tuple[int, int, float, float, float], dict[str, float | bool | int]]
+    ] = []
     for idx, surface_w in enumerate(surfaces_w):
         metrics = _surface_debug_metrics(
             box_center_w,
@@ -388,6 +410,9 @@ def evaluate_box_support(
 
     dx_outside = float(best["dx_outside"])
     dy_outside = float(best["dy_outside"])
+    xy_mismatch = math.hypot(dx_outside, dy_outside)
+    z_gap = float(best["z_gap"])
+    z_mismatch = abs(z_gap)
     return BoxSupportEvidence(
         surface_index=int(best["surface_index"]),
         support_bounds_w=(
@@ -400,15 +425,17 @@ def evaluate_box_support(
         target_support_top_z_m=float(best["target_support_top_z"]),
         dx_outside_m=dx_outside,
         dy_outside_m=dy_outside,
-        xy_mismatch_m=math.hypot(dx_outside, dy_outside),
-        z_mismatch_m=float(best["abs_z_gap"]),
+        xy_mismatch_m=xy_mismatch,
+        z_gap_m=z_gap,
+        z_mismatch_m=z_mismatch,
+        placement_distance_m=math.hypot(xy_mismatch, z_mismatch),
         inside_xy=bool(best["inside_xy"]),
         aligned_z=bool(best["aligned_z"]),
         placed=bool(best["matched"]),
     )
 
 
-def compute_box_support_evidence(env: "ManagerBasedRLEnv") -> list[BoxSupportEvidence]:
+def compute_box_support_evidence(env: ManagerBasedRLEnv) -> list[BoxSupportEvidence]:
     """Resolve live shelf geometry once and expose its deterministic task truth."""
 
     box_centers_w = _get_box_centers_world(env)
@@ -431,7 +458,7 @@ def compute_box_support_evidence(env: "ManagerBasedRLEnv") -> list[BoxSupportEvi
     return evidence
 
 
-def compute_success_mask(env: "ManagerBasedRLEnv") -> torch.Tensor:
+def compute_success_mask(env: ManagerBasedRLEnv) -> torch.Tensor:
     success = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
     for env_idx, evidence in enumerate(compute_box_support_evidence(env)):
         success[env_idx] = evidence.placed
@@ -439,7 +466,7 @@ def compute_success_mask(env: "ManagerBasedRLEnv") -> torch.Tensor:
     return success
 
 
-def compute_reward_pickplace_box(env: "ManagerBasedRLEnv") -> torch.Tensor:
+def compute_reward_pickplace_box(env: ManagerBasedRLEnv) -> torch.Tensor:
     """Binary reward for the pick-place box task.
 
     Reward is ``1`` when the box is judged to be on the shelf and ``0`` otherwise.

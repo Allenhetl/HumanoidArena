@@ -1,6 +1,6 @@
-import torch
-
 import isaaclab.envs.mdp as base_mdp
+import torch
+from common_env_objects import apply_deterministic_object_resets
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
@@ -9,13 +9,13 @@ from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
 
-from . import mdp
-from common_env_objects import apply_deterministic_object_resets
 from tasks.common_config import CameraPresets, G1RobotPresets
 from tasks.common_event.event_manager import SimpleEvent, SimpleEventManager
 from tasks.common_scene.base_scene_pickplace_box import (
     PickPlaceBoxSceneCfg,
 )
+
+from . import mdp
 
 ROBOT_INIT_POS = (-1.6, -5.0, 0.8)
 ROBOT_INIT_ROT = (1.0, 0.0, 0.0, 0.0)
@@ -123,9 +123,10 @@ class MovePickPlaceBoxG129Dex3WholedobyEnvCfg(ManagerBasedRLEnvCfg):
     commands = None
     rewards: RewardsCfg = RewardsCfg()
     curriculum = None
+    env_name = mdp.PP_BOX_TASK_IDENTITY
     recovery_task_identity = mdp.PP_BOX_TASK_IDENTITY
     recovery_contact_bindings = mdp.default_hand_contact_bindings()
-    recovery_telemetry_thresholds = {
+    recovery_telemetry_thresholds = {  # noqa: RUF012
         "contact_force_n": mdp.DEFAULT_CONTACT_FORCE_THRESHOLD_N,
         "max_ee_box_distance_m": mdp.DEFAULT_MAX_EE_BOX_DISTANCE_M,
     }
@@ -232,6 +233,8 @@ class MovePickPlaceBoxG129Dex3WholedobyEnvCfg(ManagerBasedRLEnvCfg):
                     + ", ".join(removed)
                 )
             else:
-                print("[shelf_static_collision] no dynamic physics APIs found under /Shelf")
-        except Exception as exc:
+                print(
+                    "[shelf_static_collision] no dynamic physics APIs found under /Shelf"
+                )
+        except Exception as exc:  # noqa: BLE001 - Kit USD APIs raise backend errors.
             print(f"[shelf_static_collision] failed: {exc}")

@@ -11,17 +11,24 @@ import hashlib
 import json
 import math
 import re
+import struct
+import sys
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, fields, is_dataclass, replace
+from dataclasses import dataclass, fields, is_dataclass
 from dataclasses import field as dataclass_field
+from types import MappingProxyType
 from typing import Any, Literal
 
 import torch
 
-RECOVERY_TELEMETRY_SCHEMA_VERSION = 1
+from .recovery_state import RecoveryStateCoordinator
+
+RECOVERY_TELEMETRY_SCHEMA_VERSION = 2
 LIVE_FALL_EVIDENCE_SCHEMA_VERSION = 1
-RUNTIME_CONTACT_MAPPING_PROOF_SCHEMA_VERSION = 1
+EVALUATOR_TERMINAL_EVIDENCE_SCHEMA_VERSION = 1
+RUNTIME_CONTACT_MAPPING_RECEIPT_SCHEMA_VERSION = 3
 RUNTIME_CONTACT_SENSOR_REPORT_SCHEMA_VERSION = 2
+RESIDUAL_ACTOR_OBSERVATION_SCHEMA_VERSION = 1
 PP_BOX_TASK_IDENTITY = "Isaac-Move-PickPlace-Box-G129-Dex3-Wholedoby"
 
 DEFAULT_CONTACT_FORCE_THRESHOLD_N = 1.0
@@ -58,6 +65,18 @@ _FALL_SUPPORTED_BODY_TOKENS = ("ankle", "foot")
 
 TerminalReason = Literal["success", "fall", "time_limit", "running"]
 _LIVE_FALL_PRODUCER_TOKEN = object()
+_EVALUATOR_TERMINAL_EVIDENCE_TOKEN = object()
+_RESIDUAL_ACTOR_OBSERVATION_TOKEN = object()
+_CONTACT_CALIBRATION_RECEIPT_TOKEN = object()
+_CONTACT_CALIBRATION_EXECUTOR_TOKEN = object()
+_CONTACT_CALIBRATION_EXECUTORS: dict[int, tuple[object, object]] = {}
+_CONTACT_CALIBRATION_RECEIPTS: dict[int, tuple[object, object]] = {}
+_EVALUATOR_TERMINAL_EVIDENCE: dict[int, tuple[object, object]] = {}
+_ACTOR_POLICY_TERM_ALLOWLIST = (
+    "robot_joint_state",
+    "robot_gipper_state",
+    "camera_image",
+)
 
 
 class RecoveryTelemetryIncompleteError(RuntimeError):
@@ -74,7 +93,23 @@ class PrivilegedObservationLeakError(RuntimeError):
 
     def __init__(self, leak_paths: Sequence[str]) -> None:
         self.leak_paths = tuple(sorted(set(leak_paths)))
-        super().__init__("privileged actor-observation leak: " + ", ".join(self.leak_paths))
+        super().__init__(
+            "privileged actor-observation leak: " + ", ".join(self.leak_paths)
+        )
+
+
+@dataclass(frozen=True, init=False)
+class ResidualActorObservation:
+    """Factory-issued view of the exact PP-box policy observation group."""
+
+    schema_version: int
+    task_identity: str
+    policy_term_names: tuple[str, ...]
+    policy: Mapping[str, object]
+    source_manager_id: int
+    source_value_ids: tuple[int, ...]
+    payload_digest: str
+    _producer_token: object = dataclass_field(repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -121,7 +156,7 @@ class DriverTerminalContext:
     fall_confirmed: bool
 
     @classmethod
-    def from_value(cls, value: object) -> "DriverTerminalContext":
+    def from_value(cls, value: object) -> DriverTerminalContext:
         if isinstance(value, cls):
             return value
         if isinstance(value, Mapping):
@@ -135,7 +170,9 @@ class DriverTerminalContext:
                     fall_confirmed=value["fall_confirmed"],
                 )
             except KeyError as exc:
-                raise ValueError(f"missing terminal context field: {exc.args[0]}") from exc
+                raise ValueError(
+                    f"missing terminal context field: {exc.args[0]}"
+                ) from exc
         raise TypeError(f"unsupported terminal context type: {type(value).__name__}")
 
     def validate(self) -> None:
@@ -162,6 +199,19 @@ class DriverTerminalContext:
 
 
 @dataclass(frozen=True)
+class EvaluatorFallDetectorConfig:
+    """Normalized form of the existing evaluator's configurable fall detector."""
+
+    enabled: bool
+    soft_up_alignment: float
+    hard_up_alignment: float
+    contact_force_threshold_n: float
+    confirm_steps: int
+    critical_body_indices: tuple[int, ...]
+    critical_body_names: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class LiveFallLaneEvidence:
     """One primitive step of root/contact fall truth for one environment lane."""
 
@@ -171,6 +221,9 @@ class LiveFallLaneEvidence:
     root_up_alignment: float
     critical_body_contact: bool | None
     fall_candidate: bool
+    detector_enabled: bool = True
+    soft_up_alignment: float = SOFT_FALL_UP_ALIGNMENT
+    hard_up_alignment: float = HARD_FALL_UP_ALIGNMENT
 
     def __post_init__(self) -> None:
         if type(self.env_index) is not int or self.env_index < 0:
@@ -186,15 +239,19 @@ class LiveFallLaneEvidence:
         expected_alignment = compute_root_up_alignment(quaternion)
         if not math.isclose(alignment, expected_alignment, rel_tol=0.0, abs_tol=1e-12):
             raise ValueError("live fall root alignment contradicts its quaternion")
-        if self.critical_body_contact is not None and type(
-            self.critical_body_contact
-        ) is not bool:
+        if (
+            self.critical_body_contact is not None
+            and type(self.critical_body_contact) is not bool
+        ):
             raise ValueError("live fall critical body contact must be boolean or None")
         if type(self.fall_candidate) is not bool:
             raise ValueError("live fall candidate must be boolean")
         expected_candidate = classify_fall(
             alignment,
             critical_body_contact=self.critical_body_contact,
+            detector_enabled=self.detector_enabled,
+            soft_up_alignment=self.soft_up_alignment,
+            hard_up_alignment=self.hard_up_alignment,
         )
         if self.fall_candidate is not expected_candidate:
             raise ValueError("live fall candidate contradicts root/contact truth")
@@ -209,7 +266,26 @@ class LiveFallProducerEvidence:
     schema_version: int
     task_identity: str
     runtime_identity_digest: str
+    detector_config_digest: str
     lanes: tuple[LiveFallLaneEvidence, ...]
+    evidence_digest: str
+    _producer_token: object = dataclass_field(repr=False, compare=False)
+
+
+@dataclass(frozen=True, init=False)
+class EvaluatorTerminalEvidence:
+    """Factory-issued terminal truth for one evaluator primitive step."""
+
+    schema_version: int
+    task_identity: str
+    runtime_identity_digest: str
+    detector_config: EvaluatorFallDetectorConfig
+    detector_config_digest: str
+    step_idx: int
+    max_steps: int
+    previous_evidence_digest: str
+    contexts: tuple[DriverTerminalContext, ...]
+    live_fall_evidence: LiveFallProducerEvidence
     evidence_digest: str
     _producer_token: object = dataclass_field(repr=False, compare=False)
 
@@ -223,7 +299,7 @@ class PairwiseContactBinding:
     filtered_body_name: str
 
     @classmethod
-    def from_value(cls, value: object) -> "PairwiseContactBinding":
+    def from_value(cls, value: object) -> PairwiseContactBinding:
         if isinstance(value, cls):
             return value
         if isinstance(value, Mapping):
@@ -234,7 +310,9 @@ class PairwiseContactBinding:
                     filtered_body_name=str(value["filtered_body_name"]),
                 )
             except KeyError as exc:
-                raise ValueError(f"missing contact binding field: {exc.args[0]}") from exc
+                raise ValueError(
+                    f"missing contact binding field: {exc.args[0]}"
+                ) from exc
         raise TypeError(f"unsupported contact binding type: {type(value).__name__}")
 
     def validate(self) -> None:
@@ -253,7 +331,7 @@ class HandContactBinding:
     sensors: tuple[PairwiseContactBinding, ...]
 
     @classmethod
-    def from_value(cls, value: object) -> "HandContactBinding":
+    def from_value(cls, value: object) -> HandContactBinding:
         if isinstance(value, cls):
             return value
         if isinstance(value, Mapping):
@@ -272,10 +350,16 @@ class HandContactBinding:
                     ),
                 )
             except KeyError as exc:
-                raise ValueError(f"missing hand contact binding field: {exc.args[0]}") from exc
-        raise TypeError(f"unsupported hand contact binding type: {type(value).__name__}")
+                raise ValueError(
+                    f"missing hand contact binding field: {exc.args[0]}"
+                ) from exc
+        raise TypeError(
+            f"unsupported hand contact binding type: {type(value).__name__}"
+        )
 
-    def validate(self, *, expected_side: Literal["left", "right"] | None = None) -> None:
+    def validate(
+        self, *, expected_side: Literal["left", "right"] | None = None
+    ) -> None:
         if self.side not in {"left", "right"}:
             raise ValueError(f"unknown hand side: {self.side!r}")
         if expected_side is not None and self.side != expected_side:
@@ -284,12 +368,39 @@ class HandContactBinding:
             sensor.validate()
         expected = _default_hand_contact_binding(self.side)
         if self != expected:
-            raise ValueError(f"{self.side} hand binding does not match the verified leaf catalog")
+            raise ValueError(
+                f"{self.side} hand binding does not match the verified leaf catalog"
+            )
 
 
-@dataclass(frozen=True)
-class EmpiricalContactMappingProof:
-    """Immutable baseline/touch/removed evidence for one pairwise filter."""
+@dataclass(frozen=True, init=False)
+class ContactCalibrationPhaseReceipt:
+    """One executor-issued simulator step and its exact raw force bytes."""
+
+    schema_version: int
+    task_identity: str
+    phase: Literal["baseline", "target_touch", "target_removed"]
+    sensor_scene_key: str
+    sensor_body_name: str
+    source_snapshot_digest: str
+    phase_state_digest: str
+    runtime_identity_digest: str
+    sensor_identity_digest: str
+    control_step_before: int
+    control_step_after: int
+    force_shape: tuple[int, ...]
+    force_dtype: str
+    force_device: str
+    force_byte_order: str
+    raw_force_bytes: bytes
+    raw_force_sha256: str
+    receipt_digest: str
+    _producer_token: object = dataclass_field(repr=False, compare=False)
+
+
+@dataclass(frozen=True, init=False)
+class ContactSensorCalibrationReceipt:
+    """Three causal phase receipts for one one-body/one-filter sensor."""
 
     schema_version: int
     task_identity: str
@@ -297,49 +408,37 @@ class EmpiricalContactMappingProof:
     sensor_body_name: str
     target_asset_scene_key: str
     target_prim_paths: tuple[str, ...]
-    baseline_force_w: tuple[tuple[float, float, float], ...]
-    target_touch_force_w: tuple[tuple[float, float, float], ...]
-    target_removed_force_w: tuple[tuple[float, float, float], ...]
-    baseline_state_digest: str
-    target_touch_state_digest: str
-    target_removed_state_digest: str
+    source_snapshot_digest: str
     runtime_identity_digest: str
-    proof_digest: str
+    sensor_identity_digest: str
+    phases: tuple[ContactCalibrationPhaseReceipt, ...]
+    receipt_digest: str
+    _producer_token: object = dataclass_field(repr=False, compare=False)
 
-    @classmethod
-    def from_value(cls, value: object) -> EmpiricalContactMappingProof:
-        if isinstance(value, cls):
-            return value
-        if not isinstance(value, Mapping):
-            raise TypeError(f"unsupported contact mapping proof: {type(value).__name__}")
-        try:
-            return cls(
-                schema_version=value["schema_version"],
-                task_identity=str(value["task_identity"]),
-                sensor_scene_key=str(value["sensor_scene_key"]),
-                sensor_body_name=str(value["sensor_body_name"]),
-                target_asset_scene_key=str(value["target_asset_scene_key"]),
-                target_prim_paths=tuple(str(path) for path in value["target_prim_paths"]),
-                baseline_force_w=_empirical_force_rows(
-                    value["baseline_force_w"],
-                    name="baseline force",
-                ),
-                target_touch_force_w=_empirical_force_rows(
-                    value["target_touch_force_w"],
-                    name="target-touch force",
-                ),
-                target_removed_force_w=_empirical_force_rows(
-                    value["target_removed_force_w"],
-                    name="target-removed force",
-                ),
-                baseline_state_digest=str(value["baseline_state_digest"]),
-                target_touch_state_digest=str(value["target_touch_state_digest"]),
-                target_removed_state_digest=str(value["target_removed_state_digest"]),
-                runtime_identity_digest=str(value["runtime_identity_digest"]),
-                proof_digest=str(value["proof_digest"]),
-            )
-        except KeyError as exc:
-            raise ValueError(f"missing contact mapping proof field: {exc.args[0]}") from exc
+
+@dataclass(frozen=True, init=False)
+class ContactCalibrationExecutionReceipt:
+    """Runtime-owned, registry-bound receipt for all 16 pairwise sensors."""
+
+    schema_version: int
+    task_identity: str
+    source_snapshot_digest: str
+    runtime_identity_digest: str
+    snapshot_fidelity_tier: str
+    coordinator_binding_identity: tuple[tuple[str, object], ...]
+    coordinator_binding_digest: str
+    sensor_receipts: tuple[ContactSensorCalibrationReceipt, ...]
+    receipt_digest: str
+    _producer_token: object = dataclass_field(repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class _ContactCalibrationExecutor:
+    coordinator: object
+    snapshot_fidelity_tier: str
+    coordinator_binding_identity: tuple[tuple[str, object], ...]
+    coordinator_binding_digest: str
+    _executor_token: object = dataclass_field(repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -388,10 +487,7 @@ def _default_hand_contact_binding(side: Literal["left", "right"]) -> HandContact
 def default_hand_contact_bindings() -> dict[str, HandContactBinding]:
     """Return the USD-evidenced candidates; runtime identity is still required."""
 
-    return {
-        side: _default_hand_contact_binding(side)
-        for side in ("left", "right")
-    }
+    return {side: _default_hand_contact_binding(side) for side in ("left", "right")}
 
 
 @dataclass(frozen=True)
@@ -412,7 +508,9 @@ class PrivilegedRecoveryTelemetry:
     grasp_evidence: BimanualGraspEvidence
     grasp: bool
     xy_mismatch_m: float
+    z_gap_m: float
     z_mismatch_m: float
+    placement_distance_m: float
     placement: bool
     success: bool
     root_up_alignment: float
@@ -439,113 +537,13 @@ def _as_float_tuple(value: object, length: int, *, name: str) -> tuple[float, ..
     elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         values = list(value)
     else:
-        raise ValueError(f"{name} must be a length-{length} vector")
+        raise TypeError(f"{name} must be a length-{length} vector")
     if len(values) != length:
         raise ValueError(f"{name} must have length {length}, got {len(values)}")
     result = tuple(float(item) for item in values)
     if not all(math.isfinite(item) for item in result):
         raise ValueError(f"{name} must contain only finite values")
     return result
-
-
-def _empirical_force_rows(
-    value: object,
-    *,
-    name: str,
-) -> tuple[tuple[float, float, float], ...]:
-    if isinstance(value, torch.Tensor):
-        if value.ndim != 2 or value.shape[1] != 3:
-            raise ValueError(f"{name} must have shape [num_envs, 3]")
-        rows = value.detach().cpu()
-    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        rows = value
-    else:
-        raise TypeError(f"{name} must have shape [num_envs, 3]")
-    result = tuple(
-        _as_float_tuple(row, 3, name=f"{name} row")
-        for row in rows
-    )
-    if not result:
-        raise ValueError(f"{name} must contain at least one environment")
-    return tuple((row[0], row[1], row[2]) for row in result)
-
-
-def empirical_contact_mapping_proof_digest(
-    proof: EmpiricalContactMappingProof | Mapping[str, object],
-) -> str:
-    """Recompute the typed proof digest, excluding only the digest field itself."""
-
-    value = EmpiricalContactMappingProof.from_value(proof)
-    payload = {
-        "schema_version": value.schema_version,
-        "task_identity": value.task_identity,
-        "sensor_scene_key": value.sensor_scene_key,
-        "sensor_body_name": value.sensor_body_name,
-        "target_asset_scene_key": value.target_asset_scene_key,
-        "target_prim_paths": value.target_prim_paths,
-        "baseline_force_w": value.baseline_force_w,
-        "target_touch_force_w": value.target_touch_force_w,
-        "target_removed_force_w": value.target_removed_force_w,
-        "baseline_state_digest": value.baseline_state_digest,
-        "target_touch_state_digest": value.target_touch_state_digest,
-        "target_removed_state_digest": value.target_removed_state_digest,
-        "runtime_identity_digest": value.runtime_identity_digest,
-    }
-    serialized = json.dumps(
-        payload,
-        allow_nan=False,
-        ensure_ascii=True,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("ascii")
-    return hashlib.sha256(serialized).hexdigest()
-
-
-def build_empirical_contact_mapping_proof(
-    *,
-    sensor_scene_key: str,
-    sensor_body_name: str,
-    target_asset_scene_key: str,
-    target_prim_paths: Sequence[str],
-    baseline_force_w: object,
-    target_touch_force_w: object,
-    target_removed_force_w: object,
-    baseline_state_digest: str,
-    target_touch_state_digest: str,
-    target_removed_state_digest: str,
-    runtime_identity_digest: str,
-) -> EmpiricalContactMappingProof:
-    """Freeze raw simulator measurements into a content-addressed proof payload."""
-
-    proof = EmpiricalContactMappingProof(
-        schema_version=RUNTIME_CONTACT_MAPPING_PROOF_SCHEMA_VERSION,
-        task_identity=PP_BOX_TASK_IDENTITY,
-        sensor_scene_key=str(sensor_scene_key),
-        sensor_body_name=str(sensor_body_name),
-        target_asset_scene_key=str(target_asset_scene_key),
-        target_prim_paths=tuple(str(path) for path in target_prim_paths),
-        baseline_force_w=_empirical_force_rows(
-            baseline_force_w,
-            name="baseline force",
-        ),
-        target_touch_force_w=_empirical_force_rows(
-            target_touch_force_w,
-            name="target-touch force",
-        ),
-        target_removed_force_w=_empirical_force_rows(
-            target_removed_force_w,
-            name="target-removed force",
-        ),
-        baseline_state_digest=str(baseline_state_digest),
-        target_touch_state_digest=str(target_touch_state_digest),
-        target_removed_state_digest=str(target_removed_state_digest),
-        runtime_identity_digest=str(runtime_identity_digest),
-        proof_digest="",
-    )
-    return replace(
-        proof,
-        proof_digest=empirical_contact_mapping_proof_digest(proof),
-    )
 
 
 def pairwise_contact_evidence(
@@ -588,16 +586,19 @@ def aggregate_hand_contact_evidence(
         raise ValueError("hand contact evidence contains duplicate sensor bodies")
     expected_prefix = f"{side}_hand_"
     if any(not body_name.startswith(expected_prefix) for body_name in body_names):
-        raise ValueError(f"{side} hand contact evidence contains a body from another side")
+        raise ValueError(
+            f"{side} hand contact evidence contains a body from another side"
+        )
     filtered_bodies = {link.filtered_body for link in link_tuple}
     if filtered_bodies != {"Box"}:
         raise ValueError("hand contact evidence must be filtered only to Box")
 
     resultant_force = tuple(
-        sum(link.force_w[axis] for link in link_tuple)
-        for axis in range(3)
+        sum(link.force_w[axis] for link in link_tuple) for axis in range(3)
     )
-    contacting_bodies = tuple(link.sensor_body for link in link_tuple if link.in_contact)
+    contacting_bodies = tuple(
+        link.sensor_body for link in link_tuple if link.in_contact
+    )
     return HandContactEvidence(
         side=side,
         links=link_tuple,
@@ -668,15 +669,30 @@ def classify_fall(
     root_up_alignment: float,
     *,
     critical_body_contact: bool | None,
+    detector_enabled: bool = True,
+    soft_up_alignment: float = SOFT_FALL_UP_ALIGNMENT,
+    hard_up_alignment: float = HARD_FALL_UP_ALIGNMENT,
 ) -> bool:
     """Mirror the evaluator's instantaneous hard/soft tilt predicate."""
 
     alignment = float(root_up_alignment)
     if not math.isfinite(alignment) or alignment < -1.0 or alignment > 1.0:
         raise ValueError("root up-alignment must be finite and within [-1, 1]")
-    if alignment < HARD_FALL_UP_ALIGNMENT:
+    if type(detector_enabled) is not bool:
+        raise ValueError("fall-detector enabled flag must be boolean")
+    if not detector_enabled:
+        return False
+    soft_threshold = float(soft_up_alignment)
+    hard_threshold = float(hard_up_alignment)
+    if (
+        not math.isfinite(soft_threshold)
+        or not math.isfinite(hard_threshold)
+        or not -1.0 <= hard_threshold < soft_threshold <= 1.0
+    ):
+        raise ValueError("fall-detector alignment thresholds are invalid")
+    if alignment < hard_threshold:
         return True
-    if alignment >= SOFT_FALL_UP_ALIGNMENT:
+    if alignment >= soft_threshold:
         return False
     if critical_body_contact is None:
         raise RecoveryTelemetryIncompleteError(("critical_body_contact",))
@@ -709,6 +725,9 @@ def _validate_live_fall_lane(
             root_up_alignment=value.root_up_alignment,
             critical_body_contact=value.critical_body_contact,
             fall_candidate=value.fall_candidate,
+            detector_enabled=value.detector_enabled,
+            soft_up_alignment=value.soft_up_alignment,
+            hard_up_alignment=value.hard_up_alignment,
         )
     except (TypeError, ValueError, RecoveryTelemetryIncompleteError) as exc:
         raise RecoveryTelemetryIncompleteError(("live_fall_evidence",)) from exc
@@ -741,10 +760,15 @@ def build_privileged_telemetry(
         raise ValueError("privileged telemetry task identity is not HOI_pp_box")
     if not isinstance(left_contact, HandContactEvidence) or left_contact.side != "left":
         raise ValueError("privileged telemetry requires aggregated left hand contact")
-    if not isinstance(right_contact, HandContactEvidence) or right_contact.side != "right":
+    if (
+        not isinstance(right_contact, HandContactEvidence)
+        or right_contact.side != "right"
+    ):
         raise ValueError("privileged telemetry requires aggregated right hand contact")
     if not isinstance(terminal_context, DriverTerminalContext):
-        raise ValueError("privileged telemetry requires authoritative driver terminal context")
+        raise TypeError(
+            "privileged telemetry requires authoritative driver terminal context"
+        )
     terminal_context.validate()
     fall_evidence = _validate_live_fall_lane(
         live_fall_evidence,
@@ -765,7 +789,7 @@ def build_privileged_telemetry(
     left_pose = _as_float_tuple(left_ee_pose_w, 7, name="left EE pose")
     right_pose = _as_float_tuple(right_ee_pose_w, 7, name="right EE pose")
     support_bounds = _as_float_tuple(
-        getattr(support, "support_bounds_w"),
+        support.support_bounds_w,
         4,
         name="shelf support bounds",
     )
@@ -782,7 +806,7 @@ def build_privileged_telemetry(
     if fall_candidate != (terminal_context.fall_streak > 0):
         raise RecoveryTelemetryIncompleteError(("authoritative_terminal_context",))
     fall = terminal_context.fall_confirmed
-    success = bool(getattr(support, "placed"))
+    success = bool(support.placed)
     timeout = terminal_context.time_limit
 
     return PrivilegedRecoveryTelemetry(
@@ -806,8 +830,8 @@ def build_privileged_telemetry(
             support_bounds[2],
             support_bounds[3],
         ),
-        support_surface_z_m=float(getattr(support, "support_top_z_m")),
-        target_support_surface_z_m=float(getattr(support, "target_support_top_z_m")),
+        support_surface_z_m=float(support.support_top_z_m),
+        target_support_surface_z_m=float(support.target_support_top_z_m),
         left_ee_pose_w=(
             left_pose[0],
             left_pose[1],
@@ -830,8 +854,10 @@ def build_privileged_telemetry(
         right_box_contact=right_contact,
         grasp_evidence=grasp_evidence,
         grasp=grasp_evidence.bimanual_grasp,
-        xy_mismatch_m=float(getattr(support, "xy_mismatch_m")),
-        z_mismatch_m=float(getattr(support, "z_mismatch_m")),
+        xy_mismatch_m=float(support.xy_mismatch_m),
+        z_gap_m=float(support.z_gap_m),
+        z_mismatch_m=float(support.z_mismatch_m),
+        placement_distance_m=float(support.placement_distance_m),
         placement=success,
         success=success,
         root_up_alignment=root_up_alignment,
@@ -842,7 +868,9 @@ def build_privileged_telemetry(
         fall_confirm_steps=terminal_context.fall_confirm_steps,
         fall=fall,
         time_limit=timeout,
-        terminal_reason=classify_terminal(success=success, fall=fall, time_limit=timeout),
+        terminal_reason=classify_terminal(
+            success=success, fall=fall, time_limit=timeout
+        ),
     )
 
 
@@ -851,7 +879,9 @@ def _collect_privileged_object_ids(value: object) -> set[int]:
     visited: set[int] = set()
 
     def visit(item: object) -> None:
-        if item is None or isinstance(item, (bool, int, float, complex, str, bytes, bytearray)):
+        if item is None or isinstance(
+            item, (bool, int, float, complex, str, bytes, bytearray)
+        ):
             return
         item_id = id(item)
         if item_id in visited:
@@ -865,7 +895,9 @@ def _collect_privileged_object_ids(value: object) -> set[int]:
         elif is_dataclass(item) and not isinstance(item, type):
             for field in fields(item):
                 visit(getattr(item, field.name))
-        elif isinstance(item, Sequence) and not isinstance(item, (str, bytes, bytearray)):
+        elif isinstance(item, Sequence) and not isinstance(
+            item, (str, bytes, bytearray)
+        ):
             for nested in item:
                 visit(nested)
 
@@ -873,18 +905,113 @@ def _collect_privileged_object_ids(value: object) -> set[int]:
     return object_ids
 
 
+def _actor_observation_digest(
+    term_names: tuple[str, ...],
+    policy: Mapping[str, object],
+) -> str:
+    hasher = hashlib.sha256()
+    hasher.update(b"pp-box-residual-actor-observation-v1\0")
+    for name in term_names:
+        value = policy[name]
+        hasher.update(name.encode("utf-8"))
+        hasher.update(b"\0")
+        if isinstance(value, torch.Tensor):
+            metadata = (
+                tuple(value.shape),
+                str(value.dtype),
+                str(value.device),
+                int(value.data_ptr()),
+                int(getattr(value, "_version", 0)),
+            )
+            hasher.update(repr(metadata).encode("ascii"))
+        else:
+            hasher.update(type(value).__qualname__.encode("utf-8"))
+            hasher.update(b":")
+            hasher.update(str(id(value)).encode("ascii"))
+        hasher.update(b"\0")
+    return hasher.hexdigest()
+
+
+def _policy_observation_source(env: object) -> tuple[object, Mapping[str, object]]:
+    manager = getattr(env, "observation_manager", None)
+    raw = getattr(manager, "_obs_buffer", None)
+    if not isinstance(raw, Mapping):
+        raw = getattr(env, "obs_buf", None)
+    policy = raw.get("policy") if isinstance(raw, Mapping) else None
+    if not isinstance(policy, Mapping):
+        raise RecoveryTelemetryIncompleteError(("actor_observation_source",))
+    return manager, policy
+
+
+def issue_residual_actor_observation(env: object) -> ResidualActorObservation:
+    """Read only allowlisted policy terms from the live observation manager."""
+
+    _require_pp_box_task_identity(env)
+    manager, policy = _policy_observation_source(env)
+    configured = getattr(manager, "_group_obs_term_names", None)
+    configured_policy = (
+        configured.get("policy") if isinstance(configured, Mapping) else None
+    )
+    term_names = tuple(str(name) for name in (configured_policy or ()))
+    if term_names != _ACTOR_POLICY_TERM_ALLOWLIST or set(policy) != set(
+        _ACTOR_POLICY_TERM_ALLOWLIST
+    ):
+        raise RecoveryTelemetryIncompleteError(("actor_observation_allowlist",))
+    issued_policy = MappingProxyType({name: policy[name] for name in term_names})
+    observation = object.__new__(ResidualActorObservation)
+    values = {
+        "schema_version": RESIDUAL_ACTOR_OBSERVATION_SCHEMA_VERSION,
+        "task_identity": PP_BOX_TASK_IDENTITY,
+        "policy_term_names": term_names,
+        "policy": issued_policy,
+        "source_manager_id": id(manager),
+        "source_value_ids": tuple(id(issued_policy[name]) for name in term_names),
+        "payload_digest": _actor_observation_digest(term_names, issued_policy),
+        "_producer_token": _RESIDUAL_ACTOR_OBSERVATION_TOKEN,
+    }
+    for name, value in values.items():
+        object.__setattr__(observation, name, value)
+    return observation
+
+
 def assert_actor_observation_isolated(
     actor_observation: object,
     privileged_state: PrivilegedRecoveryTelemetry,
+    *,
+    env: object,
 ) -> None:
-    """Reject privileged keys or shared privileged objects at any nesting depth."""
+    """Validate exact allowlist provenance before checking object alias leaks."""
+
+    if (
+        type(actor_observation) is not ResidualActorObservation
+        or actor_observation._producer_token is not _RESIDUAL_ACTOR_OBSERVATION_TOKEN
+        or actor_observation.schema_version != RESIDUAL_ACTOR_OBSERVATION_SCHEMA_VERSION
+        or actor_observation.task_identity != PP_BOX_TASK_IDENTITY
+    ):
+        raise PrivilegedObservationLeakError(("$.provenance",))
+    manager, current_policy = _policy_observation_source(env)
+    term_names = actor_observation.policy_term_names
+    if (
+        term_names != _ACTOR_POLICY_TERM_ALLOWLIST
+        or actor_observation.source_manager_id != id(manager)
+        or set(actor_observation.policy) != set(_ACTOR_POLICY_TERM_ALLOWLIST)
+        or tuple(id(current_policy[name]) for name in term_names)
+        != actor_observation.source_value_ids
+        or tuple(id(actor_observation.policy[name]) for name in term_names)
+        != actor_observation.source_value_ids
+        or actor_observation.payload_digest
+        != _actor_observation_digest(term_names, actor_observation.policy)
+    ):
+        raise PrivilegedObservationLeakError(("$.provenance",))
 
     privileged_object_ids = _collect_privileged_object_ids(privileged_state)
     leak_paths: set[str] = set()
     visited: set[int] = set()
 
     def visit(item: object, path: str) -> None:
-        if item is None or isinstance(item, (bool, int, float, complex, str, bytes, bytearray)):
+        if item is None or isinstance(
+            item, (bool, int, float, complex, str, bytes, bytearray)
+        ):
             return
         item_id = id(item)
         if item_id in privileged_object_ids:
@@ -900,7 +1027,9 @@ def assert_actor_observation_isolated(
                 if isinstance(key, str) and key in _PRIVILEGED_FIELD_NAMES:
                     leak_paths.add(key_path)
                 visit(nested, key_path)
-        elif isinstance(item, Sequence) and not isinstance(item, (str, bytes, bytearray)):
+        elif isinstance(item, Sequence) and not isinstance(
+            item, (str, bytes, bytearray)
+        ):
             for index, nested in enumerate(item):
                 visit(nested, f"{path}[{index}]")
         elif is_dataclass(item) and not isinstance(item, type):
@@ -910,7 +1039,7 @@ def assert_actor_observation_isolated(
                     leak_paths.add(field_path)
                 visit(getattr(item, field.name), field_path)
 
-    visit(actor_observation, "$")
+    visit(actor_observation.policy, "$.policy")
     if leak_paths:
         raise PrivilegedObservationLeakError(tuple(leak_paths))
 
@@ -920,15 +1049,20 @@ def _scene_get(scene: object, key: str) -> object | None:
         return scene.get(key)
     try:
         return scene[key]  # type: ignore[index]
-    except Exception:
+    except Exception:  # noqa: BLE001 - scene implementations use custom lookup errors.
         return getattr(scene, key, None)
 
 
 def _require_pp_box_task_identity(env: object) -> str:
     cfg = getattr(env, "cfg", None)
     cfg_identity = getattr(cfg, "recovery_task_identity", None)
+    runtime_env_name = getattr(cfg, "env_name", None)
     env_identity = getattr(env, "recovery_task_identity", cfg_identity)
-    if cfg_identity != PP_BOX_TASK_IDENTITY or env_identity != PP_BOX_TASK_IDENTITY:
+    if (
+        runtime_env_name != PP_BOX_TASK_IDENTITY
+        or cfg_identity != PP_BOX_TASK_IDENTITY
+        or env_identity != PP_BOX_TASK_IDENTITY
+    ):
         raise RecoveryTelemetryIncompleteError(("task_identity",))
     return PP_BOX_TASK_IDENTITY
 
@@ -1007,96 +1141,706 @@ def _resolve_candidate_filter_asset(
     return scene_key, asset, prim_path, paths, namespaces
 
 
-def _resolve_contact_mapping_proofs(
-    env: object,
+def _canonical_json_digest(payload: object) -> str:
+    serialized = json.dumps(
+        payload,
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def _sensor_identity_payload(
+    sensor: object,
+    binding: PairwiseContactBinding,
     *,
-    expected_scene_keys: tuple[str, ...],
-) -> tuple[Mapping[str, object], str]:
-    raw_proofs = getattr(env, "recovery_contact_mapping_proofs", None)
-    expected = set(expected_scene_keys)
-    if not isinstance(raw_proofs, Mapping):
+    target_asset_scene_key: str,
+    target_prim_paths: tuple[str, ...],
+) -> dict[str, object]:
+    force_matrix = getattr(getattr(sensor, "data", None), "force_matrix_w", None)
+    cfg = getattr(sensor, "cfg", None)
+    return {
+        "sensor_scene_key": binding.sensor_scene_key,
+        "sensor_body_name": binding.sensor_body_name,
+        "filtered_body_name": binding.filtered_body_name,
+        "sensor_prim_path_expression": str(getattr(cfg, "prim_path", "")),
+        "sensor_prim_paths": tuple(
+            str(path)
+            for path in (
+                getattr(getattr(sensor, "body_physx_view", None), "prim_paths", ())
+                or ()
+            )
+        ),
+        "sensor_body_names": tuple(
+            str(name) for name in (getattr(sensor, "body_names", ()) or ())
+        ),
+        "num_bodies": getattr(sensor, "num_bodies", None),
+        "filter_prim_paths": tuple(
+            str(path) for path in (getattr(cfg, "filter_prim_paths_expr", ()) or ())
+        ),
+        "filter_count": getattr(
+            getattr(sensor, "contact_physx_view", None), "filter_count", None
+        ),
+        "target_asset_scene_key": target_asset_scene_key,
+        "target_prim_paths": target_prim_paths,
+        "force_shape": tuple(force_matrix.shape)
+        if isinstance(force_matrix, torch.Tensor)
+        else None,
+        "force_dtype": str(force_matrix.dtype)
+        if isinstance(force_matrix, torch.Tensor)
+        else None,
+        "force_device": str(force_matrix.device)
+        if isinstance(force_matrix, torch.Tensor)
+        else None,
+    }
+
+
+def _runtime_contact_identities(
+    env: object,
+    bindings: Mapping[str, HandContactBinding],
+) -> tuple[str, dict[str, str], str, tuple[str, ...]]:
+    task_identity = _require_pp_box_task_identity(env)
+    num_envs = int(getattr(env, "num_envs", 0))
+    scene = getattr(env, "scene", None)
+    if num_envs <= 0 or scene is None:
+        raise RecoveryTelemetryIncompleteError(("scene",))
+    (
+        target_asset_scene_key,
+        _target_asset,
+        _target_expression,
+        target_prim_paths,
+        _target_namespaces,
+    ) = _resolve_candidate_filter_asset(scene, num_envs=num_envs)
+    sensor_identities: dict[str, str] = {}
+    for side in ("left", "right"):
+        for binding in bindings[side].sensors:
+            sensor = _scene_get(scene, binding.sensor_scene_key)
+            if sensor is None:
+                raise RecoveryTelemetryIncompleteError(
+                    (f"runtime_contact_sensor:{binding.sensor_scene_key}",)
+                )
+            sensor_identities[binding.sensor_scene_key] = _canonical_json_digest(
+                _sensor_identity_payload(
+                    sensor,
+                    binding,
+                    target_asset_scene_key=target_asset_scene_key,
+                    target_prim_paths=target_prim_paths,
+                )
+            )
+    registered_executor = _CONTACT_CALIBRATION_EXECUTORS.get(id(env))
+    executor_identity = None
+    if registered_executor is not None and registered_executor[0] is env:
+        executor = registered_executor[1]
+        if type(executor) is _ContactCalibrationExecutor:
+            executor_identity = {
+                "snapshot_fidelity_tier": executor.snapshot_fidelity_tier,
+                "coordinator_binding_identity": executor.coordinator_binding_identity,
+                "coordinator_binding_digest": executor.coordinator_binding_digest,
+            }
+    runtime_identity = _canonical_json_digest(
+        {
+            "task_identity": task_identity,
+            "num_envs": num_envs,
+            "device": str(getattr(env, "device", "")),
+            "target_asset_scene_key": target_asset_scene_key,
+            "target_prim_paths": target_prim_paths,
+            "sensor_identities": sensor_identities,
+            "snapshot_coordinator": executor_identity,
+        }
+    )
+    return (
+        runtime_identity,
+        sensor_identities,
+        target_asset_scene_key,
+        target_prim_paths,
+    )
+
+
+def install_pp_box_contact_calibration_executor(
+    env: object,
+) -> None:
+    """Bind the one-time calibration executor to the installed coordinator."""
+
+    _require_pp_box_task_identity(env)
+    coordinator = getattr(env, "recovery_state_coordinator", None)
+    required_methods = ("capture", "digest", "preflight", "restore")
+    if coordinator is None or any(
+        not callable(getattr(coordinator, name, None)) for name in required_methods
+    ):
+        raise RecoveryTelemetryIncompleteError(("recovery_state_coordinator",))
+    try:
+        raw_binding = coordinator.binding_identity
+        if not isinstance(raw_binding, Mapping) or set(raw_binding) != {
+            "schema_version",
+            "coordinator_type",
+            "task_identity",
+        }:
+            raise ValueError("invalid coordinator binding schema")
+        coordinator_type = str(raw_binding["coordinator_type"])
+        actual_type = f"{type(coordinator).__module__}.{type(coordinator).__qualname__}"
+        if (
+            type(raw_binding["schema_version"]) is not int
+            or raw_binding["schema_version"] != 1
+            or type(coordinator) is not RecoveryStateCoordinator
+            or coordinator_type != actual_type
+            or not coordinator_type.endswith(".RecoveryStateCoordinator")
+            or raw_binding["task_identity"] != PP_BOX_TASK_IDENTITY
+        ):
+            raise ValueError("coordinator binding identity mismatch")
+        binding_identity = tuple(sorted(raw_binding.items()))
+        binding_digest = _canonical_json_digest(binding_identity)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise RecoveryTelemetryIncompleteError(("recovery_state_coordinator",)) from exc
+    executor = _ContactCalibrationExecutor(
+        coordinator=coordinator,
+        snapshot_fidelity_tier="state_only",
+        coordinator_binding_identity=binding_identity,
+        coordinator_binding_digest=binding_digest,
+        _executor_token=_CONTACT_CALIBRATION_EXECUTOR_TOKEN,
+    )
+    _CONTACT_CALIBRATION_EXECUTORS[id(env)] = (env, executor)
+    _CONTACT_CALIBRATION_RECEIPTS.pop(id(env), None)
+
+
+def _installed_contact_calibration_executor(env: object) -> _ContactCalibrationExecutor:
+    registered = _CONTACT_CALIBRATION_EXECUTORS.get(id(env))
+    if registered is None or registered[0] is not env:
         raise RecoveryTelemetryIncompleteError(
-            tuple(f"runtime_contact_mapping_proof:{key}" for key in expected_scene_keys)
+            ("runtime_contact_calibration_executor",)
         )
-    provided = {str(key) for key in raw_proofs}
-    missing = tuple(
-        f"runtime_contact_mapping_proof:{key}"
-        for key in expected_scene_keys
-        if key not in raw_proofs
+    executor = registered[1]
+    if (
+        type(executor) is not _ContactCalibrationExecutor
+        or executor._executor_token is not _CONTACT_CALIBRATION_EXECUTOR_TOKEN
+        or getattr(env, "recovery_state_coordinator", None) is not executor.coordinator
+    ):
+        raise RecoveryTelemetryIncompleteError(
+            ("runtime_contact_calibration_executor",)
+        )
+    try:
+        current_binding = tuple(sorted(executor.coordinator.binding_identity.items()))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise RecoveryTelemetryIncompleteError(
+            ("runtime_contact_calibration_executor",)
+        ) from exc
+    if (
+        current_binding != executor.coordinator_binding_identity
+        or _canonical_json_digest(current_binding)
+        != executor.coordinator_binding_digest
+    ):
+        raise RecoveryTelemetryIncompleteError(
+            ("runtime_contact_calibration_executor",)
+        )
+    return executor
+
+
+def _calibration_fixed_action(env: object) -> torch.Tensor:
+    manager = getattr(env, "action_manager", None)
+    action = getattr(manager, "_action", None)
+    if action is None:
+        action = getattr(manager, "action", None)
+    if not isinstance(action, torch.Tensor) or action.ndim != 2:
+        raise RecoveryTelemetryIncompleteError(("runtime_contact_calibration_action",))
+    return action.detach().clone()
+
+
+def _write_contact_calibration_phase(
+    env: object,
+    binding: PairwiseContactBinding,
+    phase: Literal["baseline", "target_touch", "target_removed"],
+) -> None:
+    scene = getattr(env, "scene", None)
+    box = _scene_get(scene, "box")
+    if box is None:
+        box = _scene_get(scene, "Box")
+    robot = _scene_get(scene, "robot")
+    box_state = getattr(getattr(box, "data", None), "root_state_w", None)
+    writer = getattr(box, "write_root_state_to_sim", None)
+    if (
+        robot is None
+        or not isinstance(box_state, torch.Tensor)
+        or box_state.ndim != 2
+        or box_state.shape[1] < 13
+        or not callable(writer)
+    ):
+        raise RecoveryTelemetryIncompleteError(("runtime_contact_calibration_pose",))
+    body_pose = _body_pose_tensor(
+        robot, binding.sensor_body_name, num_envs=box_state.shape[0]
     )
-    if missing:
-        raise RecoveryTelemetryIncompleteError(missing)
-    if provided != expected:
-        raise RecoveryTelemetryIncompleteError(("runtime_contact_mapping_proofs",))
-
-    runtime_identity_digest = str(
-        getattr(env, "recovery_runtime_identity_digest", "")
+    target_state = box_state.detach().clone()
+    target_state[:, :7] = body_pose
+    if phase != "target_touch":
+        target_state[:, 2] += 2.0 if phase == "baseline" else 3.0
+    target_state[:, 7:13] = 0.0
+    env_ids = torch.arange(
+        box_state.shape[0],
+        device=torch.device(getattr(env, "device", box_state.device)),
+        dtype=torch.long,
     )
-    if _SHA256_DIGEST.fullmatch(runtime_identity_digest) is None:
-        raise RecoveryTelemetryIncompleteError(("runtime_contact_proof_runtime_identity",))
-    return raw_proofs, runtime_identity_digest
+    writer(target_state, env_ids=env_ids)
 
 
-def _force_magnitude(force: tuple[float, float, float]) -> float:
-    return math.sqrt(sum(component * component for component in force))
+def _control_step_cursor(env: object) -> int:
+    value = getattr(env, "common_step_counter", None)
+    if type(value) is not int or value < 0:
+        raise RecoveryTelemetryIncompleteError(("runtime_contact_calibration_step",))
+    return value
 
 
-def _validated_contact_mapping_proof(
-    raw_proof: object,
+def _phase_receipt_digest(receipt: ContactCalibrationPhaseReceipt) -> str:
+    return _canonical_json_digest(
+        {
+            "schema_version": receipt.schema_version,
+            "task_identity": receipt.task_identity,
+            "phase": receipt.phase,
+            "sensor_scene_key": receipt.sensor_scene_key,
+            "sensor_body_name": receipt.sensor_body_name,
+            "source_snapshot_digest": receipt.source_snapshot_digest,
+            "phase_state_digest": receipt.phase_state_digest,
+            "runtime_identity_digest": receipt.runtime_identity_digest,
+            "sensor_identity_digest": receipt.sensor_identity_digest,
+            "control_step_before": receipt.control_step_before,
+            "control_step_after": receipt.control_step_after,
+            "force_shape": receipt.force_shape,
+            "force_dtype": receipt.force_dtype,
+            "force_device": receipt.force_device,
+            "force_byte_order": receipt.force_byte_order,
+            "raw_force_size": len(receipt.raw_force_bytes),
+            "raw_force_sha256": receipt.raw_force_sha256,
+        }
+    )
+
+
+def _issue_phase_receipt(
+    *,
+    phase: Literal["baseline", "target_touch", "target_removed"],
+    binding: PairwiseContactBinding,
+    source_snapshot_digest: str,
+    phase_state_digest: str,
+    runtime_identity_digest: str,
+    sensor_identity_digest: str,
+    control_step_before: int,
+    control_step_after: int,
+    force_matrix: torch.Tensor,
+) -> ContactCalibrationPhaseReceipt:
+    raw_force_bytes = (
+        force_matrix.detach().contiguous().cpu().numpy().tobytes(order="C")
+    )
+    receipt = object.__new__(ContactCalibrationPhaseReceipt)
+    values = {
+        "schema_version": RUNTIME_CONTACT_MAPPING_RECEIPT_SCHEMA_VERSION,
+        "task_identity": PP_BOX_TASK_IDENTITY,
+        "phase": phase,
+        "sensor_scene_key": binding.sensor_scene_key,
+        "sensor_body_name": binding.sensor_body_name,
+        "source_snapshot_digest": source_snapshot_digest,
+        "phase_state_digest": phase_state_digest,
+        "runtime_identity_digest": runtime_identity_digest,
+        "sensor_identity_digest": sensor_identity_digest,
+        "control_step_before": control_step_before,
+        "control_step_after": control_step_after,
+        "force_shape": tuple(force_matrix.shape),
+        "force_dtype": str(force_matrix.dtype),
+        "force_device": str(force_matrix.device),
+        "force_byte_order": sys.byteorder,
+        "raw_force_bytes": raw_force_bytes,
+        "raw_force_sha256": hashlib.sha256(raw_force_bytes).hexdigest(),
+        "_producer_token": _CONTACT_CALIBRATION_RECEIPT_TOKEN,
+    }
+    for name, value in values.items():
+        object.__setattr__(receipt, name, value)
+    object.__setattr__(receipt, "receipt_digest", _phase_receipt_digest(receipt))
+    return receipt
+
+
+def _sensor_receipt_digest(receipt: ContactSensorCalibrationReceipt) -> str:
+    return _canonical_json_digest(
+        {
+            "schema_version": receipt.schema_version,
+            "task_identity": receipt.task_identity,
+            "sensor_scene_key": receipt.sensor_scene_key,
+            "sensor_body_name": receipt.sensor_body_name,
+            "target_asset_scene_key": receipt.target_asset_scene_key,
+            "target_prim_paths": receipt.target_prim_paths,
+            "source_snapshot_digest": receipt.source_snapshot_digest,
+            "runtime_identity_digest": receipt.runtime_identity_digest,
+            "sensor_identity_digest": receipt.sensor_identity_digest,
+            "phase_receipt_digests": tuple(
+                phase.receipt_digest for phase in receipt.phases
+            ),
+        }
+    )
+
+
+def _issue_sensor_receipt(
     *,
     binding: PairwiseContactBinding,
-    candidate_asset_scene_key: str,
-    candidate_prim_paths: tuple[str, ...],
+    target_asset_scene_key: str,
+    target_prim_paths: tuple[str, ...],
+    source_snapshot_digest: str,
     runtime_identity_digest: str,
+    sensor_identity_digest: str,
+    phases: tuple[ContactCalibrationPhaseReceipt, ...],
+) -> ContactSensorCalibrationReceipt:
+    receipt = object.__new__(ContactSensorCalibrationReceipt)
+    values = {
+        "schema_version": RUNTIME_CONTACT_MAPPING_RECEIPT_SCHEMA_VERSION,
+        "task_identity": PP_BOX_TASK_IDENTITY,
+        "sensor_scene_key": binding.sensor_scene_key,
+        "sensor_body_name": binding.sensor_body_name,
+        "target_asset_scene_key": target_asset_scene_key,
+        "target_prim_paths": target_prim_paths,
+        "source_snapshot_digest": source_snapshot_digest,
+        "runtime_identity_digest": runtime_identity_digest,
+        "sensor_identity_digest": sensor_identity_digest,
+        "phases": phases,
+        "_producer_token": _CONTACT_CALIBRATION_RECEIPT_TOKEN,
+    }
+    for name, value in values.items():
+        object.__setattr__(receipt, name, value)
+    object.__setattr__(receipt, "receipt_digest", _sensor_receipt_digest(receipt))
+    return receipt
+
+
+def _execution_receipt_digest(receipt: ContactCalibrationExecutionReceipt) -> str:
+    return _canonical_json_digest(
+        {
+            "schema_version": receipt.schema_version,
+            "task_identity": receipt.task_identity,
+            "source_snapshot_digest": receipt.source_snapshot_digest,
+            "runtime_identity_digest": receipt.runtime_identity_digest,
+            "snapshot_fidelity_tier": receipt.snapshot_fidelity_tier,
+            "coordinator_binding_identity": receipt.coordinator_binding_identity,
+            "coordinator_binding_digest": receipt.coordinator_binding_digest,
+            "sensor_receipt_digests": tuple(
+                sensor.receipt_digest for sensor in receipt.sensor_receipts
+            ),
+        }
+    )
+
+
+def _decode_phase_forces(
+    receipt: ContactCalibrationPhaseReceipt,
+) -> tuple[tuple[float, ...], ...]:
+    format_by_dtype = {"torch.float32": "f", "torch.float64": "d"}
+    scalar_format = format_by_dtype.get(receipt.force_dtype)
+    if scalar_format is None or receipt.force_byte_order not in {"little", "big"}:
+        raise ValueError("unsupported contact receipt force encoding")
+    prefix = "<" if receipt.force_byte_order == "little" else ">"
+    scalar_size = struct.calcsize(prefix + scalar_format)
+    expected_values = math.prod(receipt.force_shape)
+    if len(receipt.raw_force_bytes) != expected_values * scalar_size:
+        raise ValueError("contact receipt raw force size does not match shape")
+    values = tuple(
+        float(value[0])
+        for value in struct.iter_unpack(prefix + scalar_format, receipt.raw_force_bytes)
+    )
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("contact receipt force is non-finite")
+    return tuple(values[offset : offset + 3] for offset in range(0, len(values), 3))
+
+
+def _validate_sensor_calibration_receipt(
+    receipt: object,
+    *,
+    binding: PairwiseContactBinding,
+    target_asset_scene_key: str,
+    target_prim_paths: tuple[str, ...],
+    source_snapshot_digest: str,
+    runtime_identity_digest: str,
+    sensor_identity_digest: str,
     num_envs: int,
-    capability: str,
-) -> EmpiricalContactMappingProof:
+) -> ContactSensorCalibrationReceipt:
+    capability = f"runtime_contact_mapping_receipt:{binding.sensor_scene_key}"
     try:
-        proof = EmpiricalContactMappingProof.from_value(raw_proof)
-        force_groups = (
-            proof.baseline_force_w,
-            proof.target_touch_force_w,
-            proof.target_removed_force_w,
-        )
-        normalized_groups = tuple(
-            _empirical_force_rows(group, name="contact mapping proof force")
-            for group in force_groups
-        )
-        state_digests = (
-            proof.baseline_state_digest,
-            proof.target_touch_state_digest,
-            proof.target_removed_state_digest,
-        )
-        quiet_groups = (proof.baseline_force_w, proof.target_removed_force_w)
+        if type(receipt) is not ContactSensorCalibrationReceipt:
+            raise ValueError("wrong receipt type")
+        expected_phases = ("baseline", "target_touch", "target_removed")
+        state_digests = tuple(phase.phase_state_digest for phase in receipt.phases)
         valid = (
-            type(proof.schema_version) is int
-            and proof.schema_version == RUNTIME_CONTACT_MAPPING_PROOF_SCHEMA_VERSION
-            and proof.task_identity == PP_BOX_TASK_IDENTITY
-            and proof.sensor_scene_key == binding.sensor_scene_key
-            and proof.sensor_body_name == binding.sensor_body_name
-            and proof.target_asset_scene_key == candidate_asset_scene_key
-            and proof.target_prim_paths == candidate_prim_paths
-            and normalized_groups == force_groups
-            and all(len(group) == num_envs for group in force_groups)
-            and all(_SHA256_DIGEST.fullmatch(value) is not None for value in state_digests)
-            and len(set(state_digests)) == len(state_digests)
-            and proof.runtime_identity_digest == runtime_identity_digest
-            and proof.proof_digest == empirical_contact_mapping_proof_digest(proof)
+            receipt._producer_token is _CONTACT_CALIBRATION_RECEIPT_TOKEN
+            and receipt.schema_version == RUNTIME_CONTACT_MAPPING_RECEIPT_SCHEMA_VERSION
+            and receipt.task_identity == PP_BOX_TASK_IDENTITY
+            and receipt.sensor_scene_key == binding.sensor_scene_key
+            and receipt.sensor_body_name == binding.sensor_body_name
+            and receipt.target_asset_scene_key == target_asset_scene_key
+            and receipt.target_prim_paths == target_prim_paths
+            and receipt.source_snapshot_digest == source_snapshot_digest
+            and receipt.runtime_identity_digest == runtime_identity_digest
+            and receipt.sensor_identity_digest == sensor_identity_digest
+            and tuple(phase.phase for phase in receipt.phases) == expected_phases
+            and len(set(state_digests)) == 3
             and all(
-                _force_magnitude(force) <= EMPIRICAL_CONTACT_QUIET_MAX_N
-                for group in quiet_groups
-                for force in group
+                _SHA256_DIGEST.fullmatch(value) is not None for value in state_digests
             )
-            and all(
-                _force_magnitude(force) >= EMPIRICAL_CONTACT_TOUCH_MIN_N
-                for force in proof.target_touch_force_w
-            )
+            and receipt.receipt_digest == _sensor_receipt_digest(receipt)
         )
-    except (TypeError, ValueError):
-        valid = False
-    if not valid:
-        raise RecoveryTelemetryIncompleteError((capability,))
-    return proof
+        if not valid:
+            raise ValueError("receipt identity mismatch")
+        decoded = []
+        for phase in receipt.phases:
+            if (
+                type(phase) is not ContactCalibrationPhaseReceipt
+                or phase._producer_token is not _CONTACT_CALIBRATION_RECEIPT_TOKEN
+                or phase.schema_version
+                != RUNTIME_CONTACT_MAPPING_RECEIPT_SCHEMA_VERSION
+                or phase.task_identity != PP_BOX_TASK_IDENTITY
+                or phase.sensor_scene_key != binding.sensor_scene_key
+                or phase.sensor_body_name != binding.sensor_body_name
+                or phase.source_snapshot_digest != source_snapshot_digest
+                or phase.runtime_identity_digest != runtime_identity_digest
+                or phase.sensor_identity_digest != sensor_identity_digest
+                or phase.control_step_after != phase.control_step_before + 1
+                or phase.force_shape != (num_envs, 1, 1, 3)
+                or hashlib.sha256(phase.raw_force_bytes).hexdigest()
+                != phase.raw_force_sha256
+                or phase.receipt_digest != _phase_receipt_digest(phase)
+            ):
+                raise ValueError("phase receipt mismatch")
+            decoded.append(_decode_phase_forces(phase))
+        for phase_forces in (decoded[0], decoded[2]):
+            if any(
+                math.sqrt(sum(value * value for value in force))
+                > EMPIRICAL_CONTACT_QUIET_MAX_N
+                for force in phase_forces
+            ):
+                raise ValueError("quiet phase contains contact")
+        if len(decoded[1]) != num_envs or any(
+            math.sqrt(sum(value * value for value in force))
+            < EMPIRICAL_CONTACT_TOUCH_MIN_N
+            for force in decoded[1]
+        ):
+            raise ValueError("touch phase lacks contact")
+    except (AttributeError, TypeError, ValueError):
+        raise RecoveryTelemetryIncompleteError((capability,)) from None
+    return receipt
+
+
+def _registered_contact_calibration_receipts(
+    env: object,
+    *,
+    bindings: Mapping[str, HandContactBinding],
+    runtime_identity_digest: str,
+    sensor_identity_digests: Mapping[str, str],
+    target_asset_scene_key: str,
+    target_prim_paths: tuple[str, ...],
+    num_envs: int,
+) -> dict[str, ContactSensorCalibrationReceipt]:
+    expected_keys = tuple(
+        binding.sensor_scene_key
+        for side in ("left", "right")
+        for binding in bindings[side].sensors
+    )
+    registered = _CONTACT_CALIBRATION_RECEIPTS.get(id(env))
+    if registered is None or registered[0] is not env:
+        raise RecoveryTelemetryIncompleteError(
+            tuple(f"runtime_contact_mapping_receipt:{key}" for key in expected_keys)
+        )
+    execution = registered[1]
+    executor = _installed_contact_calibration_executor(env)
+    try:
+        valid_execution = (
+            type(execution) is ContactCalibrationExecutionReceipt
+            and execution._producer_token is _CONTACT_CALIBRATION_RECEIPT_TOKEN
+            and execution.schema_version
+            == RUNTIME_CONTACT_MAPPING_RECEIPT_SCHEMA_VERSION
+            and execution.task_identity == PP_BOX_TASK_IDENTITY
+            and execution.runtime_identity_digest == runtime_identity_digest
+            and execution.snapshot_fidelity_tier == executor.snapshot_fidelity_tier
+            and execution.coordinator_binding_identity
+            == executor.coordinator_binding_identity
+            and execution.coordinator_binding_digest
+            == executor.coordinator_binding_digest
+            and _SHA256_DIGEST.fullmatch(execution.source_snapshot_digest) is not None
+            and execution.receipt_digest == _execution_receipt_digest(execution)
+        )
+    except (AttributeError, TypeError, ValueError):
+        valid_execution = False
+    if not valid_execution:
+        raise RecoveryTelemetryIncompleteError(("runtime_contact_mapping_receipts",))
+    by_key = {
+        receipt.sensor_scene_key: receipt for receipt in execution.sensor_receipts
+    }
+    if len(by_key) != len(expected_keys) or set(by_key) != set(expected_keys):
+        raise RecoveryTelemetryIncompleteError(("runtime_contact_mapping_receipts",))
+    result = {}
+    bindings_by_key = {
+        binding.sensor_scene_key: binding
+        for side in ("left", "right")
+        for binding in bindings[side].sensors
+    }
+    for key in expected_keys:
+        result[key] = _validate_sensor_calibration_receipt(
+            by_key[key],
+            binding=bindings_by_key[key],
+            target_asset_scene_key=target_asset_scene_key,
+            target_prim_paths=target_prim_paths,
+            source_snapshot_digest=execution.source_snapshot_digest,
+            runtime_identity_digest=runtime_identity_digest,
+            sensor_identity_digest=sensor_identity_digests[key],
+            num_envs=num_envs,
+        )
+    return result
+
+
+def execute_pp_box_contact_calibration(
+    env: object,
+) -> ContactCalibrationExecutionReceipt:
+    """Run the one-time 16-sensor calibration (48 primitive simulator steps)."""
+
+    bindings = _resolve_hand_contact_bindings(env)
+    executor = _installed_contact_calibration_executor(env)
+    (
+        runtime_identity_digest,
+        sensor_identity_digests,
+        target_asset_scene_key,
+        target_prim_paths,
+    ) = _runtime_contact_identities(env, bindings)
+    coordinator = executor.coordinator
+    source_snapshot = coordinator.capture(
+        fidelity_tier=executor.snapshot_fidelity_tier,
+    )
+    source_snapshot_digest = str(coordinator.digest(source_snapshot))
+    if _SHA256_DIGEST.fullmatch(source_snapshot_digest) is None:
+        raise RecoveryTelemetryIncompleteError(
+            ("runtime_contact_calibration_snapshot",)
+        )
+    coordinator.preflight(
+        source_snapshot,
+        snapshot_digest=source_snapshot_digest,
+    )
+    coordinator.restore(
+        source_snapshot,
+        snapshot_digest=source_snapshot_digest,
+    )
+    roundtrip_snapshot = coordinator.capture(
+        fidelity_tier=executor.snapshot_fidelity_tier,
+    )
+    roundtrip_digest = str(coordinator.digest(roundtrip_snapshot))
+    if roundtrip_digest != source_snapshot_digest:
+        raise RecoveryTelemetryIncompleteError(
+            ("runtime_contact_calibration_snapshot_roundtrip",)
+        )
+    fixed_action = _calibration_fixed_action(env)
+    _CONTACT_CALIBRATION_RECEIPTS.pop(id(env), None)
+    sensor_receipts = []
+    try:
+        for side in ("left", "right"):
+            for binding in bindings[side].sensors:
+                phases = []
+                for phase in ("baseline", "target_touch", "target_removed"):
+                    coordinator.restore(
+                        source_snapshot,
+                        snapshot_digest=source_snapshot_digest,
+                    )
+                    _write_contact_calibration_phase(env, binding, phase)
+                    step_before = _control_step_cursor(env)
+                    env.step(fixed_action.detach().clone())  # type: ignore[attr-defined]
+                    step_after = _control_step_cursor(env)
+                    phase_snapshot = coordinator.capture(
+                        fidelity_tier=executor.snapshot_fidelity_tier,
+                    )
+                    phase_state_digest = str(coordinator.digest(phase_snapshot))
+                    sensor = _scene_get(
+                        getattr(env, "scene", None), binding.sensor_scene_key
+                    )
+                    force_matrix = getattr(
+                        getattr(sensor, "data", None), "force_matrix_w", None
+                    )
+                    if (
+                        not isinstance(force_matrix, torch.Tensor)
+                        or force_matrix.shape
+                        != (int(getattr(env, "num_envs", 0)), 1, 1, 3)
+                        or not force_matrix.is_floating_point()
+                        or step_after != step_before + 1
+                        or _SHA256_DIGEST.fullmatch(phase_state_digest) is None
+                    ):
+                        raise RecoveryTelemetryIncompleteError(
+                            ("runtime_contact_calibration_step",)
+                        )
+                    phases.append(
+                        _issue_phase_receipt(
+                            phase=phase,
+                            binding=binding,
+                            source_snapshot_digest=source_snapshot_digest,
+                            phase_state_digest=phase_state_digest,
+                            runtime_identity_digest=runtime_identity_digest,
+                            sensor_identity_digest=sensor_identity_digests[
+                                binding.sensor_scene_key
+                            ],
+                            control_step_before=step_before,
+                            control_step_after=step_after,
+                            force_matrix=force_matrix,
+                        )
+                    )
+                sensor_receipt = _issue_sensor_receipt(
+                    binding=binding,
+                    target_asset_scene_key=target_asset_scene_key,
+                    target_prim_paths=target_prim_paths,
+                    source_snapshot_digest=source_snapshot_digest,
+                    runtime_identity_digest=runtime_identity_digest,
+                    sensor_identity_digest=sensor_identity_digests[
+                        binding.sensor_scene_key
+                    ],
+                    phases=tuple(phases),
+                )
+                try:
+                    _validate_sensor_calibration_receipt(
+                        sensor_receipt,
+                        binding=binding,
+                        target_asset_scene_key=target_asset_scene_key,
+                        target_prim_paths=target_prim_paths,
+                        source_snapshot_digest=source_snapshot_digest,
+                        runtime_identity_digest=runtime_identity_digest,
+                        sensor_identity_digest=sensor_identity_digests[
+                            binding.sensor_scene_key
+                        ],
+                        num_envs=int(getattr(env, "num_envs", 0)),
+                    )
+                except RecoveryTelemetryIncompleteError as exc:
+                    touch = phases[1]
+                    try:
+                        touch_forces = _decode_phase_forces(touch)
+                    except ValueError:
+                        touch_forces = ()
+                    if not touch_forces or any(
+                        math.sqrt(sum(value * value for value in force))
+                        < EMPIRICAL_CONTACT_TOUCH_MIN_N
+                        for force in touch_forces
+                    ):
+                        raise RecoveryTelemetryIncompleteError(
+                            ("runtime_contact_calibration_touch",)
+                        ) from exc
+                    raise
+                sensor_receipts.append(sensor_receipt)
+        execution = object.__new__(ContactCalibrationExecutionReceipt)
+        values = {
+            "schema_version": RUNTIME_CONTACT_MAPPING_RECEIPT_SCHEMA_VERSION,
+            "task_identity": PP_BOX_TASK_IDENTITY,
+            "source_snapshot_digest": source_snapshot_digest,
+            "runtime_identity_digest": runtime_identity_digest,
+            "snapshot_fidelity_tier": executor.snapshot_fidelity_tier,
+            "coordinator_binding_identity": executor.coordinator_binding_identity,
+            "coordinator_binding_digest": executor.coordinator_binding_digest,
+            "sensor_receipts": tuple(sensor_receipts),
+            "_producer_token": _CONTACT_CALIBRATION_RECEIPT_TOKEN,
+        }
+        for name, value in values.items():
+            object.__setattr__(execution, name, value)
+        object.__setattr__(
+            execution, "receipt_digest", _execution_receipt_digest(execution)
+        )
+    finally:
+        coordinator.restore(
+            source_snapshot,
+            snapshot_digest=source_snapshot_digest,
+        )
+    _CONTACT_CALIBRATION_RECEIPTS[id(env)] = (env, execution)
+    env.recovery_contact_mapping_receipt = execution
+    env.recovery_runtime_identity_digest = runtime_identity_digest
+    return execution
 
 
 def _resolve_hand_contact_bindings(env: object) -> dict[str, HandContactBinding]:
@@ -1145,11 +1889,6 @@ def validate_runtime_hand_contact_sensors(
             ("runtime_contact_tensor_device",)
         ) from exc
 
-    expected_scene_keys = tuple(
-        binding.sensor_scene_key
-        for side in ("left", "right")
-        for binding in bindings[side].sensors
-    )
     (
         candidate_asset_scene_key,
         _candidate_asset,
@@ -1157,12 +1896,8 @@ def validate_runtime_hand_contact_sensors(
         candidate_asset_prim_paths,
         candidate_namespaces,
     ) = _resolve_candidate_filter_asset(scene, num_envs=num_envs)
-    mapping_proofs, runtime_identity_digest = _resolve_contact_mapping_proofs(
-        env,
-        expected_scene_keys=expected_scene_keys,
-    )
-
-    reports = []
+    materialized = []
+    force_matrices = []
     first_dtype: torch.dtype | None = None
     for side in ("left", "right"):
         for binding in bindings[side].sensors:
@@ -1202,9 +1937,6 @@ def validate_runtime_hand_contact_sensors(
             if not valid_tensor:
                 raise RecoveryTelemetryIncompleteError((capability,))
             assert isinstance(force_matrix, torch.Tensor)
-            finite = bool(torch.isfinite(force_matrix).all().item())
-            if not finite:
-                raise RecoveryTelemetryIncompleteError((capability,))
             if first_dtype is None:
                 first_dtype = force_matrix.dtype
             elif force_matrix.dtype != first_dtype:
@@ -1225,42 +1957,96 @@ def validate_runtime_hand_contact_sensors(
                 != candidate_asset_prim_path.rsplit("/", 1)[-1]
             ):
                 raise RecoveryTelemetryIncompleteError((capability,))
-
-            proof_capability = f"runtime_contact_mapping_proof:{binding.sensor_scene_key}"
-            proof = _validated_contact_mapping_proof(
-                mapping_proofs[binding.sensor_scene_key],
-                binding=binding,
-                candidate_asset_scene_key=candidate_asset_scene_key,
-                candidate_prim_paths=candidate_asset_prim_paths,
-                runtime_identity_digest=runtime_identity_digest,
-                num_envs=num_envs,
-                capability=proof_capability,
-            )
-            reports.append(
-                RuntimeContactSensorReport(
-                    schema_version=RUNTIME_CONTACT_SENSOR_REPORT_SCHEMA_VERSION,
-                    side=side,
-                    sensor_scene_key=binding.sensor_scene_key,
-                    sensor_prim_path_expression=sensor_prim_path,
-                    resolved_sensor_prim_paths=resolved_sensor_prim_paths,
-                    resolved_sensor_body_names=body_names,
-                    configured_filter_prim_path_expressions=filter_prim_paths,
-                    candidate_filter_asset_scene_key=candidate_asset_scene_key,
-                    candidate_filter_asset_prim_path_expression=candidate_asset_prim_path,
-                    candidate_filter_asset_prim_paths=candidate_asset_prim_paths,
-                    proven_filter_prim_paths=proof.target_prim_paths,
-                    proven_filter_body_name=binding.filtered_body_name,
-                    filter_mapping_proof_schema_version=proof.schema_version,
-                    filter_mapping_proof_source="empirical_baseline_touch_removed",
-                    filter_mapping_proof_digest=proof.proof_digest,
-                    num_bodies=num_bodies,
-                    filter_count=filter_count,
-                    force_matrix_shape=tuple(force_matrix.shape),
-                    force_matrix_dtype=str(force_matrix.dtype),
-                    force_matrix_device=str(force_matrix.device),
-                    force_matrix_finite=finite,
+            force_matrices.append(force_matrix[:, 0, 0, :])
+            materialized.append(
+                (
+                    side,
+                    binding,
+                    sensor_prim_path,
+                    resolved_sensor_prim_paths,
+                    body_names,
+                    filter_prim_paths,
+                    num_bodies,
+                    filter_count,
+                    force_matrix,
                 )
             )
+
+    finite_by_sensor = (
+        torch.isfinite(torch.stack(force_matrices, dim=1))
+        .all(dim=0)
+        .all(dim=-1)
+        .detach()
+        .cpu()
+        .tolist()
+    )
+    for is_finite, values in zip(finite_by_sensor, materialized, strict=True):
+        if not bool(is_finite):
+            binding = values[1]
+            raise RecoveryTelemetryIncompleteError(
+                (f"runtime_contact_sensor:{binding.sensor_scene_key}",)
+            )
+
+    (
+        runtime_identity_digest,
+        sensor_identity_digests,
+        identity_asset_scene_key,
+        identity_target_prim_paths,
+    ) = _runtime_contact_identities(env, bindings)
+    if (
+        identity_asset_scene_key != candidate_asset_scene_key
+        or identity_target_prim_paths != candidate_asset_prim_paths
+    ):
+        raise RecoveryTelemetryIncompleteError(("runtime_contact_filter_asset",))
+    mapping_receipts = _registered_contact_calibration_receipts(
+        env,
+        bindings=bindings,
+        runtime_identity_digest=runtime_identity_digest,
+        sensor_identity_digests=sensor_identity_digests,
+        target_asset_scene_key=candidate_asset_scene_key,
+        target_prim_paths=candidate_asset_prim_paths,
+        num_envs=num_envs,
+    )
+
+    reports = []
+    for values in materialized:
+        (
+            side,
+            binding,
+            sensor_prim_path,
+            resolved_sensor_prim_paths,
+            body_names,
+            filter_prim_paths,
+            num_bodies,
+            filter_count,
+            force_matrix,
+        ) = values
+        receipt = mapping_receipts[binding.sensor_scene_key]
+        reports.append(
+            RuntimeContactSensorReport(
+                schema_version=RUNTIME_CONTACT_SENSOR_REPORT_SCHEMA_VERSION,
+                side=side,
+                sensor_scene_key=binding.sensor_scene_key,
+                sensor_prim_path_expression=sensor_prim_path,
+                resolved_sensor_prim_paths=resolved_sensor_prim_paths,
+                resolved_sensor_body_names=body_names,
+                configured_filter_prim_path_expressions=filter_prim_paths,
+                candidate_filter_asset_scene_key=candidate_asset_scene_key,
+                candidate_filter_asset_prim_path_expression=candidate_asset_prim_path,
+                candidate_filter_asset_prim_paths=candidate_asset_prim_paths,
+                proven_filter_prim_paths=receipt.target_prim_paths,
+                proven_filter_body_name=binding.filtered_body_name,
+                filter_mapping_proof_schema_version=receipt.schema_version,
+                filter_mapping_proof_source="controlled_three_phase_executor",
+                filter_mapping_proof_digest=receipt.receipt_digest,
+                num_bodies=num_bodies,
+                filter_count=filter_count,
+                force_matrix_shape=tuple(force_matrix.shape),
+                force_matrix_dtype=str(force_matrix.dtype),
+                force_matrix_device=str(force_matrix.device),
+                force_matrix_finite=True,
+            )
+        )
     return tuple(reports)
 
 
@@ -1285,7 +2071,9 @@ def _resolve_terminal_contexts(
         for context in contexts:
             context.validate()
     except (TypeError, ValueError) as exc:
-        raise RecoveryTelemetryIncompleteError(("authoritative_terminal_context",)) from exc
+        raise RecoveryTelemetryIncompleteError(
+            ("authoritative_terminal_context",)
+        ) from exc
     return contexts
 
 
@@ -1300,7 +2088,9 @@ def _resolve_telemetry_thresholds(env: object) -> tuple[float, float]:
         contact_threshold = float(raw["contact_force_n"])
         ee_distance_threshold = float(raw["max_ee_box_distance_m"])
     except (TypeError, ValueError) as exc:
-        raise RecoveryTelemetryIncompleteError(("recovery_telemetry_thresholds",)) from exc
+        raise RecoveryTelemetryIncompleteError(
+            ("recovery_telemetry_thresholds",)
+        ) from exc
     if (
         not math.isfinite(contact_threshold)
         or contact_threshold <= 0.0
@@ -1325,7 +2115,11 @@ def _box_state_tensors(
         center = root_state[:, 0:3]
     linear_velocity = getattr(data, "root_lin_vel_w", None)
     angular_velocity = getattr(data, "root_ang_vel_w", None)
-    if isinstance(root_state, torch.Tensor) and root_state.ndim == 2 and root_state.shape[1] >= 13:
+    if (
+        isinstance(root_state, torch.Tensor)
+        and root_state.ndim == 2
+        and root_state.shape[1] >= 13
+    ):
         if linear_velocity is None:
             linear_velocity = root_state[:, 7:10]
         if angular_velocity is None:
@@ -1376,37 +2170,50 @@ def _body_pose_tensor(
     return torch.cat((body_pos[:, body_index, :], body_quat[:, body_index, :]), dim=-1)
 
 
-def _pairwise_force_tensor(
+def _batched_pairwise_force_rows(
     scene: object,
-    binding: PairwiseContactBinding,
     *,
-    side: str,
+    bindings: Mapping[str, HandContactBinding],
     num_envs: int,
-    validated_report: RuntimeContactSensorReport,
-) -> torch.Tensor:
-    sensor = _scene_get(scene, binding.sensor_scene_key)
-    data = getattr(sensor, "data", None)
-    force_matrix = getattr(data, "force_matrix_w", None)
-    body_names = list(getattr(sensor, "body_names", ()) or ())
-
-    if (
-        not isinstance(force_matrix, torch.Tensor)
-        or force_matrix.shape != (num_envs, 1, 1, 3)
-        or not force_matrix.is_floating_point()
-        or not bool(torch.isfinite(force_matrix).all().item())
-        or getattr(sensor, "num_bodies", None) != 1
-        or body_names != [binding.sensor_body_name]
-        or validated_report.sensor_scene_key != binding.sensor_scene_key
-        or validated_report.resolved_sensor_body_names != (binding.sensor_body_name,)
-        or validated_report.proven_filter_body_name != binding.filtered_body_name
-        or not validated_report.proven_filter_prim_paths
-        or validated_report.filter_mapping_proof_source
-        != "empirical_baseline_touch_removed"
-        or str(force_matrix.dtype) != validated_report.force_matrix_dtype
-        or str(force_matrix.device) != validated_report.force_matrix_device
-    ):
-        raise RecoveryTelemetryIncompleteError((f"{side}_box_pairwise_contact",))
-    return force_matrix[:, 0, 0, :]
+    reports_by_scene_key: Mapping[str, RuntimeContactSensorReport],
+) -> tuple[tuple[tuple[float, float, float], ...], ...]:
+    force_rows = []
+    for side in ("left", "right"):
+        for binding in bindings[side].sensors:
+            sensor = _scene_get(scene, binding.sensor_scene_key)
+            force_matrix = getattr(
+                getattr(sensor, "data", None), "force_matrix_w", None
+            )
+            report = reports_by_scene_key[binding.sensor_scene_key]
+            if (
+                not isinstance(force_matrix, torch.Tensor)
+                or force_matrix.shape != (num_envs, 1, 1, 3)
+                or not force_matrix.is_floating_point()
+                or getattr(sensor, "num_bodies", None) != 1
+                or tuple(getattr(sensor, "body_names", ()) or ())
+                != (binding.sensor_body_name,)
+                or report.sensor_scene_key != binding.sensor_scene_key
+                or report.resolved_sensor_body_names != (binding.sensor_body_name,)
+                or report.proven_filter_body_name != binding.filtered_body_name
+                or not report.proven_filter_prim_paths
+                or report.filter_mapping_proof_source
+                != "controlled_three_phase_executor"
+                or str(force_matrix.dtype) != report.force_matrix_dtype
+                or str(force_matrix.device) != report.force_matrix_device
+            ):
+                raise RecoveryTelemetryIncompleteError(
+                    (f"{side}_box_pairwise_contact",)
+                )
+            force_rows.append(force_matrix[:, 0, 0, :])
+    materialized = torch.stack(force_rows, dim=1).detach().cpu()
+    if not bool(torch.isfinite(materialized).all().item()):
+        raise RecoveryTelemetryIncompleteError(
+            ("left_box_pairwise_contact", "right_box_pairwise_contact")
+        )
+    return tuple(
+        tuple((float(force[0]), float(force[1]), float(force[2])) for force in env_row)
+        for env_row in materialized.tolist()
+    )
 
 
 def _root_quaternion_tensor(robot: object, *, num_envs: int) -> torch.Tensor:
@@ -1426,34 +2233,41 @@ def _critical_body_contact_by_env(
     robot: object,
     *,
     num_envs: int,
+    critical_body_indices: tuple[int, ...],
+    critical_body_names: tuple[str, ...],
+    force_threshold_n: float,
 ) -> list[bool | None]:
     data = getattr(robot, "data", None)
     body_names = list(getattr(data, "body_names", ()) or ())
-    indices = []
-    for index, name in enumerate(body_names):
-        lowered = str(name).lower()
-        if any(token in lowered for token in _FALL_SUPPORTED_BODY_TOKENS):
-            continue
-        if any(token in lowered for token in _FALL_CRITICAL_BODY_TOKENS):
-            indices.append(index)
-
-    if not indices:
-        return [None] * num_envs
+    if (
+        not critical_body_indices
+        or len(critical_body_indices) != len(critical_body_names)
+        or any(index < 0 or index >= len(body_names) for index in critical_body_indices)
+        or tuple(str(body_names[index]) for index in critical_body_indices)
+        != critical_body_names
+    ):
+        raise RecoveryTelemetryIncompleteError(("critical_body_identity",))
+    threshold = float(force_threshold_n)
+    if not math.isfinite(threshold) or threshold <= 0.0:
+        raise RecoveryTelemetryIncompleteError(("fall_detector_config",))
 
     direct_forces = getattr(data, "body_net_contact_force_w", None)
     if direct_forces is None:
         direct_forces = getattr(data, "body_net_contact_forces_w", None)
     if direct_forces is not None:
-        if (
-            not isinstance(direct_forces, torch.Tensor)
-            or direct_forces.shape != (num_envs, len(body_names), 3)
+        if not isinstance(direct_forces, torch.Tensor) or direct_forces.shape != (
+            num_envs,
+            len(body_names),
+            3,
         ):
             return [None] * num_envs
-        contact_forces = direct_forces[:, indices, :]
+        contact_forces = direct_forces[:, critical_body_indices, :]
     else:
         contact_sensor = _scene_get(scene, "contact_forces")
         sensor_body_names = list(getattr(contact_sensor, "body_names", ()) or ())
-        sensor_forces = getattr(getattr(contact_sensor, "data", None), "net_forces_w", None)
+        sensor_forces = getattr(
+            getattr(contact_sensor, "data", None), "net_forces_w", None
+        )
         if (
             not isinstance(sensor_forces, torch.Tensor)
             or sensor_forces.shape != (num_envs, len(sensor_body_names), 3)
@@ -1465,17 +2279,113 @@ def _critical_body_contact_by_env(
             str(name): index for index, name in enumerate(sensor_body_names)
         }
         critical_sensor_indices = [
-            sensor_name_to_index.get(str(body_names[index])) for index in indices
+            sensor_name_to_index.get(str(body_names[index]))
+            for index in critical_body_indices
         ]
         if any(index is None for index in critical_sensor_indices):
             return [None] * num_envs
         contact_forces = sensor_forces[:, critical_sensor_indices, :]
 
-    magnitudes = torch.linalg.vector_norm(contact_forces, dim=-1)
-    return [
-        bool(value)
-        for value in (magnitudes >= CRITICAL_BODY_CONTACT_THRESHOLD_N).any(dim=1).tolist()
-    ]
+    finite_by_env = torch.isfinite(contact_forces).all(dim=-1).all(dim=-1)
+    contact_by_env = (
+        torch.linalg.vector_norm(contact_forces, dim=-1) >= threshold
+    ).any(dim=1)
+    materialized = (
+        torch.stack((finite_by_env, contact_by_env), dim=1).detach().cpu().tolist()
+    )
+    if any(not bool(finite) for finite, _contact in materialized):
+        raise RecoveryTelemetryIncompleteError(("critical_body_contact",))
+    return [bool(contact) for _finite, contact in materialized]
+
+
+def _normalize_evaluator_fall_detector(
+    env: object,
+    value: object,
+) -> EvaluatorFallDetectorConfig:
+    if value is None:
+        return EvaluatorFallDetectorConfig(
+            enabled=False,
+            soft_up_alignment=SOFT_FALL_UP_ALIGNMENT,
+            hard_up_alignment=HARD_FALL_UP_ALIGNMENT,
+            contact_force_threshold_n=CRITICAL_BODY_CONTACT_THRESHOLD_N,
+            confirm_steps=5,
+            critical_body_indices=(),
+            critical_body_names=(),
+        )
+    if not isinstance(value, Mapping):
+        raise RecoveryTelemetryIncompleteError(("fall_detector_config",))
+    try:
+        soft = float(value["soft_up_alignment"])
+        hard = float(value["hard_up_alignment"])
+        force_threshold = float(value["contact_force_threshold"])
+        confirm_steps = value["confirm_steps"]
+        raw_indices = value["critical_body_indices"]
+        raw_names = value["critical_body_names"]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RecoveryTelemetryIncompleteError(("fall_detector_config",)) from exc
+    if (
+        type(confirm_steps) is not int
+        or confirm_steps <= 0
+        or not math.isfinite(soft)
+        or not math.isfinite(hard)
+        or not -1.0 <= hard < soft <= 1.0
+        or not math.isfinite(force_threshold)
+        or force_threshold <= 0.0
+        or not isinstance(raw_indices, Sequence)
+        or isinstance(raw_indices, (str, bytes, bytearray))
+        or not isinstance(raw_names, Sequence)
+        or isinstance(raw_names, (str, bytes, bytearray))
+    ):
+        raise RecoveryTelemetryIncompleteError(("fall_detector_config",))
+    indices = tuple(raw_indices)
+    names = tuple(str(name) for name in raw_names)
+    if (
+        not indices
+        or len(indices) != len(names)
+        or any(type(index) is not int or index < 0 for index in indices)
+        or len(set(indices)) != len(indices)
+        or len(set(names)) != len(names)
+    ):
+        raise RecoveryTelemetryIncompleteError(("fall_detector_config",))
+
+    robot = _scene_get(getattr(env, "scene", None), "robot")
+    body_names = tuple(
+        str(name) for name in getattr(getattr(robot, "data", None), "body_names", ())
+    )
+    expected_indices = []
+    expected_names = []
+    for index, name in enumerate(body_names):
+        lowered = name.lower()
+        if any(token in lowered for token in _FALL_SUPPORTED_BODY_TOKENS):
+            continue
+        if any(token in lowered for token in _FALL_CRITICAL_BODY_TOKENS):
+            expected_indices.append(index)
+            expected_names.append(name)
+    if indices != tuple(expected_indices) or names != tuple(expected_names):
+        raise RecoveryTelemetryIncompleteError(("fall_detector_body_identity",))
+    return EvaluatorFallDetectorConfig(
+        enabled=True,
+        soft_up_alignment=soft,
+        hard_up_alignment=hard,
+        contact_force_threshold_n=force_threshold,
+        confirm_steps=confirm_steps,
+        critical_body_indices=indices,
+        critical_body_names=names,
+    )
+
+
+def _fall_detector_config_digest(config: EvaluatorFallDetectorConfig) -> str:
+    return _canonical_json_digest(
+        {
+            "enabled": config.enabled,
+            "soft_up_alignment": config.soft_up_alignment,
+            "hard_up_alignment": config.hard_up_alignment,
+            "contact_force_threshold_n": config.contact_force_threshold_n,
+            "confirm_steps": config.confirm_steps,
+            "critical_body_indices": config.critical_body_indices,
+            "critical_body_names": config.critical_body_names,
+        }
+    )
 
 
 def live_fall_evidence_digest(evidence: LiveFallProducerEvidence) -> str:
@@ -1487,6 +2397,7 @@ def live_fall_evidence_digest(evidence: LiveFallProducerEvidence) -> str:
         "schema_version": evidence.schema_version,
         "task_identity": evidence.task_identity,
         "runtime_identity_digest": evidence.runtime_identity_digest,
+        "detector_config_digest": evidence.detector_config_digest,
         "lanes": [
             {
                 "env_index": lane.env_index,
@@ -1495,6 +2406,9 @@ def live_fall_evidence_digest(evidence: LiveFallProducerEvidence) -> str:
                 "root_up_alignment": lane.root_up_alignment,
                 "critical_body_contact": lane.critical_body_contact,
                 "fall_candidate": lane.fall_candidate,
+                "detector_enabled": lane.detector_enabled,
+                "soft_up_alignment": lane.soft_up_alignment,
+                "hard_up_alignment": lane.hard_up_alignment,
             }
             for lane in evidence.lanes
         ],
@@ -1509,10 +2423,11 @@ def live_fall_evidence_digest(evidence: LiveFallProducerEvidence) -> str:
     return hashlib.sha256(serialized).hexdigest()
 
 
-def produce_live_fall_evidence(
+def _produce_live_fall_evidence(
     env: object,
     *,
     control_step_counts: Sequence[int],
+    detector_config: EvaluatorFallDetectorConfig,
 ) -> LiveFallProducerEvidence:
     """Read the sole live root/contact fall source for one primitive step."""
 
@@ -1528,16 +2443,23 @@ def produce_live_fall_evidence(
         or any(type(step) is not int or step < 0 for step in control_step_counts)
     ):
         raise RecoveryTelemetryIncompleteError(("live_fall_control_step",))
-    runtime_identity_digest = str(
-        getattr(env, "recovery_runtime_identity_digest", "")
-    )
-    if _SHA256_DIGEST.fullmatch(runtime_identity_digest) is None:
-        raise RecoveryTelemetryIncompleteError(("live_fall_runtime_identity",))
+    bindings = _resolve_hand_contact_bindings(env)
+    runtime_identity_digest = _runtime_contact_identities(env, bindings)[0]
     robot = _scene_get(scene, "robot")
     if robot is None:
         raise RecoveryTelemetryIncompleteError(("robot_state",))
     root_quaternions = _root_quaternion_tensor(robot, num_envs=num_envs)
-    critical_contacts = _critical_body_contact_by_env(scene, robot, num_envs=num_envs)
+    if detector_config.enabled:
+        critical_contacts = _critical_body_contact_by_env(
+            scene,
+            robot,
+            num_envs=num_envs,
+            critical_body_indices=detector_config.critical_body_indices,
+            critical_body_names=detector_config.critical_body_names,
+            force_threshold_n=detector_config.contact_force_threshold_n,
+        )
+    else:
+        critical_contacts = [None] * num_envs
     lanes = []
     for env_index in range(num_envs):
         root_quaternion = _as_float_tuple(
@@ -1562,7 +2484,13 @@ def produce_live_fall_evidence(
                 fall_candidate=classify_fall(
                     root_up_alignment,
                     critical_body_contact=critical_contact,
+                    detector_enabled=detector_config.enabled,
+                    soft_up_alignment=detector_config.soft_up_alignment,
+                    hard_up_alignment=detector_config.hard_up_alignment,
                 ),
+                detector_enabled=detector_config.enabled,
+                soft_up_alignment=detector_config.soft_up_alignment,
+                hard_up_alignment=detector_config.hard_up_alignment,
             )
         )
     evidence = object.__new__(LiveFallProducerEvidence)
@@ -1570,6 +2498,7 @@ def produce_live_fall_evidence(
         "schema_version": LIVE_FALL_EVIDENCE_SCHEMA_VERSION,
         "task_identity": PP_BOX_TASK_IDENTITY,
         "runtime_identity_digest": runtime_identity_digest,
+        "detector_config_digest": _fall_detector_config_digest(detector_config),
         "lanes": tuple(lanes),
         "_producer_token": _LIVE_FALL_PRODUCER_TOKEN,
     }
@@ -1583,6 +2512,133 @@ def produce_live_fall_evidence(
     return evidence
 
 
+def evaluator_terminal_evidence_digest(evidence: EvaluatorTerminalEvidence) -> str:
+    """Recompute the canonical evaluator-step evidence digest."""
+
+    if type(evidence) is not EvaluatorTerminalEvidence:
+        raise TypeError("terminal digest requires EvaluatorTerminalEvidence")
+    return _canonical_json_digest(
+        {
+            "schema_version": evidence.schema_version,
+            "task_identity": evidence.task_identity,
+            "runtime_identity_digest": evidence.runtime_identity_digest,
+            "detector_config_digest": evidence.detector_config_digest,
+            "step_idx": evidence.step_idx,
+            "max_steps": evidence.max_steps,
+            "previous_evidence_digest": evidence.previous_evidence_digest,
+            "contexts": [
+                {
+                    "control_step_count": context.control_step_count,
+                    "max_control_steps": context.max_control_steps,
+                    "fall_streak": context.fall_streak,
+                    "fall_confirm_steps": context.fall_confirm_steps,
+                    "time_limit": context.time_limit,
+                    "fall_confirmed": context.fall_confirmed,
+                }
+                for context in evidence.contexts
+            ],
+            "live_fall_evidence_digest": evidence.live_fall_evidence.evidence_digest,
+        }
+    )
+
+
+def _registered_evaluator_terminal_evidence(
+    env: object,
+) -> EvaluatorTerminalEvidence | None:
+    registered = _EVALUATOR_TERMINAL_EVIDENCE.get(id(env))
+    if registered is None or registered[0] is not env:
+        return None
+    evidence = registered[1]
+    if type(evidence) is not EvaluatorTerminalEvidence:
+        return None
+    return evidence
+
+
+def produce_evaluator_terminal_evidence(
+    env: object,
+    *,
+    step_idx: int,
+    max_steps: int,
+    fall_detector: object,
+) -> EvaluatorTerminalEvidence:
+    """Produce the sole fall/timeout context from the evaluator's live cadence."""
+
+    _require_pp_box_task_identity(env)
+    if (
+        type(step_idx) is not int
+        or step_idx <= 0
+        or type(max_steps) is not int
+        or max_steps <= 0
+    ):
+        raise RecoveryTelemetryIncompleteError(("evaluator_step_context",))
+    detector_config = _normalize_evaluator_fall_detector(env, fall_detector)
+    detector_digest = _fall_detector_config_digest(detector_config)
+    previous = _registered_evaluator_terminal_evidence(env)
+    if step_idx == 1:
+        previous = None
+    elif (
+        previous is None
+        or previous._producer_token is not _EVALUATOR_TERMINAL_EVIDENCE_TOKEN
+        or previous.step_idx != step_idx - 1
+        or previous.max_steps != max_steps
+        or previous.detector_config_digest != detector_digest
+        or previous.evidence_digest != evaluator_terminal_evidence_digest(previous)
+    ):
+        raise RecoveryTelemetryIncompleteError(("evaluator_terminal_sequence",))
+
+    num_envs = int(getattr(env, "num_envs", 0))
+    live_evidence = _produce_live_fall_evidence(
+        env,
+        control_step_counts=(step_idx,) * num_envs,
+        detector_config=detector_config,
+    )
+    contexts = []
+    for env_index, lane in enumerate(live_evidence.lanes):
+        previous_streak = (
+            0 if previous is None else previous.contexts[env_index].fall_streak
+        )
+        fall_streak = previous_streak + 1 if lane.fall_candidate else 0
+        contexts.append(
+            DriverTerminalContext(
+                control_step_count=step_idx,
+                max_control_steps=max_steps,
+                fall_streak=fall_streak,
+                fall_confirm_steps=detector_config.confirm_steps,
+                time_limit=step_idx >= max_steps,
+                fall_confirmed=(
+                    detector_config.enabled
+                    and fall_streak >= detector_config.confirm_steps
+                ),
+            )
+        )
+
+    evidence = object.__new__(EvaluatorTerminalEvidence)
+    values = {
+        "schema_version": EVALUATOR_TERMINAL_EVIDENCE_SCHEMA_VERSION,
+        "task_identity": PP_BOX_TASK_IDENTITY,
+        "runtime_identity_digest": live_evidence.runtime_identity_digest,
+        "detector_config": detector_config,
+        "detector_config_digest": detector_digest,
+        "step_idx": step_idx,
+        "max_steps": max_steps,
+        "previous_evidence_digest": ""
+        if previous is None
+        else previous.evidence_digest,
+        "contexts": tuple(contexts),
+        "live_fall_evidence": live_evidence,
+        "_producer_token": _EVALUATOR_TERMINAL_EVIDENCE_TOKEN,
+    }
+    for name, value in values.items():
+        object.__setattr__(evidence, name, value)
+    object.__setattr__(
+        evidence,
+        "evidence_digest",
+        evaluator_terminal_evidence_digest(evidence),
+    )
+    _EVALUATOR_TERMINAL_EVIDENCE[id(env)] = (env, evidence)
+    return evidence
+
+
 def _validate_live_fall_evidence(
     env: object,
     evidence: object,
@@ -1590,9 +2646,8 @@ def _validate_live_fall_evidence(
     *,
     num_envs: int,
 ) -> tuple[LiveFallLaneEvidence, ...]:
-    runtime_identity_digest = str(
-        getattr(env, "recovery_runtime_identity_digest", "")
-    )
+    bindings = _resolve_hand_contact_bindings(env)
+    runtime_identity_digest = _runtime_contact_identities(env, bindings)[0]
     if (
         type(evidence) is not LiveFallProducerEvidence
         or evidence.schema_version != LIVE_FALL_EVIDENCE_SCHEMA_VERSION
@@ -1624,12 +2679,62 @@ def _validate_live_fall_evidence(
     return tuple(lanes)
 
 
+def _validate_evaluator_terminal_evidence(
+    env: object,
+    evidence: object,
+    *,
+    num_envs: int,
+) -> tuple[tuple[DriverTerminalContext, ...], tuple[LiveFallLaneEvidence, ...]]:
+    registered = _registered_evaluator_terminal_evidence(env)
+    if (
+        type(evidence) is not EvaluatorTerminalEvidence
+        or registered is not evidence
+        or evidence._producer_token is not _EVALUATOR_TERMINAL_EVIDENCE_TOKEN
+        or evidence.schema_version != EVALUATOR_TERMINAL_EVIDENCE_SCHEMA_VERSION
+        or evidence.task_identity != PP_BOX_TASK_IDENTITY
+        or type(evidence.step_idx) is not int
+        or evidence.step_idx <= 0
+        or type(evidence.max_steps) is not int
+        or evidence.max_steps <= 0
+        or not isinstance(evidence.contexts, tuple)
+        or len(evidence.contexts) != num_envs
+        or evidence.evidence_digest != evaluator_terminal_evidence_digest(evidence)
+        or evidence.detector_config_digest
+        != _fall_detector_config_digest(evidence.detector_config)
+        or evidence.live_fall_evidence.detector_config_digest
+        != evidence.detector_config_digest
+        or evidence.runtime_identity_digest
+        != evidence.live_fall_evidence.runtime_identity_digest
+    ):
+        raise RecoveryTelemetryIncompleteError(("evaluator_terminal_evidence",))
+    contexts = tuple(evidence.contexts)
+    try:
+        for context in contexts:
+            context.validate()
+            if (
+                context.control_step_count != evidence.step_idx
+                or context.max_control_steps != evidence.max_steps
+                or context.fall_confirm_steps != evidence.detector_config.confirm_steps
+            ):
+                raise ValueError("terminal context does not match evaluator evidence")
+    except (TypeError, ValueError) as exc:
+        raise RecoveryTelemetryIncompleteError(
+            ("evaluator_terminal_evidence",)
+        ) from exc
+    lanes = _validate_live_fall_evidence(
+        env,
+        evidence.live_fall_evidence,
+        contexts,
+        num_envs=num_envs,
+    )
+    return contexts, lanes
+
+
 def extract_privileged_telemetry(
     env: object,
     *,
     support_resolver: Any | None = None,
-    terminal_contexts: object | None = None,
-    live_fall_evidence: LiveFallProducerEvidence | None = None,
+    terminal_evidence: EvaluatorTerminalEvidence | None = None,
     actor_observation: object | None = None,
 ) -> tuple[PrivilegedRecoveryTelemetry, ...]:
     """Extract privileged state without registering it as a policy observation."""
@@ -1668,16 +2773,12 @@ def extract_privileged_telemetry(
         or set(reports_by_scene_key) != expected_contact_scene_keys
     ):
         raise RecoveryTelemetryIncompleteError(("runtime_contact_sensor_set",))
-    resolved_terminal_contexts = _resolve_terminal_contexts(
-        env,
-        terminal_contexts,
-        num_envs=num_envs,
-    )
-    fall_evidence_by_env = _validate_live_fall_evidence(
-        env,
-        live_fall_evidence,
-        resolved_terminal_contexts,
-        num_envs=num_envs,
+    resolved_terminal_contexts, fall_evidence_by_env = (
+        _validate_evaluator_terminal_evidence(
+            env,
+            terminal_evidence,
+            num_envs=num_envs,
+        )
     )
     contact_threshold, ee_distance_threshold = _resolve_telemetry_thresholds(env)
 
@@ -1707,18 +2808,12 @@ def extract_privileged_telemetry(
         bindings["right"].ee_body_name,
         num_envs=num_envs,
     )
-    force_tensors: dict[str, tuple[torch.Tensor, ...]] = {}
-    for side in ("left", "right"):
-        force_tensors[side] = tuple(
-            _pairwise_force_tensor(
-                scene,
-                sensor_binding,
-                side=side,
-                num_envs=num_envs,
-                validated_report=reports_by_scene_key[sensor_binding.sensor_scene_key],
-            )
-            for sensor_binding in bindings[side].sensors
-        )
+    force_rows = _batched_pairwise_force_rows(
+        scene,
+        bindings=bindings,
+        num_envs=num_envs,
+        reports_by_scene_key=reports_by_scene_key,
+    )
     if support_resolver is None:
         try:
             from .rewards import compute_box_support_evidence
@@ -1732,21 +2827,22 @@ def extract_privileged_telemetry(
     states = []
     for env_index in range(num_envs):
         hand_contacts = {}
+        sensor_offset = 0
         for side in ("left", "right"):
+            side_bindings = bindings[side].sensors
             link_evidence = tuple(
                 pairwise_contact_evidence(
-                    force_tensor[env_index],
+                    force_rows[env_index][sensor_offset + sensor_index],
                     sensor_body=sensor_binding.sensor_body_name,
                     filtered_body=sensor_binding.filtered_body_name,
                     threshold_n=contact_threshold,
                 )
-                for sensor_binding, force_tensor in zip(
-                    bindings[side].sensors,
-                    force_tensors[side],
-                    strict=True,
+                for sensor_index, sensor_binding in enumerate(
+                    side_bindings,
                 )
             )
             hand_contacts[side] = aggregate_hand_contact_evidence(side, link_evidence)
+            sensor_offset += len(side_bindings)
         states.append(
             build_privileged_telemetry(
                 task_identity=task_identity,
@@ -1766,7 +2862,7 @@ def extract_privileged_telemetry(
         )
     result = tuple(states)
     for state in result:
-        assert_actor_observation_isolated(actor_observation, state)
+        assert_actor_observation_isolated(actor_observation, state, env=env)
     return result
 
 
@@ -1775,16 +2871,22 @@ __all__ = [
     "DEFAULT_MAX_EE_BOX_DISTANCE_M",
     "EMPIRICAL_CONTACT_QUIET_MAX_N",
     "EMPIRICAL_CONTACT_TOUCH_MIN_N",
+    "EVALUATOR_TERMINAL_EVIDENCE_SCHEMA_VERSION",
     "HARD_FALL_UP_ALIGNMENT",
     "LIVE_FALL_EVIDENCE_SCHEMA_VERSION",
     "PP_BOX_TASK_IDENTITY",
     "RECOVERY_TELEMETRY_SCHEMA_VERSION",
-    "RUNTIME_CONTACT_MAPPING_PROOF_SCHEMA_VERSION",
+    "RESIDUAL_ACTOR_OBSERVATION_SCHEMA_VERSION",
+    "RUNTIME_CONTACT_MAPPING_RECEIPT_SCHEMA_VERSION",
     "RUNTIME_CONTACT_SENSOR_REPORT_SCHEMA_VERSION",
     "SOFT_FALL_UP_ALIGNMENT",
     "BimanualGraspEvidence",
+    "ContactCalibrationExecutionReceipt",
+    "ContactCalibrationPhaseReceipt",
+    "ContactSensorCalibrationReceipt",
     "DriverTerminalContext",
-    "EmpiricalContactMappingProof",
+    "EvaluatorFallDetectorConfig",
+    "EvaluatorTerminalEvidence",
     "HandContactBinding",
     "HandContactEvidence",
     "LiveFallLaneEvidence",
@@ -1794,21 +2896,23 @@ __all__ = [
     "PrivilegedObservationLeakError",
     "PrivilegedRecoveryTelemetry",
     "RecoveryTelemetryIncompleteError",
+    "ResidualActorObservation",
     "RuntimeContactSensorReport",
     "aggregate_hand_contact_evidence",
     "assert_actor_observation_isolated",
-    "build_empirical_contact_mapping_proof",
     "build_privileged_telemetry",
     "classify_bimanual_grasp",
     "classify_fall",
     "classify_terminal",
     "compute_root_up_alignment",
     "default_hand_contact_bindings",
-    "empirical_contact_mapping_proof_digest",
+    "execute_pp_box_contact_calibration",
     "extract_privileged_telemetry",
     "has_pairwise_bimanual_contact",
+    "install_pp_box_contact_calibration_executor",
+    "issue_residual_actor_observation",
     "live_fall_evidence_digest",
     "pairwise_contact_evidence",
-    "produce_live_fall_evidence",
+    "produce_evaluator_terminal_evidence",
     "validate_runtime_hand_contact_sensors",
 ]
