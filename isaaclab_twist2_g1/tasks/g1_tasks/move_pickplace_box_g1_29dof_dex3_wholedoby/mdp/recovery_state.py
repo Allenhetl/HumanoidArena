@@ -1268,8 +1268,15 @@ def _pp_box_runtime_identity(env: Any) -> Mapping[str, Any]:
     )
 
 
-def _require_alias(env: Any, env_name: str, owner: Any, owner_name: str) -> None:
-    if getattr(env, env_name, None) is not getattr(owner, owner_name, None):
+def _require_alias_if_present(
+    env: Any, env_name: str, owner: Any, owner_name: str
+) -> None:
+    """Reject an independent driver cache without inventing optional aliases."""
+
+    driver_value = _optional_runtime_attribute(env, env_name)
+    if driver_value is not None and driver_value is not getattr(
+        owner, owner_name, None
+    ):
         _raise_missing_task_state(
             f"driver_alias:{env_name}->{owner_name}",
             operation="capture task state",
@@ -1288,10 +1295,14 @@ def _capture_pp_box_recovery_task_state(env: Any) -> Mapping[str, Any]:
         robot, "data", path="scene.robot.data", operation=operation
     )
 
-    _require_alias(env, "reward_buf", reward_manager, "_reward_buf")
-    _require_alias(env, "reset_terminated", termination_manager, "_terminated_buf")
-    _require_alias(env, "reset_time_outs", termination_manager, "_truncated_buf")
-    _require_alias(env, "obs_buf", observation_manager, "_obs_buffer")
+    _require_alias_if_present(env, "reward_buf", reward_manager, "_reward_buf")
+    _require_alias_if_present(
+        env, "reset_terminated", termination_manager, "_terminated_buf"
+    )
+    _require_alias_if_present(
+        env, "reset_time_outs", termination_manager, "_truncated_buf"
+    )
+    _require_alias_if_present(env, "obs_buf", observation_manager, "_obs_buffer")
 
     action_terms: dict[str, Any] = {}
     for name in action_manager._term_names:
@@ -1585,7 +1596,8 @@ def _restore_pp_box_recovery_task_state(env: Any, state: Any) -> None:
 
     observation = clone_recovery_value(state["observation_manager"]["obs_buffer"])
     env.observation_manager._obs_buffer = observation
-    env.obs_buf = observation
+    if _optional_runtime_attribute(env, "obs_buf") is not None:
+        env.obs_buf = observation
     env._sim_step_counter = int(state["driver"]["sim_step_counter"])
     env.extras = clone_recovery_value(state["driver"]["extras"])
 
@@ -1748,7 +1760,7 @@ def _initialize_pp_box_pre_step_driver_aliases(env: Any) -> None:
         path="termination_manager",
         operation="install task state hooks",
     )
-    observation_manager = _require_runtime_attribute(
+    _require_runtime_attribute(
         env,
         "observation_manager",
         path="observation_manager",
@@ -1771,12 +1783,6 @@ def _initialize_pp_box_pre_step_driver_aliases(env: Any) -> None:
             termination_manager,
             "_truncated_buf",
             path="termination_manager._truncated_buf",
-            operation="install task state hooks",
-        ),
-        "obs_buf": _require_runtime_attribute(
-            observation_manager,
-            "_obs_buffer",
-            path="observation_manager._obs_buffer",
             operation="install task state hooks",
         ),
     }

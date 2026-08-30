@@ -1757,9 +1757,9 @@ def test_pp_box_hook_install_initializes_pre_step_reset_buffer(
         "reward_buf",
         "reset_terminated",
         "reset_time_outs",
-        "obs_buf",
     ):
         delattr(env, name)
+    delattr(env, "obs_buf")
 
     recovery_state.install_pp_box_recovery_task_state_hooks(env)
 
@@ -1767,10 +1767,71 @@ def test_pp_box_hook_install_initializes_pre_step_reset_buffer(
     assert env.reward_buf is env.reward_manager._reward_buf
     assert env.reset_terminated is env.termination_manager._terminated_buf
     assert env.reset_time_outs is env.termination_manager._truncated_buf
-    assert env.obs_buf is env.observation_manager._obs_buffer
+    assert not hasattr(env, "obs_buf")
     snapshot = recovery_state.capture_recovery_state(env, fidelity_tier="state_only")
     assert snapshot.capabilities.available["task_counters"] is True
     assert torch.equal(snapshot.task_counters["reset_buf"], torch.tensor([True]))
+
+
+def test_pp_box_hook_tracks_manager_observation_without_inventing_driver_alias(
+    recovery_state,
+) -> None:
+    env = _ProductionEnv(recovery_state.PP_BOX_TASK_IDENTITY)
+    delattr(env, "obs_buf")
+
+    recovery_state.install_pp_box_recovery_task_state_hooks(env)
+
+    assert not hasattr(env, "obs_buf")
+    expected = {
+        "policy": {
+            "robot_joint_state": torch.tensor([[31.0, 32.0]]),
+            "robot_gipper_state": torch.tensor([[33.0, 34.0]]),
+            "camera_image": torch.tensor([[[[35.0, 36.0, 37.0]]]]),
+        }
+    }
+    env.observation_manager._obs_buffer = expected
+    snapshot = recovery_state.capture_recovery_state(
+        env,
+        required_capabilities={"task_state", "process_global_rng_exclusive"},
+    )
+
+    env.observation_manager._obs_buffer = {
+        "policy": {
+            "robot_joint_state": torch.zeros(1, 2),
+            "robot_gipper_state": torch.zeros(1, 2),
+            "camera_image": torch.zeros(1, 1, 1, 3),
+        }
+    }
+    recovery_state.restore_recovery_state(
+        env,
+        snapshot,
+        snapshot_digest=recovery_state.recovery_state_digest(snapshot),
+    )
+
+    torch.testing.assert_close(
+        env.observation_manager._obs_buffer["policy"]["robot_joint_state"],
+        expected["policy"]["robot_joint_state"],
+    )
+    assert env.obs_buf is env.observation_manager._obs_buffer
+
+
+def test_pp_box_hook_rejects_independent_driver_observation_cache(
+    recovery_state,
+) -> None:
+    env = _ProductionEnv(recovery_state.PP_BOX_TASK_IDENTITY)
+    env.obs_buf = recovery_state.clone_recovery_value(
+        env.observation_manager._obs_buffer
+    )
+    recovery_state.install_pp_box_recovery_task_state_hooks(env)
+
+    with pytest.raises(
+        recovery_state.RecoveryStateIncompleteError,
+        match=r"driver_alias:obs_buf->_obs_buffer",
+    ):
+        recovery_state.capture_recovery_state(
+            env,
+            required_capabilities={"task_state", "process_global_rng_exclusive"},
+        )
 
 
 def test_pp_box_task_state_roundtrips_tensor_termination_dones(
