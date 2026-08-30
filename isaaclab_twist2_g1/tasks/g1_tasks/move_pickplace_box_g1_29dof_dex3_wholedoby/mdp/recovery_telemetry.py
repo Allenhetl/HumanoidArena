@@ -39,7 +39,11 @@ CRITICAL_BODY_CONTACT_THRESHOLD_N = 50.0
 EMPIRICAL_CONTACT_QUIET_MAX_N = 0.05
 # Mapping proof threshold only; the live grasp predicate keeps its 1 N task threshold.
 EMPIRICAL_CONTACT_TOUCH_MIN_N = 0.25
-EMPIRICAL_CONTACT_INITIAL_PENETRATION_M = 0.005
+# A 5 mm overlap contacts the left palm but can be resolved through neighboring
+# hand links before the right palm reports a filtered sample.  Keep the probe
+# bounded inside the palm collision thickness while making the selected palm the
+# dominant initial overlap on both mirrored hands.
+EMPIRICAL_CONTACT_INITIAL_PENETRATION_M = 0.02
 EMPIRICAL_CONTACT_TOUCH_ADVANCE_M = 0.001
 
 _HAND_CONTACT_LINK_TOKENS = ("palm",)

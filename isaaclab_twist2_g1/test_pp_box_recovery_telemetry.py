@@ -2247,7 +2247,7 @@ def test_contact_calibration_touch_places_box_at_sensor_body(
     telemetry._write_contact_calibration_phase(env, binding, "target_touch")
 
     box_position = env.scene["box"].data.root_state_w[:, :3]
-    expected_offset = torch.tensor([[0.0, 0.0, 0.14]], dtype=box_position.dtype)
+    expected_offset = torch.tensor([[0.0, 0.0, 0.125]], dtype=box_position.dtype)
     torch.testing.assert_close(box_position - body_position, expected_offset)
     torch.testing.assert_close(
         env.scene["box"].data.root_state_w[:, 3:7],
@@ -2285,7 +2285,7 @@ def test_contact_calibration_touch_starts_inside_selected_body_surface(
 
     box_bottom_z = target[0, 2] + box_bounds[0][4]
     assert box_bottom_z.item() == pytest.approx(
-        body_pose[0, 2].item() + body_bounds[0][5] - 0.005
+        body_pose[0, 2].item() + body_bounds[0][5] - 0.02
     )
 
 
@@ -2347,7 +2347,7 @@ def test_contact_calibration_touch_follows_live_body_orientation(telemetry) -> N
     )
 
     torch.testing.assert_close(
-        target[:, :3], torch.tensor([[1.14, 2.0, 3.0]], dtype=torch.float64)
+        target[:, :3], torch.tensor([[1.125, 2.0, 3.0]], dtype=torch.float64)
     )
     torch.testing.assert_close(
         target[:, 7:10], torch.tensor([[-0.05, 0.0, 0.0]], dtype=torch.float64)
@@ -2446,7 +2446,7 @@ def test_controlled_contact_executor_rejects_all_zero_claimed_touch_and_publishe
         "sim_dt_s": 0.005,
         "decimation": 4,
         "primitive_step_s": 0.02,
-        "initial_penetration_m": 0.005,
+        "initial_penetration_m": 0.02,
         "advance_m": 0.001,
         "velocity_m_s": -0.05,
         "body_collision_bounds": ((-0.02, 0.02, -0.03, 0.03, -0.01, 0.04),),
