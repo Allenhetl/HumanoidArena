@@ -53,7 +53,7 @@ __all__ = [
 RECOVERY_DIGEST_SCHEMA_VERSION = 1
 RECOVERY_STATE_SCHEMA_VERSION = 3
 PP_BOX_TASK_IDENTITY = "Isaac-Move-PickPlace-Box-G129-Dex3-Wholedoby"
-PP_BOX_TASK_STATE_SCHEMA_VERSION = 2
+PP_BOX_TASK_STATE_SCHEMA_VERSION = 3
 PP_BOX_ACTION_MANAGER_STATE_SCHEMA_VERSION = 1
 
 _CORE_TASK_COUNTER_NAMES = (
@@ -1283,6 +1283,22 @@ def _require_alias_if_present(
         )
 
 
+def _capture_driver_observation_state(
+    env: Any, observation_manager: Any
+) -> tuple[str, Any]:
+    manager_value = _require_runtime_attribute(
+        observation_manager,
+        "_obs_buffer",
+        path="observation_manager._obs_buffer",
+        operation="capture task state",
+    )
+    driver_value = _optional_runtime_attribute(env, "obs_buf")
+    if driver_value is None:
+        return "absent", None
+    mode = "manager_alias" if driver_value is manager_value else "independent"
+    return mode, clone_recovery_value(driver_value)
+
+
 def _capture_pp_box_recovery_task_state(env: Any) -> Mapping[str, Any]:
     runtime_identity = _pp_box_runtime_identity(env)
     operation = "capture task state"
@@ -1302,7 +1318,9 @@ def _capture_pp_box_recovery_task_state(env: Any) -> Mapping[str, Any]:
     _require_alias_if_present(
         env, "reset_time_outs", termination_manager, "_truncated_buf"
     )
-    _require_alias_if_present(env, "obs_buf", observation_manager, "_obs_buffer")
+    obs_buf_mode, driver_obs_buf = _capture_driver_observation_state(
+        env, observation_manager
+    )
 
     action_terms: dict[str, Any] = {}
     for name in action_manager._term_names:
@@ -1355,6 +1373,8 @@ def _capture_pp_box_recovery_task_state(env: Any) -> Mapping[str, Any]:
                     env, "extras", path="driver.extras", operation=operation
                 )
             ),
+            "obs_buf_mode": obs_buf_mode,
+            "obs_buf": driver_obs_buf,
         },
         "action_manager": {
             "action": clone_recovery_value(action_manager._action),
@@ -1437,7 +1457,9 @@ def _preflight_pp_box_recovery_task_state(env: Any, state: Any) -> None:
         raise RecoveryStateSchemaError("PP-box recovery runtime identity mismatch")
 
     driver = _require_exact_mapping_keys(
-        top["driver"], {"sim_step_counter", "extras"}, path="driver"
+        top["driver"],
+        {"sim_step_counter", "extras", "obs_buf_mode", "obs_buf"},
+        path="driver",
     )
     if not isinstance(driver["sim_step_counter"], (int, np.integer)):
         raise RecoveryStateSchemaError("PP-box driver sim step counter is invalid")
@@ -1445,6 +1467,32 @@ def _preflight_pp_box_recovery_task_state(env: Any, state: Any) -> None:
         driver["extras"]
     ):
         raise RecoveryStateSchemaError("PP-box driver extras are invalid")
+    obs_buf_mode = driver["obs_buf_mode"]
+    driver_obs_buf = driver["obs_buf"]
+    if obs_buf_mode not in {"absent", "manager_alias", "independent"}:
+        raise RecoveryStateSchemaError("PP-box driver obs_buf mode is invalid")
+    if obs_buf_mode == "absent":
+        if driver_obs_buf is not None:
+            raise RecoveryStateSchemaError(
+                "PP-box absent driver obs_buf must not carry a payload"
+            )
+    else:
+        if driver_obs_buf is None or not _payload_is_finite(driver_obs_buf):
+            raise RecoveryStateSchemaError("PP-box driver obs_buf payload is invalid")
+        current_obs_buf = (
+            env.observation_manager._obs_buffer
+            if obs_buf_mode == "manager_alias"
+            else _optional_runtime_attribute(env, "obs_buf")
+        )
+        if current_obs_buf is None:
+            raise RecoveryStateSchemaError(
+                "PP-box driver obs_buf is absent from the live runtime"
+            )
+        _require_same_payload_schema(
+            current_obs_buf,
+            driver_obs_buf,
+            path="driver.obs_buf",
+        )
 
     action = _require_exact_mapping_keys(
         top["action_manager"], {"action", "prev_action", "terms"}, path="action_manager"
@@ -1596,8 +1644,23 @@ def _restore_pp_box_recovery_task_state(env: Any, state: Any) -> None:
 
     observation = clone_recovery_value(state["observation_manager"]["obs_buffer"])
     env.observation_manager._obs_buffer = observation
-    if _optional_runtime_attribute(env, "obs_buf") is not None:
+    driver = state["driver"]
+    if driver["obs_buf_mode"] == "absent":
+        try:
+            local_attributes = vars(env)
+        except TypeError:
+            local_attributes = {}
+        if "obs_buf" in local_attributes:
+            delattr(env, "obs_buf")
+        elif _optional_runtime_attribute(env, "obs_buf") is not None:
+            _raise_missing_task_state(
+                "driver.obs_buf:cannot_restore_absence",
+                operation="restore task state",
+            )
+    elif driver["obs_buf_mode"] == "manager_alias":
         env.obs_buf = observation
+    else:
+        env.obs_buf = clone_recovery_value(driver["obs_buf"])
     env._sim_step_counter = int(state["driver"]["sim_step_counter"])
     env.extras = clone_recovery_value(state["driver"]["extras"])
 

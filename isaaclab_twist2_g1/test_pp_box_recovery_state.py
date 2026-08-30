@@ -1812,26 +1812,45 @@ def test_pp_box_hook_tracks_manager_observation_without_inventing_driver_alias(
         env.observation_manager._obs_buffer["policy"]["robot_joint_state"],
         expected["policy"]["robot_joint_state"],
     )
-    assert env.obs_buf is env.observation_manager._obs_buffer
+    assert not hasattr(env, "obs_buf")
 
 
-def test_pp_box_hook_rejects_independent_driver_observation_cache(
+def test_pp_box_hook_roundtrips_independent_driver_observation_cache(
     recovery_state,
 ) -> None:
     env = _ProductionEnv(recovery_state.PP_BOX_TASK_IDENTITY)
     env.obs_buf = recovery_state.clone_recovery_value(
         env.observation_manager._obs_buffer
     )
+    env.obs_buf["policy"]["robot_joint_state"].fill_(91.0)
     recovery_state.install_pp_box_recovery_task_state_hooks(env)
 
-    with pytest.raises(
-        recovery_state.RecoveryStateIncompleteError,
-        match=r"driver_alias:obs_buf->_obs_buffer",
-    ):
-        recovery_state.capture_recovery_state(
-            env,
-            required_capabilities={"task_state", "process_global_rng_exclusive"},
-        )
+    snapshot = recovery_state.capture_recovery_state(
+        env,
+        required_capabilities={"task_state", "process_global_rng_exclusive"},
+    )
+    assert snapshot.task_state["driver"]["obs_buf_mode"] == "independent"
+    torch.testing.assert_close(
+        snapshot.task_state["driver"]["obs_buf"]["policy"]["robot_joint_state"],
+        torch.full((1, 2), 91.0),
+    )
+
+    env.obs_buf["policy"]["robot_joint_state"].fill_(-91.0)
+    recovery_state.restore_recovery_state(
+        env,
+        snapshot,
+        snapshot_digest=recovery_state.recovery_state_digest(snapshot),
+    )
+
+    assert env.obs_buf is not env.observation_manager._obs_buffer
+    torch.testing.assert_close(
+        env.obs_buf["policy"]["robot_joint_state"],
+        torch.full((1, 2), 91.0),
+    )
+    torch.testing.assert_close(
+        env.observation_manager._obs_buffer["policy"]["robot_joint_state"],
+        torch.tensor([[12.0, 13.0]]),
+    )
 
 
 def test_pp_box_task_state_roundtrips_tensor_termination_dones(
