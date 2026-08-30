@@ -88,8 +88,6 @@ def _attempt_payload(failures, **overrides: object) -> dict[str, object]:
         "anchor_id": "anchor-17",
         "anchor_digest": "b" * 64,
         "failure_seed": 17,
-        "phase": "acquire",
-        "phase_enter_step": 20,
         "attempt_count": 1,
         "pickup_attempted": True,
         "place_attempted": False,
@@ -137,7 +135,9 @@ def _telemetry_state(
         support_top_z_m=0.4,
         target_support_top_z_m=0.4,
         xy_mismatch_m=xy_mismatch_m,
+        z_gap_m=z_mismatch_m,
         z_mismatch_m=z_mismatch_m,
+        placement_distance_m=math.hypot(xy_mismatch_m, z_mismatch_m),
         placed=success,
     )
     box_center = (0.0, 0.0, 0.505)
@@ -197,7 +197,7 @@ def _telemetry_state(
             time_limit=terminal_reason == "time_limit",
             fall_confirmed=is_fall,
         ),
-        max_ee_box_distance_m=0.3,
+        max_ee_box_distance_m=ee_distance_m,
     )
 
 
@@ -337,6 +337,14 @@ def _recovery_snapshot(state):
     return state.RecoveryStateSnapshot(
         schema_version=state.RECOVERY_STATE_SCHEMA_VERSION,
         task_identity=state.PP_BOX_TASK_IDENTITY,
+        scope=state.RecoveryStateScope(
+            schema_version=state.RECOVERY_STATE_SCHEMA_VERSION,
+            num_envs=1,
+            env_ids=(0,),
+            is_relative=True,
+            process_global_rng_scope="exclusive_process_single_env",
+        ),
+        fidelity_tier="state_only",
         capabilities=state.RecoveryStateCapabilities(
             schema_version=state.RECOVERY_STATE_SCHEMA_VERSION,
             available={"task_state": False},
@@ -369,7 +377,7 @@ def test_declared_catalog_is_four_candidates_but_effective_catalog_defaults_empt
     assert set(declared) == DECLARED_CATEGORIES
     assert failures.effective_failure_catalog() == {}
     assert all(entry.declared for entry in declared.values())
-    assert all(entry.recoverable for entry in declared.values())
+    assert all(not entry.recoverable for entry in declared.values())
 
 
 def test_descriptor_parser_requires_exact_versioned_schema_and_catalog_values(
@@ -404,12 +412,15 @@ def test_attempt_evidence_is_versioned_strict_and_counter_consistent(modules) ->
     assert evidence.stalled is True
     assert evidence.stable is True
     assert evidence.pickup_attempted is True
+    assert not hasattr(evidence, "phase")
+    assert not hasattr(evidence, "phase_enter_step")
 
     for mutation, message in (
         ({**payload, "unknown": 1}, "attempt evidence schema"),
         ({**payload, "schema_version": 999}, "schema version"),
         ({**payload, "no_progress_steps": -1}, "non-negative"),
-        ({**payload, "phase_enter_step": 23}, "progress step"),
+        ({**payload, "phase": "acquire"}, "attempt evidence schema"),
+        ({**payload, "phase_enter_step": 23}, "attempt evidence schema"),
         ({**payload, "injected_category": "fall"}, "category"),
     ):
         with pytest.raises(failures.RecoveryFailureSchemaError, match=message):
@@ -561,15 +572,15 @@ def test_recovery_success_is_exactly_the_task_success_terminal(modules) -> None:
 def test_recovery_reward_api_has_no_persistent_stage_or_fsm_surface(modules) -> None:
     _state, _telemetry, failures = modules
     tree = ast.parse(FAILURES_PATH.read_text(encoding="utf-8"))
-    identifiers = {
-        node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
-    } | {
-        node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
-    } | {
-        node.value
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Constant) and isinstance(node.value, str)
-    }
+    identifiers = (
+        {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+        | {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+        | {
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        }
+    )
     forbidden = {
         "RecoveryStageSpec",
         "recovery_stage_fsm",
@@ -600,16 +611,45 @@ def test_reward_bindings_are_task_truth_for_distance_grasp_and_placement_only(
         "place",
     )
     assert bindings[0].entity_roles == {"source": "bimanual_ee", "target": "box"}
-    assert bindings[0].telemetry_binding == "max_bimanual_ee_box_distance_m"
+    assert bindings[0].telemetry_binding == "grasp_evidence.max_ee_box_distance_m"
     assert bindings[1].entity_roles == {"end_effector": "bimanual_ee", "object": "box"}
-    assert bindings[1].telemetry_binding == "bimanual_grasp"
+    assert bindings[1].telemetry_binding == "grasp"
     assert bindings[2].entity_roles == {"object": "box", "target": "shelf_target"}
-    assert bindings[2].telemetry_binding == "hypot_xy_z_mismatch"
+    assert bindings[2].telemetry_binding == "placement_distance_m"
     assert "articulation" not in {binding.term for binding in bindings}
     assert all(
         not hasattr(entry, "stage_fsm") and entry.reward_bindings == bindings
         for entry in failures.declared_failure_catalog().values()
     )
+
+
+def test_reward_binding_resolver_reads_real_telemetry_paths_and_fails_closed(
+    modules,
+) -> None:
+    _state, telemetry, failures = modules
+    state = _telemetry_state(
+        telemetry,
+        grasp=False,
+        pose_valid=True,
+        ee_distance_m=0.4,
+        xy_mismatch_m=0.3,
+        z_mismatch_m=0.4,
+    )
+    bindings = failures.recovery_reward_bindings()
+
+    assert failures.resolve_recovery_reward_binding(
+        bindings[0], state
+    ) == pytest.approx(0.4)
+    assert failures.resolve_recovery_reward_binding(bindings[1], state) is False
+    assert failures.resolve_recovery_reward_binding(
+        bindings[2], state
+    ) == pytest.approx(0.5)
+
+    with pytest.raises(failures.RecoveryFailureSchemaError, match="telemetry binding"):
+        failures.resolve_recovery_reward_binding(
+            replace(bindings[0], telemetry_binding="grasp_evidence.missing"),
+            state,
+        )
 
 
 def test_recovery_activation_freezes_d_init_across_primitive_steps(
@@ -660,10 +700,10 @@ def test_recovery_activation_freezes_d_init_across_primitive_steps(
         placement = resolved["components"][scopes["placement"]]
         assert distance["distance"] == pytest.approx(current_ee)
         assert distance["d_init"] == pytest.approx(0.4)
-        assert placement["distance"] == pytest.approx(
-            math.hypot(current_xy, current_z)
-        )
+        assert 1.0 - distance["distance"] / distance["d_init"] > 0.0
+        assert placement["distance"] == pytest.approx(math.hypot(current_xy, current_z))
         assert placement["d_init"] == pytest.approx(0.5)
+        assert 1.0 - placement["distance"] / placement["d_init"] > 0.0
         assert len(resolved["components"]) == 3
         assert "articulation" not in repr(resolved).lower()
         assert "rgb" not in repr(resolved).lower()
@@ -725,6 +765,45 @@ def test_repeated_begin_keeps_baseline_but_new_activation_refreshes_it(
         )
     with pytest.raises(TypeError):
         replace(first, activation_id="recovery-forged")
+
+
+def test_stage_gate_truth_is_current_state_only(modules) -> None:
+    _state, telemetry, failures = modules
+    approach = _telemetry_state(
+        telemetry,
+        grasp=False,
+        pose_valid=True,
+        ee_distance_m=0.2,
+    )
+    acquire = _telemetry_state(
+        telemetry,
+        grasp=True,
+        pose_valid=True,
+        ee_distance_m=0.2,
+    )
+    activation = failures.begin_recovery_activation(
+        activation_id="stateless-gates-0",
+        telemetry_by_env={0: approach},
+    )
+
+    first = failures.resolve_recovery_reward_telemetry(
+        approach,
+        activation_context=activation,
+        env_index=0,
+    )["gate_truth"]
+    middle = failures.resolve_recovery_reward_telemetry(
+        acquire,
+        activation_context=activation,
+        env_index=0,
+    )["gate_truth"]
+    repeated = failures.resolve_recovery_reward_telemetry(
+        approach,
+        activation_context=activation,
+        env_index=0,
+    )["gate_truth"]
+
+    assert repeated == first
+    assert middle != first
 
 
 def test_activation_baselines_are_lane_bound_and_context_is_mandatory(modules) -> None:
@@ -991,6 +1070,36 @@ def test_runtime_evidence_digest_is_content_derived(
         assert mutated.evidence_digest != evidence.evidence_digest
 
 
+def test_public_objects_cannot_activate_the_formal_catalog(modules) -> None:
+    _state, telemetry, failures = modules
+    category = "near-shelf-misplaced"
+    descriptor = failures.RecoveryFailureDescriptor.from_mapping(
+        _descriptor_payload(failures, category)
+    )
+    evidence = _runtime_evidence(failures, category)
+    plan = failures.build_failure_injection_plan(descriptor, evidence)
+    readback = _replay_context(failures, telemetry, plan)
+    result = failures.FailureInjectionResult(
+        plan=plan,
+        category=category,
+        readback_passed=True,
+        readback=readback,
+    )
+    raw = object.__new__(failures.FailureContinuationRaw)
+    forged = object.__new__(failures.FailureCatalogQualification)
+    for name, value in {
+        "runtime evidence": evidence,
+        "replaced runtime evidence": replace(evidence, evidence_id="caller-forged"),
+        "caller result": result,
+        "raw continuation": raw,
+        "hand-built qualification": forged,
+    }.items():
+        assert failures.effective_failure_catalog({category: value}) == {}, name
+
+    assert not hasattr(failures, "qualify_failure_catalog_entry")
+    assert not hasattr(failures, "_RUNTIME_CONFORMANCE_QUALIFICATION_DIGESTS")
+
+
 class _RawSceneTrapEnv:
     @property
     def scene(self):
@@ -1048,6 +1157,9 @@ class _QualificationContinuationRunner:
         drift_second_execution: bool = False,
         skip_primitive_step: bool = False,
         applied_action_offset: float = 0.0,
+        reuse_injection_context: bool = False,
+        reuse_continuation_across_repeats: bool = False,
+        injection_readbacks: list[object] | None = None,
     ) -> None:
         self.state, self.telemetry, self.failures = modules
         self.events = events
@@ -1055,6 +1167,12 @@ class _QualificationContinuationRunner:
         self.drift_second_execution = drift_second_execution
         self.skip_primitive_step = skip_primitive_step
         self.applied_action_offset = applied_action_offset
+        self.reuse_injection_context = reuse_injection_context
+        self.reuse_continuation_across_repeats = reuse_continuation_across_repeats
+        self.first_continuation = None
+        self.injection_readbacks = (
+            [] if injection_readbacks is None else injection_readbacks
+        )
 
     def execute_qualification_primitive_step(self, fixed_action40):
         self.step_count += 1
@@ -1067,7 +1185,17 @@ class _QualificationContinuationRunner:
         applied_action40 = (
             fixed_action40 if self.skip_primitive_step else primitive_step()
         )
-        continuation_readback = _replay_context(self.failures, self.telemetry, plan)
+        if self.reuse_injection_context:
+            continuation_readback = self.injection_readbacks[-1]
+        else:
+            base_readback = _replay_context(self.failures, self.telemetry, plan)
+            continuation_readback = replace(
+                base_readback,
+                attempt=replace(
+                    base_readback.attempt,
+                    last_progress_step=base_readback.attempt.last_progress_step + 1,
+                ),
+            )
         self.events.append("continuation_readback")
 
         def rng_state(seed: int):
@@ -1092,19 +1220,28 @@ class _QualificationContinuationRunner:
                 for index in range(16)
             )
 
-        return self.failures.FailureContinuationRaw(
+        continuation = self.failures.FailureContinuationRaw(
             schema_version=self.failures.RECOVERY_RAW_RECEIPT_SCHEMA_VERSION,
             env_index=0,
             runtime_identity_digest="9" * 64,
             fixed_action40=fixed_action40,
             applied_action40=applied_action40,
             observation_before={
-                "policy": torch.arange(6, dtype=torch.float32).reshape(1, 6)
+                "actor": {"policy": torch.arange(6, dtype=torch.float32).reshape(1, 6)},
+                "critic": {
+                    "privileged": torch.arange(8, dtype=torch.float32).reshape(1, 8)
+                },
             },
             observation_after={
-                "policy": torch.arange(6, dtype=torch.float32).reshape(1, 6)
-                + 1.0
-                + float(self.drift_second_execution and self.step_count == 2)
+                "actor": {
+                    "policy": torch.arange(6, dtype=torch.float32).reshape(1, 6)
+                    + 1.0
+                    + float(self.drift_second_execution and self.step_count == 2)
+                },
+                "critic": {
+                    "privileged": torch.arange(8, dtype=torch.float32).reshape(1, 8)
+                    + 1.0
+                },
             },
             reward=1.25,
             reward_terms={
@@ -1115,6 +1252,7 @@ class _QualificationContinuationRunner:
             },
             terminated=False,
             truncated=False,
+            terminal_reason="running",
             terminal_context=self.telemetry.DriverTerminalContext(
                 control_step_count=21,
                 max_control_steps=2000,
@@ -1139,6 +1277,13 @@ class _QualificationContinuationRunner:
             live_fall_evidence_after={"producer_step": 21, "fall": False},
             continuation_readback=continuation_readback,
         )
+        if (
+            self.reuse_continuation_across_repeats
+            and self.first_continuation is not None
+        ):
+            return self.first_continuation
+        self.first_continuation = continuation
+        return continuation
 
 
 def _execute_qualification(
@@ -1152,6 +1297,8 @@ def _execute_qualification(
     descriptor_confidence: float = 1.0,
     descriptor_reward_mask: dict[str, bool] | None = None,
     events: list[str] | None = None,
+    reuse_injection_context: bool = False,
+    reuse_continuation_across_repeats: bool = False,
 ):
     state, telemetry, failures = modules
     snapshot = _recovery_snapshot(state)
@@ -1171,8 +1318,12 @@ def _execute_qualification(
     events = [] if events is None else events
     snapshot_endpoint = _StaticDigestAttestedSnapshotEndpoint(state, events)
 
+    injection_readbacks: list[object] = []
+
     def readback(plan):
-        return _replay_context(failures, telemetry, plan)
+        context = _replay_context(failures, telemetry, plan)
+        injection_readbacks.append(context)
+        return context
 
     hooks = _InjectionHooks(events, readback)
     runner = _QualificationContinuationRunner(
@@ -1181,10 +1332,13 @@ def _execute_qualification(
         drift_second_execution=drift_second_execution,
         skip_primitive_step=skip_primitive_step,
         applied_action_offset=applied_action_offset,
+        reuse_injection_context=reuse_injection_context,
+        reuse_continuation_across_repeats=reuse_continuation_across_repeats,
+        injection_readbacks=injection_readbacks,
     )
     runner.snapshot_endpoint = snapshot_endpoint
     fixed_action40 = tuple(float(index) / 100.0 for index in range(40))
-    qualification = failures.qualify_failure_catalog_entry(
+    qualification = failures._collect_failure_catalog_diagnostic(
         env=_RawSceneTrapEnv(),
         snapshot=snapshot,
         descriptor=descriptor,
@@ -1234,6 +1388,40 @@ def test_qualification_rejects_applied_action_that_differs_from_fixed_action(
         )
 
 
+def test_diagnostic_rejects_same_context_as_primitive_continuation(
+    modules,
+    monkeypatch,
+) -> None:
+    _state, _telemetry, failures = modules
+
+    with pytest.raises(
+        failures.RecoveryFailureVerificationError,
+        match="did not advance",
+    ):
+        _execute_qualification(
+            modules,
+            monkeypatch,
+            reuse_injection_context=True,
+        )
+
+
+def test_diagnostic_rejects_reused_raw_continuation_across_repeats(
+    modules,
+    monkeypatch,
+) -> None:
+    _state, _telemetry, failures = modules
+
+    with pytest.raises(
+        failures.RecoveryFailureVerificationError,
+        match="independent continuation",
+    ):
+        _execute_qualification(
+            modules,
+            monkeypatch,
+            reuse_continuation_across_repeats=True,
+        )
+
+
 def test_qualification_step_protocol_excludes_residual_only_executor(modules) -> None:
     _state, _telemetry, failures = modules
 
@@ -1247,7 +1435,7 @@ def test_qualification_step_protocol_excludes_residual_only_executor(modules) ->
     )
 
 
-def test_qualification_binds_descriptor_confidence_and_reward_mask(
+def test_diagnostic_binds_descriptor_confidence_and_reward_mask_without_activation(
     modules,
     monkeypatch,
 ) -> None:
@@ -1263,16 +1451,18 @@ def test_qualification_binds_descriptor_confidence_and_reward_mask(
 
     assert plan.descriptor_confidence == pytest.approx(0.25)
     assert dict(plan.descriptor_reward_mask) == reward_mask
-    assert set(
-        failures.effective_failure_catalog(
-            {qualification.category: qualification}
-        )
-    ) == {qualification.category}
+    assert failures._qualification_has_canonical_diagnostic_receipts(qualification)
+    assert (
+        failures.effective_failure_catalog({qualification.category: qualification})
+        == {}
+    )
 
     object.__setattr__(plan, "descriptor_confidence", 1.0)
-    assert failures.effective_failure_catalog(
-        {qualification.category: qualification}
-    ) == {}
+    assert not failures._qualification_has_canonical_diagnostic_receipts(qualification)
+    assert (
+        failures.effective_failure_catalog({qualification.category: qualification})
+        == {}
+    )
 
     qualification, _evidence, _events, _hooks, _runner = _execute_qualification(
         modules,
@@ -1285,12 +1475,14 @@ def test_qualification_binds_descriptor_confidence_and_reward_mask(
         "descriptor_reward_mask",
         {"distance": True, "grasp": True, "placement": True},
     )
-    assert failures.effective_failure_catalog(
-        {qualification.category: qualification}
-    ) == {}
+    assert not failures._qualification_has_canonical_diagnostic_receipts(qualification)
+    assert (
+        failures.effective_failure_catalog({qualification.category: qualification})
+        == {}
+    )
 
 
-def test_effective_catalog_requires_factory_executed_canonical_receipts(
+def test_optional_diagnostic_records_two_canonical_executions_without_activation(
     modules,
     monkeypatch,
 ) -> None:
@@ -1303,21 +1495,25 @@ def test_effective_catalog_requires_factory_executed_canonical_receipts(
     assert not hasattr(evidence, "replay_records")
     assert len(qualification.receipts) == 2
     assert tuple(receipt.repeat_index for receipt in qualification.receipts) == (0, 1)
-    assert events == [
-        "restore",
-        "write",
-        "settle",
-        "readback",
-        "primitive_step",
-        "continuation_readback",
-    ] * 2
+    assert (
+        events
+        == [
+            "restore",
+            "write",
+            "settle",
+            "readback",
+            "primitive_step",
+            "continuation_readback",
+        ]
+        * 2
+    )
     assert (hooks.write_count, hooks.settle_count, hooks.read_count) == (2, 2, 2)
     assert runner.step_count == 2
     source_snapshot_digest = qualification.receipts[0].source_snapshot_digest
     assert endpoint.digest_calls == [source_snapshot_digest] * 2
-    assert endpoint.restore_calls == [
-        (source_snapshot_digest, source_snapshot_digest)
-    ] * 2
+    assert (
+        endpoint.restore_calls == [(source_snapshot_digest, source_snapshot_digest)] * 2
+    )
     expected_trace = (
         "restore",
         "write",
@@ -1326,17 +1522,27 @@ def test_effective_catalog_requires_factory_executed_canonical_receipts(
         "primitive_step",
         "readback",
     )
-    assert all(receipt.operation_trace == expected_trace for receipt in qualification.receipts)
-    assert all(len(receipt.continuation.fixed_action40) == 40 for receipt in qualification.receipts)
-    assert all(len(receipt.continuation.contact16_before) == 16 for receipt in qualification.receipts)
-    assert all(len(receipt.continuation.contact16_after) == 16 for receipt in qualification.receipts)
-    assert set(
-        failures.effective_failure_catalog(
-            {qualification.category: qualification}
-        )
-    ) == {qualification.category}
-    with pytest.raises(failures.RecoveryFailureSchemaError, match="qualification"):
-        failures.effective_failure_catalog({evidence.category: evidence})
+    assert all(
+        receipt.operation_trace == expected_trace for receipt in qualification.receipts
+    )
+    assert all(
+        len(receipt.continuation.fixed_action40) == 40
+        for receipt in qualification.receipts
+    )
+    assert all(
+        len(receipt.continuation.contact16_before) == 16
+        for receipt in qualification.receipts
+    )
+    assert all(
+        len(receipt.continuation.contact16_after) == 16
+        for receipt in qualification.receipts
+    )
+    assert failures._qualification_has_canonical_diagnostic_receipts(qualification)
+    assert (
+        failures.effective_failure_catalog({qualification.category: qualification})
+        == {}
+    )
+    assert failures.effective_failure_catalog({evidence.category: evidence}) == {}
     with pytest.raises(TypeError):
         failures.RawInjectorExecutionReceipt(
             schema_version=failures.RECOVERY_RAW_RECEIPT_SCHEMA_VERSION,
@@ -1360,7 +1566,7 @@ def test_effective_catalog_requires_factory_executed_canonical_receipts(
 
 
 @pytest.mark.parametrize("category", sorted(DECLARED_CATEGORIES))
-def test_factory_qualification_activates_each_declared_category(
+def test_fake_protocol_diagnostic_never_activates_a_formal_category(
     modules,
     monkeypatch,
     category: str,
@@ -1372,9 +1578,36 @@ def test_factory_qualification_activates_each_declared_category(
         category=category,
     )
 
-    assert set(failures.effective_failure_catalog({category: qualification})) == {
-        category
-    }
+    assert failures.effective_failure_catalog({category: qualification}) == {}
+
+
+def test_continuation_schema_requires_actor_critic_and_terminal_reason(
+    modules,
+    monkeypatch,
+) -> None:
+    _state, _telemetry, failures = modules
+    diagnostic, _evidence, _events, _hooks, _runner = _execute_qualification(
+        modules,
+        monkeypatch,
+    )
+    continuation = diagnostic.receipts[0].continuation
+
+    assert continuation.terminal_reason == "running"
+    assert set(continuation.observation_before) == {"actor", "critic"}
+    assert set(continuation.observation_after) == {"actor", "critic"}
+    with pytest.raises(
+        failures.RecoveryFailureSchemaError,
+        match="actor and critic",
+    ):
+        replace(
+            continuation,
+            observation_before={"actor": {"policy": torch.zeros(1, 6)}},
+        )
+    with pytest.raises(
+        failures.RecoveryFailureSchemaError,
+        match="terminal flags",
+    ):
+        replace(continuation, terminal_reason="fall")
 
 
 def test_factory_rejects_nonidentical_executions_only_after_both_real_runs(
@@ -1395,14 +1628,18 @@ def test_factory_rejects_nonidentical_executions_only_after_both_real_runs(
             events=events,
         )
 
-    assert events == [
-        "restore",
-        "write",
-        "settle",
-        "readback",
-        "primitive_step",
-        "continuation_readback",
-    ] * 2
+    assert (
+        events
+        == [
+            "restore",
+            "write",
+            "settle",
+            "readback",
+            "primitive_step",
+            "continuation_readback",
+        ]
+        * 2
+    )
 
 
 @pytest.mark.parametrize(
@@ -1416,6 +1653,7 @@ def test_factory_rejects_nonidentical_executions_only_after_both_real_runs(
         "reward_terms",
         "terminated",
         "truncated",
+        "terminal_reason",
         "terminal_context",
         "task_state_before",
         "task_state_after",
@@ -1455,6 +1693,8 @@ def test_effective_catalog_rejects_any_raw_continuation_mutation(
         }
     elif payload_name in {"terminated", "truncated"}:
         mutated = True
+    elif payload_name == "terminal_reason":
+        mutated = "fall"
     elif payload_name == "terminal_context":
         mutated = telemetry.DriverTerminalContext(
             control_step_count=22,
@@ -1465,7 +1705,10 @@ def test_effective_catalog_rejects_any_raw_continuation_mutation(
             fall_confirmed=False,
         )
     elif payload_name in {"task_state_before", "task_state_after"}:
-        mutated = {"episode_length_buf": torch.tensor([999]), "hand_state": torch.zeros(1, 2)}
+        mutated = {
+            "episode_length_buf": torch.tensor([999]),
+            "hand_state": torch.zeros(1, 2),
+        }
     elif payload_name in {"rng_before", "rng_after"}:
         mutated = state.RecoveryRngState(
             python=random.Random(999).getstate(),
@@ -1494,10 +1737,9 @@ def test_effective_catalog_rejects_any_raw_continuation_mutation(
         mutated = replace(base, telemetry=replace(base.telemetry, xy_mismatch_m=0.3))
     object.__setattr__(continuation, payload_name, mutated)
 
+    assert not failures._qualification_has_canonical_diagnostic_receipts(qualification)
     assert (
-        failures.effective_failure_catalog(
-            {qualification.category: qualification}
-        )
+        failures.effective_failure_catalog({qualification.category: qualification})
         == {}
     )
 
@@ -1536,7 +1778,11 @@ def test_effective_catalog_rejects_receipt_or_cached_digest_forgery(
         mutated = "f" * 64
     object.__setattr__(receipt, payload_name, mutated)
 
-    assert failures.effective_failure_catalog({qualification.category: qualification}) == {}
+    assert not failures._qualification_has_canonical_diagnostic_receipts(qualification)
+    assert (
+        failures.effective_failure_catalog({qualification.category: qualification})
+        == {}
+    )
 
 
 @pytest.mark.parametrize("payload_name", ["qualification_digest", "evidence_digest"])
@@ -1553,7 +1799,11 @@ def test_effective_catalog_rejects_qualification_or_evidence_digest_forgery(
     target = qualification if payload_name == "qualification_digest" else evidence
     object.__setattr__(target, payload_name, "f" * 64)
 
-    assert failures.effective_failure_catalog({qualification.category: qualification}) == {}
+    assert not failures._qualification_has_canonical_diagnostic_receipts(qualification)
+    assert (
+        failures.effective_failure_catalog({qualification.category: qualification})
+        == {}
+    )
 
 
 def test_snapshot_digest_mismatch_fails_before_restore_rng_or_hooks(

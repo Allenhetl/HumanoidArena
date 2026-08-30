@@ -26,11 +26,11 @@ from .recovery_telemetry import (
 
 PP_BOX_TASK_IDENTITY = recovery_state.PP_BOX_TASK_IDENTITY
 RECOVERY_FAILURE_DESCRIPTOR_SCHEMA_VERSION = 1
-RECOVERY_ATTEMPT_SCHEMA_VERSION = 1
+RECOVERY_ATTEMPT_SCHEMA_VERSION = 2
 RECOVERY_ACTIVATION_SCHEMA_VERSION = 1
 RECOVERY_RUNTIME_CAPABILITY_SCHEMA_VERSION = 1
 RECOVERY_INJECTION_PLAN_SCHEMA_VERSION = 2
-RECOVERY_RAW_RECEIPT_SCHEMA_VERSION = 2
+RECOVERY_RAW_RECEIPT_SCHEMA_VERSION = 3
 RECOVERY_CATALOG_QUALIFICATION_SCHEMA_VERSION = 2
 
 DECLARED_FAILURE_CATEGORIES = (
@@ -53,6 +53,7 @@ _CONTINUATION_REWARD_TERMS = (
     "grasp",
     "placement",
 )
+_CONTINUATION_OBSERVATION_STREAMS = frozenset({"actor", "critic"})
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 BOX_HALF_EXTENTS_M = rewards.BOX_HALF_EXTENTS_M
 BOX_HALF_EXTENT_M = BOX_HALF_EXTENTS_M[0]
@@ -94,7 +95,7 @@ _QUALIFICATION_OPERATION_TRACE = (
     "readback",
 )
 _ISSUED_RECEIPT_DIGESTS: dict[object, str] = {}
-_ISSUED_QUALIFICATION_DIGESTS: dict[object, str] = {}
+_DIAGNOSTIC_QUALIFICATION_DIGESTS: dict[object, str] = {}
 _RECOVERY_ACTIVATION_FACTORY_TOKEN = object()
 
 
@@ -301,19 +302,19 @@ _RECOVERY_REWARD_BINDINGS = (
         term="distance",
         stage="approach",
         entity_roles={"source": "bimanual_ee", "target": "box"},
-        telemetry_binding="max_bimanual_ee_box_distance_m",
+        telemetry_binding="grasp_evidence.max_ee_box_distance_m",
     ),
     RecoveryRewardBinding(
         term="grasp",
         stage="acquire",
         entity_roles={"end_effector": "bimanual_ee", "object": "box"},
-        telemetry_binding="bimanual_grasp",
+        telemetry_binding="grasp",
     ),
     RecoveryRewardBinding(
         term="placement",
         stage="place",
         entity_roles={"object": "box", "target": "shelf_target"},
-        telemetry_binding="hypot_xy_z_mismatch",
+        telemetry_binding="placement_distance_m",
     ),
 )
 
@@ -337,6 +338,53 @@ def recovery_reward_component_scope(binding: RecoveryRewardBinding) -> str:
         separators=(",", ":"),
         ensure_ascii=True,
     )
+
+
+def resolve_recovery_reward_binding(
+    binding: RecoveryRewardBinding,
+    telemetry: PrivilegedRecoveryTelemetry,
+) -> float | bool:
+    """Resolve a declared component path from deterministic task telemetry."""
+
+    if not isinstance(binding, RecoveryRewardBinding):
+        raise RecoveryFailureSchemaError(
+            "reward telemetry binding requires a RecoveryRewardBinding"
+        )
+    state = _validate_privileged_telemetry(telemetry)
+    value: object = state
+    try:
+        for segment in binding.telemetry_binding.split("."):
+            if not segment:
+                raise AttributeError(segment)
+            value = (
+                value[segment]
+                if isinstance(value, Mapping)
+                else getattr(value, segment)
+            )
+    except (AttributeError, KeyError, TypeError) as exc:
+        raise RecoveryFailureSchemaError(
+            f"reward telemetry binding {binding.telemetry_binding!r} is unavailable"
+        ) from exc
+    if binding.term == "grasp":
+        if type(value) is not bool:
+            raise RecoveryFailureSchemaError(
+                "grasp reward telemetry binding must resolve to a boolean"
+            )
+        return value
+    if binding.term not in {"distance", "placement"}:
+        raise RecoveryFailureSchemaError(
+            f"unknown recovery reward term: {binding.term!r}"
+        )
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RecoveryFailureSchemaError(
+            f"{binding.term} reward telemetry binding must be finite and non-negative"
+        )
+    distance = float(value)
+    if not math.isfinite(distance) or distance < 0.0:
+        raise RecoveryFailureSchemaError(
+            f"{binding.term} reward telemetry binding must be finite and non-negative"
+        )
+    return distance
 
 
 @dataclass(frozen=True)
@@ -473,11 +521,14 @@ def _reward_potential_distances(
     telemetry: PrivilegedRecoveryTelemetry,
 ) -> tuple[float, float]:
     state = _validate_privileged_telemetry(telemetry)
-    left_distance = math.dist(state.left_ee_pose_w[:3], state.box_center_w)
-    right_distance = math.dist(state.right_ee_pose_w[:3], state.box_center_w)
+    bindings = {binding.term: binding for binding in _RECOVERY_REWARD_BINDINGS}
+    distance = resolve_recovery_reward_binding(bindings["distance"], state)
+    placement = resolve_recovery_reward_binding(bindings["placement"], state)
+    assert isinstance(distance, float)
+    assert isinstance(placement, float)
     return (
-        max(left_distance, right_distance),
-        math.hypot(state.xy_mismatch_m, state.z_mismatch_m),
+        distance,
+        placement,
     )
 
 
@@ -574,13 +625,20 @@ def resolve_recovery_reward_telemetry(
             f"recovery activation context has no env index {lane}"
         ) from exc
     distance, placement_distance = _reward_potential_distances(state)
+    grasp = resolve_recovery_reward_binding(
+        next(
+            binding for binding in _RECOVERY_REWARD_BINDINGS if binding.term == "grasp"
+        ),
+        state,
+    )
+    assert isinstance(grasp, bool)
     gate_truth = _recovery_gate_truth(state)
 
     potential_values: Mapping[str, Mapping[str, float]] = {
         "distance": MappingProxyType(
             {"distance": distance, "d_init": baseline.distance_d_init_m}
         ),
-        "grasp": MappingProxyType({"q_grasp": 1.0 if state.grasp else 0.0}),
+        "grasp": MappingProxyType({"q_grasp": 1.0 if grasp else 0.0}),
         "placement": MappingProxyType(
             {
                 "distance": placement_distance,
@@ -610,7 +668,7 @@ class RecoveryFailureCatalogEntry:
     reward_bindings: tuple[RecoveryRewardBinding, ...]
     required_capabilities: frozenset[str]
     declared: bool = True
-    recoverable: bool = True
+    recoverable: bool = False
 
 
 _DECLARED_CATALOG = MappingProxyType(
@@ -635,29 +693,31 @@ def declared_failure_catalog() -> Mapping[str, RecoveryFailureCatalogEntry]:
 def effective_failure_catalog(
     qualifications: Mapping[str, object] | None = None,
 ) -> Mapping[str, RecoveryFailureCatalogEntry]:
-    """Return only entries proven by two factory-executed raw receipts."""
+    """Return only entries backed by installed runtime conformance artifacts."""
 
     if qualifications is None:
         return {}
     if not isinstance(qualifications, Mapping):
-        raise RecoveryFailureSchemaError("catalog qualifications must be a mapping")
+        return {}
     unknown = set(qualifications) - set(DECLARED_FAILURE_CATEGORIES)
     if unknown:
-        raise RecoveryFailureSchemaError(
-            "unknown catalog qualification categories: " + ", ".join(sorted(unknown))
-        )
+        return {}
     effective: dict[str, RecoveryFailureCatalogEntry] = {}
     for category, value in qualifications.items():
         if not isinstance(value, FailureCatalogQualification):
-            raise RecoveryFailureSchemaError(
-                f"catalog qualification for {category!r} has the wrong type"
-            )
-        if value.category != category:
-            raise RecoveryFailureSchemaError(
-                f"catalog qualification key {category!r} does not match its category"
-            )
+            continue
+        if getattr(value, "category", None) != category:
+            continue
         if _qualification_is_effective(value):
-            effective[category] = _DECLARED_CATALOG[category]
+            candidate = _DECLARED_CATALOG[category]
+            effective[category] = RecoveryFailureCatalogEntry(
+                category=candidate.category,
+                initial_stage=candidate.initial_stage,
+                reward_bindings=candidate.reward_bindings,
+                required_capabilities=candidate.required_capabilities,
+                declared=candidate.declared,
+                recoverable=True,
+            )
     return MappingProxyType(effective)
 
 
@@ -756,15 +816,13 @@ class RecoveryFailureDescriptor:
 
 @dataclass(frozen=True)
 class RecoveryAttemptEvidence:
-    """Checkpointable primitive-step evidence required by failure predicates."""
+    """Task-attempt provenance and counters required by failure predicates."""
 
     schema_version: int
     trigger_kind: str
     anchor_id: str | None
     anchor_digest: str | None
     failure_seed: int
-    phase: str
-    phase_enter_step: int
     attempt_count: int
     pickup_attempted: bool
     place_attempted: bool
@@ -799,17 +857,10 @@ class RecoveryAttemptEvidence:
             )
         anchor_digest = _digest(self.anchor_digest, name="anchor digest", optional=True)
         failure_seed = _strict_int(self.failure_seed, name="failure seed")
-        if self.phase not in {"approach", "acquire", "place"}:
-            raise RecoveryFailureSchemaError(f"unknown recovery phase: {self.phase!r}")
-        phase_enter_step = _strict_int(self.phase_enter_step, name="phase enter step")
         attempt_count = _strict_int(self.attempt_count, name="attempt count")
         last_progress_step = _strict_int(
             self.last_progress_step, name="last progress step"
         )
-        if last_progress_step < phase_enter_step:
-            raise RecoveryFailureSchemaError(
-                "last progress step must not precede phase enter step"
-            )
         counters = {
             "no progress steps": self.no_progress_steps,
             "stall confirm steps": self.stall_confirm_steps,
@@ -841,7 +892,6 @@ class RecoveryAttemptEvidence:
             )
         object.__setattr__(self, "anchor_digest", anchor_digest)
         object.__setattr__(self, "failure_seed", failure_seed)
-        object.__setattr__(self, "phase_enter_step", phase_enter_step)
         object.__setattr__(self, "attempt_count", attempt_count)
         object.__setattr__(self, "last_progress_step", last_progress_step)
         object.__setattr__(
@@ -1176,6 +1226,7 @@ class FailureContinuationRaw:
     reward_terms: Mapping[str, float]
     terminated: bool
     truncated: bool
+    terminal_reason: str
     terminal_context: DriverTerminalContext
     task_state_before: Mapping[str, object]
     task_state_after: Mapping[str, object]
@@ -1215,10 +1266,19 @@ class FailureContinuationRaw:
         observations: dict[str, object] = {}
         for name in ("observation_before", "observation_after"):
             value = getattr(self, name)
-            if not isinstance(value, Mapping) or not value:
+            if not isinstance(value, Mapping) or set(value) != set(
+                _CONTINUATION_OBSERVATION_STREAMS
+            ):
                 raise RecoveryFailureSchemaError(
-                    f"continuation {name.replace('_', ' ')} must be a non-empty mapping"
+                    f"continuation {name.replace('_', ' ')} must contain exactly "
+                    "actor and critic streams"
                 )
+            for stream in _CONTINUATION_OBSERVATION_STREAMS:
+                if not isinstance(value[stream], Mapping) or not value[stream]:
+                    raise RecoveryFailureSchemaError(
+                        f"continuation {name.replace('_', ' ')} {stream} stream "
+                        "must be a non-empty mapping"
+                    )
             observations[name] = _freeze_recovery_value(value)
         if isinstance(self.reward, bool) or not isinstance(self.reward, (int, float)):
             raise RecoveryFailureSchemaError("continuation reward must be finite")
@@ -1247,6 +1307,20 @@ class FailureContinuationRaw:
             reward_terms[name] = normalized
         terminated = _strict_bool(self.terminated, name="continuation terminated")
         truncated = _strict_bool(self.truncated, name="continuation truncated")
+        if self.terminal_reason not in {"running", "success", "fall", "time_limit"}:
+            raise RecoveryFailureSchemaError(
+                "continuation terminal reason must be running, success, fall, or time_limit"
+            )
+        expected_flags = {
+            "running": (False, False),
+            "success": (True, False),
+            "fall": (True, False),
+            "time_limit": (False, True),
+        }[self.terminal_reason]
+        if (terminated, truncated) != expected_flags:
+            raise RecoveryFailureSchemaError(
+                "continuation terminal flags contradict terminal reason"
+            )
         if not isinstance(self.terminal_context, DriverTerminalContext):
             raise RecoveryFailureSchemaError(
                 "continuation terminal context must be DriverTerminalContext"
@@ -1321,6 +1395,10 @@ class FailureContinuationRaw:
                 "continuation readback must be FailurePredicateContext"
             )
         continuation_readback = _freeze_recovery_value(self.continuation_readback)
+        if continuation_readback.telemetry.terminal_reason != self.terminal_reason:
+            raise RecoveryFailureSchemaError(
+                "continuation terminal reason contradicts privileged readback"
+            )
         assert runtime_digest is not None
         object.__setattr__(self, "env_index", env_index)
         object.__setattr__(self, "runtime_identity_digest", runtime_digest)
@@ -1358,6 +1436,7 @@ def _continuation_raw_payload(value: FailureContinuationRaw) -> tuple[object, ..
         value.reward_terms,
         value.terminated,
         value.truncated,
+        value.terminal_reason,
         value.terminal_context,
         value.task_state_before,
         value.task_state_after,
@@ -1885,6 +1964,16 @@ def _issue_raw_injector_receipt(
         )
     injection_readback = _freeze_recovery_value(result.readback)
     injection_digest = recovery_state.recovery_value_digest(injection_readback)
+    continuation_readback_digest = recovery_state.recovery_value_digest(
+        normalized_continuation.continuation_readback
+    )
+    if injection_digest == continuation_readback_digest:
+        raise RecoveryFailureVerificationError(
+            category=result.category,
+            failure_seed=result.plan.failure_seed,
+            observed_category=truth["continuation_category"],  # type: ignore[arg-type]
+            detail="primitive continuation did not advance beyond injection readback",
+        )
     continuation_digest = _continuation_raw_digest(normalized_continuation)
     execution_payload = _receipt_execution_payload(
         task_identity=PP_BOX_TASK_IDENTITY,
@@ -1991,8 +2080,7 @@ def _issued_receipt_is_valid(receipt: object) -> bool:
         return bool(
             receipt.execution_digest == execution_digest
             and receipt.receipt_digest == receipt_digest
-            and _ISSUED_RECEIPT_DIGESTS.get(receipt._issuance_token)
-            == receipt_digest
+            and _ISSUED_RECEIPT_DIGESTS.get(receipt._issuance_token) == receipt_digest
         )
     except (
         AttributeError,
@@ -2014,13 +2102,14 @@ def _qualification_payload(
         qualification.category,
         qualification.runtime_evidence,
         tuple(
-            _canonical_receipt_payload(receipt)
-            for receipt in qualification.receipts
+            _canonical_receipt_payload(receipt) for receipt in qualification.receipts
         ),
     )
 
 
-def _qualification_is_effective(qualification: object) -> bool:
+def _qualification_has_canonical_diagnostic_receipts(
+    qualification: object,
+) -> bool:
     if type(qualification) is not FailureCatalogQualification:
         return False
     try:
@@ -2049,8 +2138,7 @@ def _qualification_is_effective(qualification: object) -> bool:
             or first.execution_digest != second.execution_digest
             or first.env_index != second.env_index
             or first.runtime_identity_digest != second.runtime_identity_digest
-            or first.continuation.fixed_action40
-            != second.continuation.fixed_action40
+            or first.continuation.fixed_action40 != second.continuation.fixed_action40
         ):
             return False
         descriptor = RecoveryFailureDescriptor(
@@ -2071,9 +2159,7 @@ def _qualification_is_effective(qualification: object) -> bool:
         )
         return bool(
             qualification.qualification_digest == qualification_digest
-            and _ISSUED_QUALIFICATION_DIGESTS.get(
-                qualification._issuance_token
-            )
+            and _DIAGNOSTIC_QUALIFICATION_DIGESTS.get(qualification._issuance_token)
             == qualification_digest
         )
     except (
@@ -2084,6 +2170,27 @@ def _qualification_is_effective(qualification: object) -> bool:
         recovery_state.RecoveryStateSchemaError,
     ):
         return False
+
+
+def _build_runtime_conformance_checker() -> Callable[[object], bool]:
+    # No public API can populate this registry. A later controlled headless
+    # integration must replace this checker through a separately reviewed path.
+    runtime_registry: Mapping[str, str] = MappingProxyType({})
+
+    def is_effective(qualification: object) -> bool:
+        if not _qualification_has_canonical_diagnostic_receipts(qualification):
+            return False
+        assert isinstance(qualification, FailureCatalogQualification)
+        return (
+            runtime_registry.get(qualification.category)
+            == qualification.qualification_digest
+        )
+
+    return is_effective
+
+
+_qualification_is_effective = _build_runtime_conformance_checker()
+del _build_runtime_conformance_checker
 
 
 def recovery_succeeded(telemetry: PrivilegedRecoveryTelemetry) -> bool:
@@ -2260,7 +2367,7 @@ def inject_recovery_failure(
     )
 
 
-def qualify_failure_catalog_entry(
+def _collect_failure_catalog_diagnostic(
     *,
     env: object,
     snapshot: object,
@@ -2274,7 +2381,7 @@ def qualify_failure_catalog_entry(
     qualification_step_executor: RecoveryFailureQualificationStepExecutor,
     fixed_action40: Sequence[float],
 ) -> FailureCatalogQualification:
-    """Issue a catalog proof from exactly two real injector/step executions."""
+    """Collect optional two-run diagnostics without granting catalog authority."""
 
     category = getattr(descriptor, "category", "unknown")
     missing_continuation_capabilities = []
@@ -2296,6 +2403,8 @@ def qualify_failure_catalog_entry(
         name="catalog qualification fixed action40",
     )
     receipts: list[RawInjectorExecutionReceipt] = []
+    injection_readback_ids: set[int] = set()
+    continuation_ids: set[int] = set()
     for repeat_index in range(2):
         result = inject_recovery_failure(
             env,
@@ -2307,6 +2416,14 @@ def qualify_failure_catalog_entry(
             settler=settler,
             reader=reader,
         )
+        if id(result.readback) in injection_readback_ids:
+            raise RecoveryFailureVerificationError(
+                category=descriptor.category,
+                failure_seed=descriptor.failure_seed,
+                observed_category=result.category,
+                detail="two executions did not produce independent injection readbacks",
+            )
+        injection_readback_ids.add(id(result.readback))
         executed_actions: list[tuple[float, ...]] = []
 
         def execute_primitive_step_once(
@@ -2345,6 +2462,14 @@ def qualify_failure_catalog_entry(
             raise RecoveryFailureSchemaError(
                 "continuation applied action40 does not match the production primitive step"
             )
+        if id(continuation) in continuation_ids:
+            raise RecoveryFailureVerificationError(
+                category=descriptor.category,
+                failure_seed=descriptor.failure_seed,
+                observed_category=result.category,
+                detail="two executions did not produce independent continuations",
+            )
+        continuation_ids.add(id(continuation))
         receipts.append(
             _issue_raw_injector_receipt(
                 result,
@@ -2377,13 +2502,13 @@ def qualify_failure_catalog_entry(
         _qualification_payload(qualification)
     )
     object.__setattr__(qualification, "qualification_digest", qualification_digest)
-    _ISSUED_QUALIFICATION_DIGESTS[token] = qualification_digest
-    if not _qualification_is_effective(qualification):
+    _DIAGNOSTIC_QUALIFICATION_DIGESTS[token] = qualification_digest
+    if not _qualification_has_canonical_diagnostic_receipts(qualification):
         raise RecoveryFailureVerificationError(
             category=descriptor.category,
             failure_seed=descriptor.failure_seed,
             observed_category=None,
-            detail="factory-issued catalog qualification failed canonical validation",
+            detail="catalog diagnostic failed canonical validation",
         )
     return qualification
 
@@ -2436,11 +2561,11 @@ __all__ = [
     "effective_failure_catalog",
     "evaluate_failure_predicates",
     "inject_recovery_failure",
-    "qualify_failure_catalog_entry",
     "recovery_reward_bindings",
     "recovery_reward_component_scope",
     "recovery_state",
     "recovery_succeeded",
     "required_runtime_capabilities",
+    "resolve_recovery_reward_binding",
     "resolve_recovery_reward_telemetry",
 ]
