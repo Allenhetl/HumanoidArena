@@ -1192,6 +1192,32 @@ def test_executor_receipt_digest_binds_actual_raw_measurement_bytes(
     )
 
 
+def test_runtime_contact_validator_accepts_u_probe_filtered_force(
+    telemetry,
+) -> None:
+    env = _complete_runtime_env(telemetry)
+    execution = env.recovery_contact_mapping_receipt
+    receipt = execution.sensor_receipts[0]
+    touch = receipt.phases[1]
+    measured = torch.zeros(touch.force_shape, dtype=torch.float64)
+    measured[0, 0, 0, 0] = torch.tensor(
+        [-0.7844533324241638, 0.11803561449050903, -0.28371661901474],
+        dtype=torch.float64,
+    )
+    raw = measured.numpy().tobytes(order="C")
+    object.__setattr__(touch, "raw_force_bytes", raw)
+    object.__setattr__(touch, "raw_force_sha256", hashlib.sha256(raw).hexdigest())
+    object.__setattr__(touch, "receipt_digest", telemetry._phase_receipt_digest(touch))
+    object.__setattr__(
+        receipt, "receipt_digest", telemetry._sensor_receipt_digest(receipt)
+    )
+    object.__setattr__(
+        execution, "receipt_digest", telemetry._execution_receipt_digest(execution)
+    )
+
+    assert len(telemetry.validate_runtime_hand_contact_sensors(env)) == 16
+
+
 def test_runtime_contact_validator_rejects_miswired_executor_receipt(
     telemetry,
 ) -> None:
