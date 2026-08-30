@@ -42,6 +42,14 @@ ACTION_CONTRACT = {
     ],
     "base_owned_hand_indices": [38, 39],
 }
+EXPECTED_CONTACT_SENSOR_COUNT = 2
+CONTACT_CALIBRATION_PHASE_COUNT = 3
+CONTACT_CALIBRATION_SUBSTEPS_PER_PHASE = 4
+CONTACT_CALIBRATION_PHYSICS_STEPS = (
+    EXPECTED_CONTACT_SENSOR_COUNT
+    * CONTACT_CALIBRATION_PHASE_COUNT
+    * CONTACT_CALIBRATION_SUBSTEPS_PER_PHASE
+)
 
 
 class ProcessExitAttempt(RuntimeError):
@@ -109,6 +117,23 @@ def build_evaluator_fall_args() -> SimpleNamespace:
         fall_confirm_steps=5,
         verbose_startup=False,
     )
+
+
+def validate_contact_calibration_cardinality(
+    *,
+    receipt_count: int,
+    report_count: int,
+    phase_counts: Sequence[int],
+) -> None:
+    """Fail closed unless both Box-filtered palm sensors completed calibration."""
+
+    if (
+        receipt_count != EXPECTED_CONTACT_SENSOR_COUNT
+        or report_count != EXPECTED_CONTACT_SENSOR_COUNT
+    ):
+        raise RuntimeError("PP-box contact calibration did not cover both palm sensors")
+    if any(count != CONTACT_CALIBRATION_PHASE_COUNT for count in phase_counts):
+        raise RuntimeError("PP-box contact calibration did not execute three phases")
 
 
 def initial_report(args: argparse.Namespace | SimpleNamespace) -> dict[str, object]:
@@ -290,10 +315,11 @@ def _run_contact_and_telemetry(
     mdp.install_pp_box_contact_calibration_executor(env)
     receipt = mdp.execute_pp_box_contact_calibration(env)
     reports = mdp.validate_runtime_hand_contact_sensors(env)
-    if len(receipt.sensor_receipts) != 16 or len(reports) != 16:
-        raise RuntimeError("PP-box contact calibration did not cover 16 sensors")
-    if any(len(sensor.phases) != 3 for sensor in receipt.sensor_receipts):
-        raise RuntimeError("PP-box contact calibration did not execute three phases")
+    validate_contact_calibration_cardinality(
+        receipt_count=len(receipt.sensor_receipts),
+        report_count=len(reports),
+        phase_counts=tuple(len(sensor.phases) for sensor in receipt.sensor_receipts),
+    )
 
     # The controlled calibration changes physical state for its proof. Start the
     # telemetry sample from a fresh task reset while retaining its bound receipt.
@@ -331,7 +357,7 @@ def _run_contact_and_telemetry(
     contact = {
         "status": "passed",
         "executor": "controlled_three_phase_executor",
-        "simulator_steps": 16 * 3,
+        "simulator_steps": CONTACT_CALIBRATION_PHYSICS_STEPS,
         "execution_receipt": _jsonable(receipt),
         "sensor_reports": _jsonable(reports),
     }

@@ -53,6 +53,31 @@ def test_probe_contract_is_ha_h40_c40_arms14() -> None:
     }
 
 
+def test_probe_contact_calibration_requires_bilateral_palms() -> None:
+    probe = _load_probe_module()
+
+    assert probe.EXPECTED_CONTACT_SENSOR_COUNT == 2
+    assert probe.CONTACT_CALIBRATION_PHYSICS_STEPS == 24
+    probe.validate_contact_calibration_cardinality(
+        receipt_count=2,
+        report_count=2,
+        phase_counts=(3, 3),
+    )
+
+    with pytest.raises(RuntimeError, match="both palm sensors"):
+        probe.validate_contact_calibration_cardinality(
+            receipt_count=1,
+            report_count=1,
+            phase_counts=(3,),
+        )
+    with pytest.raises(RuntimeError, match="three phases"):
+        probe.validate_contact_calibration_cardinality(
+            receipt_count=2,
+            report_count=2,
+            phase_counts=(3, 2),
+        )
+
+
 def test_build_fall_detector_args_reuses_evaluator_defaults() -> None:
     probe = _load_probe_module()
     args = probe.build_evaluator_fall_args()
