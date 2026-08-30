@@ -1379,8 +1379,15 @@ def _require_exact_mapping_keys(
     value: Any, expected: set[str], *, path: str
 ) -> Mapping:
     if not isinstance(value, Mapping) or set(value) != expected:
+        saved_keys = (
+            tuple(sorted(value, key=_mapping_key_sort_key))
+            if isinstance(value, Mapping)
+            else (f"<{type(value).__module__}.{type(value).__qualname__}>",)
+        )
+        expected_keys = tuple(sorted(expected, key=_mapping_key_sort_key))
         raise RecoveryStateSchemaError(
-            f"PP-box recovery task state {path} keys do not match schema"
+            f"PP-box recovery task state {path} keys do not match schema: "
+            f"saved_keys={saved_keys!r}, runtime_keys={expected_keys!r}"
         )
     return value
 

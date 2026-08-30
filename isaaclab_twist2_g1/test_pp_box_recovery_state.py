@@ -1773,6 +1773,20 @@ def test_pp_box_hook_install_initializes_pre_step_reset_buffer(
     assert torch.equal(snapshot.task_counters["reset_buf"], torch.tensor([True]))
 
 
+def test_pp_box_task_state_key_mismatch_preserves_both_key_sets(
+    recovery_state,
+) -> None:
+    with pytest.raises(
+        recovery_state.RecoveryStateSchemaError,
+        match=r"saved_keys=\('stale',\), runtime_keys=\(\)",
+    ):
+        recovery_state._require_exact_mapping_keys(
+            {"stale": torch.tensor([False])},
+            set(),
+            path="termination_manager.term_dones",
+        )
+
+
 def test_pp_box_hook_install_preflights_all_participants_before_binding(
     recovery_state,
 ) -> None:
