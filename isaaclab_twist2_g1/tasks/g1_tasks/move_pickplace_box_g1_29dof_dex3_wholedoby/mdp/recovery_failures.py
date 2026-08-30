@@ -27,6 +27,7 @@ from .recovery_telemetry import (
 PP_BOX_TASK_IDENTITY = recovery_state.PP_BOX_TASK_IDENTITY
 RECOVERY_FAILURE_DESCRIPTOR_SCHEMA_VERSION = 1
 RECOVERY_ATTEMPT_SCHEMA_VERSION = 1
+RECOVERY_ACTIVATION_SCHEMA_VERSION = 1
 RECOVERY_RUNTIME_CAPABILITY_SCHEMA_VERSION = 1
 RECOVERY_INJECTION_PLAN_SCHEMA_VERSION = 1
 RECOVERY_RAW_RECEIPT_SCHEMA_VERSION = 1
@@ -95,6 +96,7 @@ _QUALIFICATION_OPERATION_TRACE = (
 )
 _ISSUED_RECEIPT_DIGESTS: dict[object, str] = {}
 _ISSUED_QUALIFICATION_DIGESTS: dict[object, str] = {}
+_RECOVERY_ACTIVATION_FACTORY_TOKEN = object()
 
 
 class RecoveryFailureError(RuntimeError):
@@ -283,50 +285,6 @@ def _freeze_recovery_value(value: object) -> object:
 
 
 @dataclass(frozen=True)
-class RecoveryFallbackTransition:
-    predicate: str
-    target_stage: str
-
-
-@dataclass(frozen=True)
-class RecoveryStageSpec:
-    name: str
-    activation_predicate: str
-    completion_predicate: str
-    fallbacks: tuple[RecoveryFallbackTransition, ...] = ()
-
-
-_RECOVERY_STAGE_FSM = (
-    RecoveryStageSpec(
-        name="approach",
-        activation_predicate="running_and_not_grasp",
-        completion_predicate="bimanual_pose_evidence",
-    ),
-    RecoveryStageSpec(
-        name="acquire",
-        activation_predicate="running_and_not_grasp_and_bimanual_pose",
-        completion_predicate="grasp",
-        fallbacks=(RecoveryFallbackTransition("lost_bimanual_pose", "approach"),),
-    ),
-    RecoveryStageSpec(
-        name="place",
-        activation_predicate="running_and_grasp",
-        completion_predicate="placement",
-        fallbacks=(
-            RecoveryFallbackTransition("lost_grasp_with_bimanual_pose", "acquire"),
-            RecoveryFallbackTransition("lost_grasp_without_bimanual_pose", "approach"),
-        ),
-    ),
-)
-
-
-def recovery_stage_fsm() -> tuple[RecoveryStageSpec, ...]:
-    """Return the task FSM without importing an algorithm-side gate."""
-
-    return _RECOVERY_STAGE_FSM
-
-
-@dataclass(frozen=True)
 class RecoveryRewardBinding:
     term: str
     stage: str
@@ -382,6 +340,188 @@ def recovery_reward_component_scope(binding: RecoveryRewardBinding) -> str:
     )
 
 
+@dataclass(frozen=True)
+class RecoveryActivationBaseline:
+    """Eq. 8 normalizers captured once for one environment lane."""
+
+    env_index: int
+    distance_d_init_m: float
+    placement_d_init_m: float
+
+    def __post_init__(self) -> None:
+        env_index = _strict_int(self.env_index, name="activation baseline env index")
+        normalized: dict[str, float] = {}
+        for name in ("distance_d_init_m", "placement_d_init_m"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise RecoveryFailureSchemaError(
+                    f"activation baseline {name} must be finite and non-negative"
+                )
+            number = float(value)
+            if not math.isfinite(number) or number < 0.0:
+                raise RecoveryFailureSchemaError(
+                    f"activation baseline {name} must be finite and non-negative"
+                )
+            normalized[name] = number
+        object.__setattr__(self, "env_index", env_index)
+        for name, value in normalized.items():
+            object.__setattr__(self, name, value)
+
+
+@dataclass(frozen=True, init=False)
+class RecoveryActivationContext:
+    """Explicit immutable activation state carried across primitive steps."""
+
+    schema_version: int
+    task_identity: str
+    activation_id: str
+    baselines: Mapping[int, RecoveryActivationBaseline]
+    activation_digest: str
+    _issuance_token: object = field(repr=False, compare=False)
+
+
+def _normalized_activation_baselines(
+    baselines: object,
+) -> dict[int, RecoveryActivationBaseline]:
+    if not isinstance(baselines, Mapping) or not baselines:
+        raise RecoveryFailureSchemaError(
+            "recovery activation baselines must be a non-empty mapping"
+        )
+    normalized: dict[int, RecoveryActivationBaseline] = {}
+    for raw_env_index, baseline in baselines.items():
+        env_index = _strict_int(
+            raw_env_index,
+            name="recovery activation env index",
+        )
+        if not isinstance(baseline, RecoveryActivationBaseline):
+            raise RecoveryFailureSchemaError(
+                "recovery activation baseline has the wrong type"
+            )
+        if baseline.env_index != env_index:
+            raise RecoveryFailureSchemaError(
+                "recovery activation baseline key does not match its env index"
+            )
+        normalized[env_index] = baseline
+    return normalized
+
+
+def _recovery_activation_digest(context: RecoveryActivationContext) -> str:
+    return recovery_state.recovery_value_digest(
+        (
+            "recovery-activation-context",
+            context.schema_version,
+            context.task_identity,
+            context.activation_id,
+            context.baselines,
+        )
+    )
+
+
+def _issue_recovery_activation_context(
+    *,
+    activation_id: str,
+    baselines: Mapping[int, RecoveryActivationBaseline],
+) -> RecoveryActivationContext:
+    if not isinstance(activation_id, str) or not activation_id.strip():
+        raise RecoveryFailureSchemaError(
+            "recovery activation id must be a non-empty string"
+        )
+    normalized = _normalized_activation_baselines(baselines)
+    context = object.__new__(RecoveryActivationContext)
+    values = {
+        "schema_version": RECOVERY_ACTIVATION_SCHEMA_VERSION,
+        "task_identity": PP_BOX_TASK_IDENTITY,
+        "activation_id": activation_id,
+        "baselines": MappingProxyType(normalized),
+        "_issuance_token": _RECOVERY_ACTIVATION_FACTORY_TOKEN,
+    }
+    for name, value in values.items():
+        object.__setattr__(context, name, value)
+    object.__setattr__(
+        context,
+        "activation_digest",
+        _recovery_activation_digest(context),
+    )
+    return context
+
+
+def _validate_recovery_activation(
+    value: object,
+) -> RecoveryActivationContext:
+    if type(value) is not RecoveryActivationContext:
+        raise RecoveryFailureSchemaError(
+            "reward resolution requires a recovery activation context"
+        )
+    if (
+        value.schema_version != RECOVERY_ACTIVATION_SCHEMA_VERSION
+        or value.task_identity != PP_BOX_TASK_IDENTITY
+        or not isinstance(value.activation_id, str)
+        or not value.activation_id.strip()
+        or value._issuance_token is not _RECOVERY_ACTIVATION_FACTORY_TOKEN
+    ):
+        raise RecoveryFailureSchemaError(
+            "recovery activation context was not issued by begin_recovery_activation"
+        )
+    _normalized_activation_baselines(value.baselines)
+    if value.activation_digest != _recovery_activation_digest(value):
+        raise RecoveryFailureSchemaError(
+            "recovery activation context digest does not match its baselines"
+        )
+    return value
+
+
+def _reward_potential_distances(
+    telemetry: PrivilegedRecoveryTelemetry,
+) -> tuple[float, float]:
+    state = _validate_privileged_telemetry(telemetry)
+    left_distance = math.dist(state.left_ee_pose_w[:3], state.box_center_w)
+    right_distance = math.dist(state.right_ee_pose_w[:3], state.box_center_w)
+    return (
+        max(left_distance, right_distance),
+        math.hypot(state.xy_mismatch_m, state.z_mismatch_m),
+    )
+
+
+def begin_recovery_activation(
+    *,
+    activation_id: str,
+    telemetry_by_env: Mapping[int, PrivilegedRecoveryTelemetry],
+    active_context: RecoveryActivationContext | None = None,
+) -> RecoveryActivationContext:
+    """Freeze Eq. 8 normalizers once; repeated begin returns the active context."""
+
+    if not isinstance(activation_id, str) or not activation_id.strip():
+        raise RecoveryFailureSchemaError(
+            "recovery activation id must be a non-empty string"
+        )
+    if active_context is not None:
+        active = _validate_recovery_activation(active_context)
+        if active.activation_id == activation_id:
+            return active
+    if not isinstance(telemetry_by_env, Mapping) or not telemetry_by_env:
+        raise RecoveryFailureSchemaError(
+            "recovery activation telemetry must be a non-empty env mapping"
+        )
+    baselines: dict[int, RecoveryActivationBaseline] = {}
+    for raw_env_index, telemetry in telemetry_by_env.items():
+        env_index = _strict_int(raw_env_index, name="recovery activation env index")
+        state = _validate_privileged_telemetry(telemetry)
+        if state.env_index != env_index:
+            raise RecoveryFailureSchemaError(
+                "recovery activation telemetry env index does not match its lane"
+            )
+        distance, placement_distance = _reward_potential_distances(state)
+        baselines[env_index] = RecoveryActivationBaseline(
+            env_index=env_index,
+            distance_d_init_m=distance,
+            placement_d_init_m=placement_distance,
+        )
+    return _issue_recovery_activation_context(
+        activation_id=activation_id,
+        baselines=baselines,
+    )
+
+
 def _recovery_gate_truth(
     telemetry: PrivilegedRecoveryTelemetry,
 ) -> Mapping[str, bool]:
@@ -415,53 +555,51 @@ def _recovery_gate_truth(
 
 def resolve_recovery_reward_telemetry(
     telemetry: PrivilegedRecoveryTelemetry,
+    *,
+    activation_context: RecoveryActivationContext | None = None,
+    env_index: int,
 ) -> Mapping[str, object]:
-    """Resolve task truth into component-scoped reward and stage-gate telemetry."""
+    """Resolve one primitive step using activation-frozen Eq. 8 normalizers."""
 
     state = _validate_privileged_telemetry(telemetry)
-    left_distance = math.dist(state.left_ee_pose_w[:3], state.box_center_w)
-    right_distance = math.dist(state.right_ee_pose_w[:3], state.box_center_w)
-    distance = max(left_distance, right_distance)
-    placement_distance = math.hypot(state.xy_mismatch_m, state.z_mismatch_m)
+    activation = _validate_recovery_activation(activation_context)
+    lane = _strict_int(env_index, name="reward telemetry env index")
+    if state.env_index != lane:
+        raise RecoveryFailureSchemaError(
+            "reward telemetry env index does not match the requested lane"
+        )
+    try:
+        baseline = activation.baselines[lane]
+    except KeyError as exc:
+        raise RecoveryFailureSchemaError(
+            f"recovery activation context has no env index {lane}"
+        ) from exc
+    distance, placement_distance = _reward_potential_distances(state)
     gate_truth = _recovery_gate_truth(state)
 
-    components: dict[str, Mapping[str, object]] = {}
-    stage_gates: dict[str, Mapping[str, object]] = {}
     potential_values: Mapping[str, Mapping[str, float]] = {
-        "distance": MappingProxyType({"distance": distance, "d_init": distance}),
+        "distance": MappingProxyType(
+            {"distance": distance, "d_init": baseline.distance_d_init_m}
+        ),
         "grasp": MappingProxyType({"q_grasp": 1.0 if state.grasp else 0.0}),
         "placement": MappingProxyType(
-            {"distance": placement_distance, "d_init": placement_distance}
+            {
+                "distance": placement_distance,
+                "d_init": baseline.placement_d_init_m,
+            }
         ),
     }
-    bindings_by_stage = {
-        binding.stage: binding for binding in _RECOVERY_REWARD_BINDINGS
+    components = {
+        recovery_reward_component_scope(binding): potential_values[binding.term]
+        for binding in _RECOVERY_REWARD_BINDINGS
     }
-    for stage in _RECOVERY_STAGE_FSM:
-        fallback_truth = {
-            transition.predicate: gate_truth[transition.predicate]
-            for transition in stage.fallbacks
-        }
-        stage_gates[stage.name] = MappingProxyType(
-            {
-                "activation_predicate": stage.activation_predicate,
-                "activation": gate_truth[stage.activation_predicate],
-                "completion_predicate": stage.completion_predicate,
-                "completion": gate_truth[stage.completion_predicate],
-                "fallbacks": MappingProxyType(fallback_truth),
-            }
-        )
-        binding = bindings_by_stage[stage.name]
-        scoped: dict[str, object] = dict(potential_values[binding.term])
-        scoped[stage.activation_predicate] = gate_truth[stage.activation_predicate]
-        scoped[stage.completion_predicate] = gate_truth[stage.completion_predicate]
-        scoped.update(fallback_truth)
-        components[recovery_reward_component_scope(binding)] = MappingProxyType(scoped)
 
     return MappingProxyType(
         {
+            "activation_id": activation.activation_id,
+            "activation_digest": activation.activation_digest,
             "components": MappingProxyType(components),
-            "stage_gates": MappingProxyType(stage_gates),
+            "gate_truth": gate_truth,
         }
     )
 
@@ -470,7 +608,6 @@ def resolve_recovery_reward_telemetry(
 class RecoveryFailureCatalogEntry:
     category: str
     initial_stage: str
-    stage_fsm: tuple[RecoveryStageSpec, ...]
     reward_bindings: tuple[RecoveryRewardBinding, ...]
     required_capabilities: frozenset[str]
     declared: bool = True
@@ -482,7 +619,6 @@ _DECLARED_CATALOG = MappingProxyType(
         category: RecoveryFailureCatalogEntry(
             category=category,
             initial_stage=_CATEGORY_INITIAL_STAGE[category],
-            stage_fsm=_RECOVERY_STAGE_FSM,
             reward_bindings=_RECOVERY_REWARD_BINDINGS,
             required_capabilities=required_runtime_capabilities(category),
         )
@@ -2131,6 +2267,7 @@ __all__ = [
     "DECLARED_FAILURE_CATEGORIES",
     "PLACEMENT_Z_TOLERANCE_M",
     "PP_BOX_TASK_IDENTITY",
+    "RECOVERY_ACTIVATION_SCHEMA_VERSION",
     "RECOVERY_ATTEMPT_SCHEMA_VERSION",
     "RECOVERY_CATALOG_QUALIFICATION_SCHEMA_VERSION",
     "RECOVERY_FAILURE_DESCRIPTOR_SCHEMA_VERSION",
@@ -2145,6 +2282,8 @@ __all__ = [
     "FailureRuntimeCapabilityEvidence",
     "LiveSupportGeometry",
     "RawInjectorExecutionReceipt",
+    "RecoveryActivationBaseline",
+    "RecoveryActivationContext",
     "RecoveryAttemptEvidence",
     "RecoveryFailureCapabilityError",
     "RecoveryFailureCatalogEntry",
@@ -2158,10 +2297,9 @@ __all__ = [
     "RecoveryFailureSnapshotDigestError",
     "RecoveryFailureVerificationError",
     "RecoveryFailureWriter",
-    "RecoveryFallbackTransition",
     "RecoveryRewardBinding",
-    "RecoveryStageSpec",
     "VerifiedFailureAnchor",
+    "begin_recovery_activation",
     "build_failure_injection_plan",
     "classify_recoverable_failure",
     "declared_failure_catalog",
@@ -2172,7 +2310,6 @@ __all__ = [
     "qualify_failure_catalog_entry",
     "recovery_reward_bindings",
     "recovery_reward_component_scope",
-    "recovery_stage_fsm",
     "recovery_state",
     "recovery_succeeded",
     "required_runtime_capabilities",

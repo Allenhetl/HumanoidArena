@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import math
 import random
 import sys
 import types
@@ -23,6 +24,7 @@ MDP_DIR = (
 )
 PACKAGE_NAME = "pp_box_recovery_failure_tests"
 MDP_INIT_PATH = MDP_DIR / "__init__.py"
+FAILURES_PATH = MDP_DIR / "recovery_failures.py"
 
 
 def _load_module(name: str, path: Path):
@@ -117,8 +119,10 @@ def _hand_contact(telemetry, side: str, active: bool):
 def _telemetry_state(
     telemetry,
     *,
+    env_index: int = 0,
     grasp: bool = False,
     pose_valid: bool = True,
+    ee_distance_m: float = 0.15,
     xy_mismatch_m: float = 0.3,
     z_mismatch_m: float = 0.0,
     terminal_reason: str = "running",
@@ -137,8 +141,24 @@ def _telemetry_state(
         placed=success,
     )
     box_center = (0.0, 0.0, 0.505)
-    left_pose = (0.15 if pose_valid else 1.0, 0.0, 0.505, 1.0, 0.0, 0.0, 0.0)
-    right_pose = (-0.15 if pose_valid else -1.0, 0.0, 0.505, 1.0, 0.0, 0.0, 0.0)
+    left_pose = (
+        ee_distance_m if pose_valid else 1.0,
+        0.0,
+        0.505,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+    )
+    right_pose = (
+        -ee_distance_m if pose_valid else -1.0,
+        0.0,
+        0.505,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+    )
     is_fall = terminal_reason == "fall"
     fall_streak = 5 if is_fall else (1 if fall_candidate else 0)
     control_step = 2000 if terminal_reason == "time_limit" else 20
@@ -146,7 +166,7 @@ def _telemetry_state(
         (0.0, 1.0, 0.0, 0.0) if (is_fall or fall_candidate) else (1.0, 0.0, 0.0, 0.0)
     )
     return telemetry.build_privileged_telemetry(
-        env_index=0,
+        env_index=env_index,
         box_center_w=box_center,
         box_linear_velocity_w=(0.0, 0.0, 0.0),
         box_angular_velocity_w=(0.0, 0.0, 0.0),
@@ -526,32 +546,28 @@ def test_recovery_success_is_exactly_the_task_success_terminal(modules) -> None:
         failures.recovery_succeeded(contradictory)
 
 
-def test_stage_fsm_separates_activation_completion_and_declares_fallbacks(
-    modules,
-) -> None:
+def test_recovery_reward_api_has_no_persistent_stage_or_fsm_surface(modules) -> None:
     _state, _telemetry, failures = modules
+    tree = ast.parse(FAILURES_PATH.read_text(encoding="utf-8"))
+    identifiers = {
+        node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
+    } | {
+        node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+    } | {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    forbidden = {
+        "RecoveryStageSpec",
+        "recovery_stage_fsm",
+        "stage_gates",
+        "current_stage",
+        "fsm_stage",
+    }
 
-    stages = failures.recovery_stage_fsm()
-
-    assert tuple(stage.name for stage in stages) == ("approach", "acquire", "place")
-    assert [
-        (stage.activation_predicate, stage.completion_predicate) for stage in stages
-    ] == [
-        ("running_and_not_grasp", "bimanual_pose_evidence"),
-        ("running_and_not_grasp_and_bimanual_pose", "grasp"),
-        ("running_and_grasp", "placement"),
-    ]
-    assert [
-        (transition.predicate, transition.target_stage)
-        for transition in stages[1].fallbacks
-    ] == [("lost_bimanual_pose", "approach")]
-    assert [
-        (transition.predicate, transition.target_stage)
-        for transition in stages[2].fallbacks
-    ] == [
-        ("lost_grasp_with_bimanual_pose", "acquire"),
-        ("lost_grasp_without_bimanual_pose", "approach"),
-    ]
+    assert forbidden.isdisjoint(identifiers)
+    assert all(not hasattr(failures, name) for name in forbidden)
 
 
 def test_reward_bindings_are_task_truth_for_distance_grasp_and_placement_only(
@@ -579,25 +595,27 @@ def test_reward_bindings_are_task_truth_for_distance_grasp_and_placement_only(
     assert bindings[2].telemetry_binding == "hypot_xy_z_mismatch"
     assert "articulation" not in {binding.term for binding in bindings}
     assert all(
-        entry.stage_fsm == failures.recovery_stage_fsm()
-        and entry.reward_bindings == bindings
+        not hasattr(entry, "stage_fsm") and entry.reward_bindings == bindings
         for entry in failures.declared_failure_catalog().values()
     )
 
 
-def test_reward_resolver_emits_component_scoped_numeric_task_truth_and_current_baselines(
+def test_recovery_activation_freezes_d_init_across_primitive_steps(
     modules,
 ) -> None:
     _state, telemetry, failures = modules
-    task_truth = _telemetry_state(
+    initial = _telemetry_state(
         telemetry,
         grasp=False,
         pose_valid=True,
+        ee_distance_m=0.4,
         xy_mismatch_m=0.3,
         z_mismatch_m=0.4,
     )
-
-    resolved = failures.resolve_recovery_reward_telemetry(task_truth)
+    activation = failures.begin_recovery_activation(
+        activation_id="recovery-17",
+        telemetry_by_env={0: initial},
+    )
     bindings = {
         binding.term: binding for binding in failures.recovery_reward_bindings()
     }
@@ -610,91 +628,163 @@ def test_reward_resolver_emits_component_scoped_numeric_task_truth_and_current_b
         "grasp": ('["grasp",[["end_effector","bimanual_ee"],["object","box"]]]'),
         "placement": ('["placement",[["object","box"],["target","shelf_target"]]]'),
     }
+    for current_ee, current_xy, current_z in (
+        (0.3, 0.24, 0.18),
+        (0.2, 0.12, 0.05),
+        (0.1, 0.04, 0.03),
+    ):
+        resolved = failures.resolve_recovery_reward_telemetry(
+            _telemetry_state(
+                telemetry,
+                grasp=current_ee < 0.25,
+                ee_distance_m=current_ee,
+                xy_mismatch_m=current_xy,
+                z_mismatch_m=current_z,
+            ),
+            activation_context=activation,
+            env_index=0,
+        )
+        distance = resolved["components"][scopes["distance"]]
+        placement = resolved["components"][scopes["placement"]]
+        assert distance["distance"] == pytest.approx(current_ee)
+        assert distance["d_init"] == pytest.approx(0.4)
+        assert placement["distance"] == pytest.approx(
+            math.hypot(current_xy, current_z)
+        )
+        assert placement["d_init"] == pytest.approx(0.5)
+        assert len(resolved["components"]) == 3
+        assert "articulation" not in repr(resolved).lower()
+        assert "rgb" not in repr(resolved).lower()
+        assert "vlm" not in repr(resolved).lower()
 
-    distance = resolved["components"][scopes["distance"]]
-    grasp = resolved["components"][scopes["grasp"]]
-    placement = resolved["components"][scopes["placement"]]
-    assert distance["distance"] == pytest.approx(0.15)
-    assert distance["d_init"] == distance["distance"]
-    assert grasp["q_grasp"] == 0.0
-    assert placement["distance"] == pytest.approx(0.5)
-    assert placement["d_init"] == placement["distance"]
-    assert len(resolved["components"]) == 3
-    assert "articulation" not in repr(resolved).lower()
-    assert "rgb" not in repr(resolved).lower()
-    assert "vlm" not in repr(resolved).lower()
-    assert "injected" not in repr(resolved).lower()
 
-    closer = _telemetry_state(
-        telemetry,
-        grasp=True,
-        pose_valid=True,
-        xy_mismatch_m=0.12,
-        z_mismatch_m=0.05,
-    )
-    closer_resolved = failures.resolve_recovery_reward_telemetry(closer)
-    closer_placement = closer_resolved["components"][scopes["placement"]]
-    closer_grasp = closer_resolved["components"][scopes["grasp"]]
-    assert closer_placement["distance"] == pytest.approx(0.13)
-    assert closer_placement["d_init"] == closer_placement["distance"]
-    assert closer_grasp["q_grasp"] == 1.0
-
-
-def test_reward_resolver_emits_activation_completion_and_fallback_gate_truth(
+def test_repeated_begin_keeps_baseline_but_new_activation_refreshes_it(
     modules,
 ) -> None:
     _state, telemetry, failures = modules
-    pose_without_grasp = failures.resolve_recovery_reward_telemetry(
-        _telemetry_state(telemetry, grasp=False, pose_valid=True)
+    first = failures.begin_recovery_activation(
+        activation_id="recovery-17",
+        telemetry_by_env={
+            0: _telemetry_state(
+                telemetry,
+                ee_distance_m=0.4,
+                xy_mismatch_m=0.3,
+                z_mismatch_m=0.4,
+            )
+        },
     )
-    grasped = failures.resolve_recovery_reward_telemetry(
-        _telemetry_state(telemetry, grasp=True, pose_valid=True)
+    repeated = failures.begin_recovery_activation(
+        activation_id="recovery-17",
+        telemetry_by_env={
+            0: _telemetry_state(
+                telemetry,
+                ee_distance_m=0.1,
+                xy_mismatch_m=0.06,
+                z_mismatch_m=0.08,
+            )
+        },
+        active_context=first,
     )
-    no_pose = failures.resolve_recovery_reward_telemetry(
-        _telemetry_state(telemetry, grasp=False, pose_valid=False)
+    second = failures.begin_recovery_activation(
+        activation_id="recovery-18",
+        telemetry_by_env={
+            0: _telemetry_state(
+                telemetry,
+                ee_distance_m=0.1,
+                xy_mismatch_m=0.06,
+                z_mismatch_m=0.08,
+            )
+        },
+        active_context=first,
     )
-    falling = failures.resolve_recovery_reward_telemetry(
-        _telemetry_state(
-            telemetry,
-            grasp=False,
-            pose_valid=True,
-            fall_candidate=True,
+
+    assert repeated is first
+    assert first.baselines[0].distance_d_init_m == pytest.approx(0.4)
+    assert first.baselines[0].placement_d_init_m == pytest.approx(0.5)
+    assert second.activation_id == "recovery-18"
+    assert second.baselines[0].distance_d_init_m == pytest.approx(0.1)
+    assert second.baselines[0].placement_d_init_m == pytest.approx(0.1)
+    with pytest.raises(TypeError):
+        failures.RecoveryActivationContext(
+            schema_version=failures.RECOVERY_ACTIVATION_SCHEMA_VERSION,
+            task_identity=failures.PP_BOX_TASK_IDENTITY,
+            activation_id="recovery-forged",
+            baselines=first.baselines,
         )
+    with pytest.raises(TypeError):
+        replace(first, activation_id="recovery-forged")
+
+
+def test_activation_baselines_are_lane_bound_and_context_is_mandatory(modules) -> None:
+    _state, telemetry, failures = modules
+    activation = failures.begin_recovery_activation(
+        activation_id="recovery-multi-env",
+        telemetry_by_env={
+            0: _telemetry_state(
+                telemetry,
+                env_index=0,
+                ee_distance_m=0.4,
+                xy_mismatch_m=0.3,
+                z_mismatch_m=0.4,
+            ),
+            1: _telemetry_state(
+                telemetry,
+                env_index=1,
+                ee_distance_m=0.2,
+                xy_mismatch_m=0.12,
+                z_mismatch_m=0.05,
+            ),
+        },
     )
 
-    approach = pose_without_grasp["stage_gates"]["approach"]
-    acquire = pose_without_grasp["stage_gates"]["acquire"]
-    place = pose_without_grasp["stage_gates"]["place"]
-    assert approach == {
-        "activation_predicate": "running_and_not_grasp",
-        "activation": True,
-        "completion_predicate": "bimanual_pose_evidence",
-        "completion": True,
-        "fallbacks": {},
-    }
-    assert acquire["activation"] is True
-    assert acquire["completion"] is False
-    assert acquire["fallbacks"] == {"lost_bimanual_pose": False}
-    assert place["activation"] is False
-    assert place["fallbacks"] == {
-        "lost_grasp_with_bimanual_pose": True,
-        "lost_grasp_without_bimanual_pose": False,
-    }
+    assert activation.baselines[0].distance_d_init_m == pytest.approx(0.4)
+    assert activation.baselines[0].placement_d_init_m == pytest.approx(0.5)
+    assert activation.baselines[1].distance_d_init_m == pytest.approx(0.2)
+    assert activation.baselines[1].placement_d_init_m == pytest.approx(0.13)
+    with pytest.raises(failures.RecoveryFailureSchemaError, match="activation context"):
+        failures.resolve_recovery_reward_telemetry(
+            _telemetry_state(telemetry),
+            activation_context=None,
+            env_index=0,
+        )
+    with pytest.raises(failures.RecoveryFailureSchemaError, match="env index"):
+        failures.resolve_recovery_reward_telemetry(
+            _telemetry_state(telemetry, env_index=1),
+            activation_context=activation,
+            env_index=0,
+        )
 
-    assert grasped["stage_gates"]["acquire"]["completion"] is True
-    assert grasped["stage_gates"]["place"]["activation"] is True
-    assert no_pose["stage_gates"]["acquire"]["fallbacks"] == {
-        "lost_bimanual_pose": True
-    }
-    assert no_pose["stage_gates"]["place"]["fallbacks"] == {
-        "lost_grasp_with_bimanual_pose": False,
-        "lost_grasp_without_bimanual_pose": True,
-    }
-    assert all(
-        gate["activation"] is False
-        and all(active is False for active in gate["fallbacks"].values())
-        for gate in falling["stage_gates"].values()
+
+def test_reward_resolver_emits_stateless_gate_truth(modules) -> None:
+    _state, telemetry, failures = modules
+    initial = _telemetry_state(telemetry, grasp=False, pose_valid=True)
+    activation = failures.begin_recovery_activation(
+        activation_id="recovery-gates",
+        telemetry_by_env={0: initial},
     )
+
+    def resolve(**overrides: object):
+        return failures.resolve_recovery_reward_telemetry(
+            _telemetry_state(telemetry, **overrides),
+            activation_context=activation,
+            env_index=0,
+        )["gate_truth"]
+
+    pose_without_grasp = resolve(grasp=False, pose_valid=True)
+    grasped = resolve(grasp=True, pose_valid=True)
+    no_pose = resolve(grasp=False, pose_valid=False)
+    falling = resolve(grasp=False, pose_valid=True, fall_candidate=True)
+
+    assert pose_without_grasp["running_and_not_grasp"] is True
+    assert pose_without_grasp["running_and_not_grasp_and_bimanual_pose"] is True
+    assert pose_without_grasp["grasp"] is False
+    assert grasped["grasp"] is True
+    assert grasped["running_and_grasp"] is True
+    assert no_pose["lost_bimanual_pose"] is True
+    assert no_pose["lost_grasp_without_bimanual_pose"] is True
+    assert falling["running_and_not_grasp"] is False
+    assert falling["running_and_not_grasp_and_bimanual_pose"] is False
+    assert falling["running_and_grasp"] is False
 
 
 def test_recovery_geometry_constants_are_the_public_reward_source_of_truth(
