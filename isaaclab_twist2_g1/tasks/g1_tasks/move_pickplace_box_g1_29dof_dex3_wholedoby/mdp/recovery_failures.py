@@ -15,7 +15,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields
 from types import MappingProxyType
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, runtime_checkable
 
 from . import recovery_state, rewards
 from .recovery_telemetry import (
@@ -29,9 +29,9 @@ RECOVERY_FAILURE_DESCRIPTOR_SCHEMA_VERSION = 1
 RECOVERY_ATTEMPT_SCHEMA_VERSION = 1
 RECOVERY_ACTIVATION_SCHEMA_VERSION = 1
 RECOVERY_RUNTIME_CAPABILITY_SCHEMA_VERSION = 1
-RECOVERY_INJECTION_PLAN_SCHEMA_VERSION = 1
-RECOVERY_RAW_RECEIPT_SCHEMA_VERSION = 1
-RECOVERY_CATALOG_QUALIFICATION_SCHEMA_VERSION = 1
+RECOVERY_INJECTION_PLAN_SCHEMA_VERSION = 2
+RECOVERY_RAW_RECEIPT_SCHEMA_VERSION = 2
+RECOVERY_CATALOG_QUALIFICATION_SCHEMA_VERSION = 2
 
 DECLARED_FAILURE_CATEGORIES = (
     "dropped",
@@ -1072,6 +1072,8 @@ class FailureInjectionPlan:
     category_seed: int
     snapshot_digest: str
     runtime_evidence_digest: str
+    descriptor_confidence: float
+    descriptor_reward_mask: Mapping[str, bool]
     transform_kind: str
     state_transform: Mapping[str, object]
     anchor_id: str | None
@@ -1095,6 +1097,31 @@ class FailureInjectionPlan:
             self.runtime_evidence_digest,
             name="runtime evidence digest",
         )
+        if isinstance(self.descriptor_confidence, bool) or not isinstance(
+            self.descriptor_confidence, (int, float)
+        ):
+            raise RecoveryFailureSchemaError(
+                "plan descriptor confidence must be finite within [0, 1]"
+            )
+        descriptor_confidence = float(self.descriptor_confidence)
+        if not math.isfinite(descriptor_confidence) or not (
+            0.0 <= descriptor_confidence <= 1.0
+        ):
+            raise RecoveryFailureSchemaError(
+                "plan descriptor confidence must be finite within [0, 1]"
+            )
+        if not isinstance(self.descriptor_reward_mask, Mapping) or set(
+            self.descriptor_reward_mask
+        ) != set(_REWARD_TERMS):
+            raise RecoveryFailureSchemaError(
+                "plan descriptor reward mask must define distance, grasp, and placement"
+            )
+        if any(
+            type(value) is not bool for value in self.descriptor_reward_mask.values()
+        ) or not any(self.descriptor_reward_mask.values()):
+            raise RecoveryFailureSchemaError(
+                "plan descriptor reward mask must enable boolean reward terms"
+            )
         if not isinstance(self.transform_kind, str) or not self.transform_kind:
             raise RecoveryFailureSchemaError("transform kind must be non-empty")
         if not isinstance(self.state_transform, Mapping) or not self.state_transform:
@@ -1124,6 +1151,12 @@ class FailureInjectionPlan:
         object.__setattr__(self, "category_seed", category_seed)
         object.__setattr__(self, "snapshot_digest", snapshot_digest)
         object.__setattr__(self, "runtime_evidence_digest", evidence_digest)
+        object.__setattr__(self, "descriptor_confidence", descriptor_confidence)
+        object.__setattr__(
+            self,
+            "descriptor_reward_mask",
+            MappingProxyType(dict(self.descriptor_reward_mask)),
+        )
         object.__setattr__(self, "state_transform", frozen_transform)
         object.__setattr__(self, "anchor_digest", anchor_digest)
         object.__setattr__(self, "transform_digest", transform_digest)
@@ -1176,6 +1209,10 @@ class FailureContinuationRaw:
             length=40,
             name="continuation applied action40",
         )
+        if applied_action != fixed_action:
+            raise RecoveryFailureSchemaError(
+                "continuation applied action40 must exactly match fixed action40"
+            )
         observations: dict[str, object] = {}
         for name in ("observation_before", "observation_after"):
             value = getattr(self, name)
@@ -1519,6 +1556,8 @@ def build_failure_injection_plan(
         "category_seed": category_seed,
         "snapshot_digest": descriptor.snapshot_digest,
         "runtime_evidence_digest": evidence.evidence_digest,
+        "descriptor_confidence": descriptor.confidence,
+        "descriptor_reward_mask": dict(descriptor.reward_mask),
         "transform_kind": transform_kind,
         "state_transform": state_transform,
         "anchor_id": anchor_id,
@@ -1902,6 +1941,8 @@ def _issued_receipt_is_valid(receipt: object) -> bool:
             or receipt.runtime_identity_digest
             != receipt.continuation.runtime_identity_digest
             or receipt.source_snapshot_digest != receipt.plan.snapshot_digest
+            or receipt.continuation.fixed_action40
+            != receipt.continuation.applied_action40
             or receipt.continuation.terminated
             or receipt.continuation.truncated
         ):
@@ -2019,8 +2060,8 @@ def _qualification_is_effective(qualification: object) -> bool:
             category=qualification.category,
             stage=_CATEGORY_INITIAL_STAGE[qualification.category],
             entities=_DESCRIPTOR_ENTITIES,
-            confidence=1.0,
-            reward_mask={term: True for term in _REWARD_TERMS},
+            confidence=first.plan.descriptor_confidence,
+            reward_mask=first.plan.descriptor_reward_mask,
             failure_seed=first.plan.failure_seed,
             snapshot_digest=first.plan.snapshot_digest,
         )
@@ -2078,13 +2119,24 @@ class RecoveryFailureReader(Protocol):
 
 @runtime_checkable
 class RecoveryFailureContinuationRunner(Protocol):
-    """Executes one fixed primitive action and returns the complete raw state."""
+    """Captures raw state around the factory-owned primitive-step callback."""
 
     def run_failure_continuation(
         self,
         plan: FailureInjectionPlan,
         fixed_action40: tuple[float, ...],
+        primitive_step: Callable[[], tuple[float, ...]],
     ) -> FailureContinuationRaw: ...
+
+
+@runtime_checkable
+class RecoveryFailurePrimitiveStepExecutor(Protocol):
+    """Executes the already-committed action through the production provider."""
+
+    def execute_recovery_primitive_step(
+        self,
+        fixed_action40: tuple[float, ...],
+    ) -> Sequence[float]: ...
 
 
 @dataclass(frozen=True)
@@ -2188,15 +2240,24 @@ def qualify_failure_catalog_entry(
     settler: RecoveryFailureSettler,
     reader: RecoveryFailureReader,
     continuation_runner: RecoveryFailureContinuationRunner,
+    primitive_step_executor: RecoveryFailurePrimitiveStepExecutor,
     fixed_action40: Sequence[float],
 ) -> FailureCatalogQualification:
     """Issue a catalog proof from exactly two real injector/step executions."""
 
+    category = getattr(descriptor, "category", "unknown")
+    missing_continuation_capabilities = []
     if not isinstance(continuation_runner, RecoveryFailureContinuationRunner):
-        category = getattr(descriptor, "category", "unknown")
+        missing_continuation_capabilities.append("continuation_capture")
+    if not isinstance(
+        primitive_step_executor,
+        RecoveryFailurePrimitiveStepExecutor,
+    ):
+        missing_continuation_capabilities.append("production_primitive_step")
+    if missing_continuation_capabilities:
         raise RecoveryFailureCapabilityError(
             str(category),
-            ("fixed_primitive_continuation",),
+            missing_continuation_capabilities,
         )
     fixed_action = _finite_tuple(
         fixed_action40,
@@ -2214,10 +2275,42 @@ def qualify_failure_catalog_entry(
             settler=settler,
             reader=reader,
         )
+        executed_actions: list[tuple[float, ...]] = []
+
+        def execute_primitive_step_once() -> tuple[float, ...]:
+            if executed_actions:
+                raise RecoveryFailureSchemaError(
+                    "catalog qualification may execute exactly one primitive step per repeat"
+                )
+            applied_action = _finite_tuple(
+                primitive_step_executor.execute_recovery_primitive_step(
+                    fixed_action
+                ),
+                length=40,
+                name="production primitive-step applied action40",
+            )
+            executed_actions.append(applied_action)
+            return applied_action
+
         continuation = continuation_runner.run_failure_continuation(
             result.plan,
             fixed_action,
+            execute_primitive_step_once,
         )
+        if len(executed_actions) != 1:
+            raise RecoveryFailureVerificationError(
+                category=descriptor.category,
+                failure_seed=descriptor.failure_seed,
+                observed_category=None,
+                detail="continuation did not execute exactly one production primitive step",
+            )
+        if (
+            not isinstance(continuation, FailureContinuationRaw)
+            or continuation.applied_action40 != executed_actions[0]
+        ):
+            raise RecoveryFailureSchemaError(
+                "continuation applied action40 does not match the production primitive step"
+            )
         receipts.append(
             _issue_raw_injector_receipt(
                 result,
@@ -2291,6 +2384,7 @@ __all__ = [
     "RecoveryFailureDescriptor",
     "RecoveryFailureError",
     "RecoveryFailurePredicateConflictError",
+    "RecoveryFailurePrimitiveStepExecutor",
     "RecoveryFailureReader",
     "RecoveryFailureSchemaError",
     "RecoveryFailureSettler",

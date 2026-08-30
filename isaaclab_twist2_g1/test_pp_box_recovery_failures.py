@@ -1026,15 +1026,27 @@ class _QualificationContinuationRunner:
         events: list[str],
         *,
         drift_second_execution: bool = False,
+        skip_primitive_step: bool = False,
+        applied_action_offset: float = 0.0,
     ) -> None:
         self.state, self.telemetry, self.failures = modules
         self.events = events
         self.step_count = 0
         self.drift_second_execution = drift_second_execution
+        self.skip_primitive_step = skip_primitive_step
+        self.applied_action_offset = applied_action_offset
 
-    def run_failure_continuation(self, plan, fixed_action40):
+    def execute_recovery_primitive_step(self, fixed_action40):
         self.step_count += 1
         self.events.append("primitive_step")
+        applied_action40 = list(fixed_action40)
+        applied_action40[20] += self.applied_action_offset
+        return tuple(applied_action40)
+
+    def run_failure_continuation(self, plan, fixed_action40, primitive_step):
+        applied_action40 = (
+            fixed_action40 if self.skip_primitive_step else primitive_step()
+        )
         continuation_readback = _replay_context(self.failures, self.telemetry, plan)
         self.events.append("continuation_readback")
 
@@ -1065,7 +1077,7 @@ class _QualificationContinuationRunner:
             env_index=0,
             runtime_identity_digest="9" * 64,
             fixed_action40=fixed_action40,
-            applied_action40=fixed_action40,
+            applied_action40=applied_action40,
             observation_before={
                 "policy": torch.arange(6, dtype=torch.float32).reshape(1, 6)
             },
@@ -1115,6 +1127,10 @@ def _execute_qualification(
     *,
     category="near-shelf-misplaced",
     drift_second_execution: bool = False,
+    skip_primitive_step: bool = False,
+    applied_action_offset: float = 0.0,
+    descriptor_confidence: float = 1.0,
+    descriptor_reward_mask: dict[str, bool] | None = None,
     events: list[str] | None = None,
 ):
     state, telemetry, failures = modules
@@ -1124,6 +1140,12 @@ def _execute_qualification(
             _descriptor_payload(failures, category)
         ),
         snapshot_digest=state.recovery_state_digest(snapshot),
+        confidence=descriptor_confidence,
+        reward_mask=(
+            {"distance": True, "grasp": True, "placement": True}
+            if descriptor_reward_mask is None
+            else descriptor_reward_mask
+        ),
     )
     evidence = _runtime_evidence(failures, category)
     events = [] if events is None else events
@@ -1141,6 +1163,8 @@ def _execute_qualification(
         modules,
         events,
         drift_second_execution=drift_second_execution,
+        skip_primitive_step=skip_primitive_step,
+        applied_action_offset=applied_action_offset,
     )
     fixed_action40 = tuple(float(index) / 100.0 for index in range(40))
     qualification = failures.qualify_failure_catalog_entry(
@@ -1152,9 +1176,87 @@ def _execute_qualification(
         settler=hooks,
         reader=hooks,
         continuation_runner=runner,
+        primitive_step_executor=runner,
         fixed_action40=fixed_action40,
     )
     return qualification, evidence, events, hooks, runner
+
+
+def test_qualification_rejects_zero_step_self_report(
+    modules,
+    monkeypatch,
+) -> None:
+    _state, _telemetry, failures = modules
+
+    with pytest.raises(
+        failures.RecoveryFailureVerificationError,
+        match="primitive step",
+    ):
+        _execute_qualification(
+            modules,
+            monkeypatch,
+            skip_primitive_step=True,
+        )
+
+
+def test_qualification_rejects_applied_action_that_differs_from_fixed_action(
+    modules,
+    monkeypatch,
+) -> None:
+    _state, _telemetry, failures = modules
+
+    with pytest.raises(
+        failures.RecoveryFailureSchemaError,
+        match="applied action40",
+    ):
+        _execute_qualification(
+            modules,
+            monkeypatch,
+            applied_action_offset=0.5,
+        )
+
+
+def test_qualification_binds_descriptor_confidence_and_reward_mask(
+    modules,
+    monkeypatch,
+) -> None:
+    _state, _telemetry, failures = modules
+    reward_mask = {"distance": False, "grasp": True, "placement": False}
+    qualification, _evidence, _events, _hooks, _runner = _execute_qualification(
+        modules,
+        monkeypatch,
+        descriptor_confidence=0.25,
+        descriptor_reward_mask=reward_mask,
+    )
+    plan = qualification.receipts[0].plan
+
+    assert plan.descriptor_confidence == pytest.approx(0.25)
+    assert dict(plan.descriptor_reward_mask) == reward_mask
+    assert set(
+        failures.effective_failure_catalog(
+            {qualification.category: qualification}
+        )
+    ) == {qualification.category}
+
+    object.__setattr__(plan, "descriptor_confidence", 1.0)
+    assert failures.effective_failure_catalog(
+        {qualification.category: qualification}
+    ) == {}
+
+    qualification, _evidence, _events, _hooks, _runner = _execute_qualification(
+        modules,
+        monkeypatch,
+        descriptor_confidence=0.25,
+        descriptor_reward_mask=reward_mask,
+    )
+    object.__setattr__(
+        qualification.receipts[0].plan,
+        "descriptor_reward_mask",
+        {"distance": True, "grasp": True, "placement": True},
+    )
+    assert failures.effective_failure_catalog(
+        {qualification.category: qualification}
+    ) == {}
 
 
 def test_effective_catalog_requires_factory_executed_canonical_receipts(
