@@ -39,7 +39,7 @@ CRITICAL_BODY_CONTACT_THRESHOLD_N = 50.0
 EMPIRICAL_CONTACT_QUIET_MAX_N = 0.05
 EMPIRICAL_CONTACT_TOUCH_MIN_N = 1.0
 EMPIRICAL_CONTACT_TOUCH_GAP_M = 0.005
-EMPIRICAL_CONTACT_TOUCH_VELOCITY_M_S = -1.0
+EMPIRICAL_CONTACT_TOUCH_PENETRATION_M = 0.001
 
 _HAND_CONTACT_LINK_TOKENS = (
     "palm",
@@ -1471,11 +1471,33 @@ def _quat_rotate_wxyz(quaternion: torch.Tensor, vector: torch.Tensor) -> torch.T
     )
 
 
+def _contact_calibration_touch_velocity_m_s(env: object) -> float:
+    cfg = getattr(env, "cfg", None)
+    sim_cfg = getattr(cfg, "sim", None)
+    dt = getattr(sim_cfg, "dt", None)
+    decimation = getattr(cfg, "decimation", None)
+    if (
+        type(dt) not in (float, int)
+        or not math.isfinite(float(dt))
+        or float(dt) <= 0.0
+        or type(decimation) is not int
+        or decimation <= 0
+    ):
+        raise RecoveryTelemetryIncompleteError(("runtime_contact_calibration_cadence",))
+    primitive_step_seconds = float(dt) * decimation
+    return (
+        -(EMPIRICAL_CONTACT_TOUCH_GAP_M + EMPIRICAL_CONTACT_TOUCH_PENETRATION_M)
+        / primitive_step_seconds
+    )
+
+
 def _contact_calibration_touch_state(
     box_state: torch.Tensor,
     body_pose: torch.Tensor,
     body_collision_bounds: Sequence[Sequence[float]],
     box_collision_bounds: Sequence[Sequence[float]],
+    *,
+    touch_velocity_m_s: float,
 ) -> torch.Tensor:
     num_envs = box_state.shape[0]
     if (
@@ -1521,7 +1543,9 @@ def _contact_calibration_touch_state(
         local_offsets, device=box_state.device, dtype=box_state.dtype
     )
     local_velocity = torch.zeros_like(offsets)
-    local_velocity[:, 2] = EMPIRICAL_CONTACT_TOUCH_VELOCITY_M_S
+    if not math.isfinite(touch_velocity_m_s) or touch_velocity_m_s >= 0.0:
+        raise RecoveryTelemetryIncompleteError(("runtime_contact_calibration_cadence",))
+    local_velocity[:, 2] = touch_velocity_m_s
     body_quaternion = body_pose[:, 3:7]
     quaternion_norm = torch.linalg.vector_norm(body_quaternion, dim=-1, keepdim=True)
     normalized_quaternion = body_quaternion / quaternion_norm
@@ -1581,6 +1605,7 @@ def _write_contact_calibration_phase(
             body_pose,
             _runtime_collision_local_bounds(body_prim_paths),
             _runtime_collision_local_bounds(box_prim_paths),
+            touch_velocity_m_s=_contact_calibration_touch_velocity_m_s(env),
         )
     else:
         target_state[:, 2] += 2.0 if phase == "baseline" else 3.0
@@ -1969,8 +1994,11 @@ def execute_pp_box_contact_calibration(
         for side in ("left", "right"):
             for binding in bindings[side].sensors:
                 phases = []
-                touch_box_state = None
-                touch_body_pose = None
+                touch_box_state_before = None
+                touch_box_state_after = None
+                touch_body_pose_before = None
+                touch_body_pose_after = None
+                touch_plan = None
                 touch_net_force = None
                 for phase in ("baseline", "target_touch", "target_removed"):
                     coordinator.restore(
@@ -1979,6 +2007,9 @@ def execute_pp_box_contact_calibration(
                     )
                     _write_contact_calibration_phase(env, binding, phase)
                     if phase == "target_touch":
+                        sensor = _scene_get(
+                            getattr(env, "scene", None), binding.sensor_scene_key
+                        )
                         box = _scene_get(getattr(env, "scene", None), "box")
                         if box is None:
                             box = _scene_get(getattr(env, "scene", None), "Box")
@@ -1986,10 +2017,10 @@ def execute_pp_box_contact_calibration(
                             getattr(box, "data", None), "root_state_w", None
                         )
                         if isinstance(touch_box_state, torch.Tensor):
-                            touch_box_state = touch_box_state.detach().clone()
+                            touch_box_state_before = touch_box_state.detach().clone()
                         robot = _scene_get(getattr(env, "scene", None), "robot")
                         if robot is not None:
-                            touch_body_pose = (
+                            touch_body_pose_before = (
                                 _body_pose_tensor(
                                     robot,
                                     binding.sensor_body_name,
@@ -1998,6 +2029,38 @@ def execute_pp_box_contact_calibration(
                                 .detach()
                                 .clone()
                             )
+                        body_prim_paths = tuple(
+                            getattr(
+                                getattr(sensor, "body_physx_view", None),
+                                "prim_paths",
+                                (),
+                            )
+                        )
+                        box_prim_paths = tuple(
+                            getattr(
+                                getattr(box, "root_physx_view", None),
+                                "prim_paths",
+                                (),
+                            )
+                        )
+                        cfg = getattr(env, "cfg", None)
+                        sim_cfg = getattr(cfg, "sim", None)
+                        sim_dt = float(getattr(sim_cfg, "dt", float("nan")))
+                        decimation = getattr(cfg, "decimation", None)
+                        touch_plan = {
+                            "sim_dt_s": sim_dt,
+                            "decimation": decimation,
+                            "primitive_step_s": sim_dt * decimation,
+                            "velocity_m_s": _contact_calibration_touch_velocity_m_s(
+                                env
+                            ),
+                            "body_collision_bounds": _runtime_collision_local_bounds(
+                                body_prim_paths
+                            ),
+                            "box_collision_bounds": _runtime_collision_local_bounds(
+                                box_prim_paths
+                            ),
+                        }
                     step_before = _control_step_cursor(env)
                     env.step(fixed_action.detach().clone())  # type: ignore[attr-defined]
                     step_after = _control_step_cursor(env)
@@ -2028,6 +2091,21 @@ def execute_pp_box_contact_calibration(
                         )
                         if isinstance(touch_net_force, torch.Tensor):
                             touch_net_force = touch_net_force.detach().clone()
+                        current_box_state = getattr(
+                            getattr(box, "data", None), "root_state_w", None
+                        )
+                        if isinstance(current_box_state, torch.Tensor):
+                            touch_box_state_after = current_box_state.detach().clone()
+                        if robot is not None:
+                            touch_body_pose_after = (
+                                _body_pose_tensor(
+                                    robot,
+                                    binding.sensor_body_name,
+                                    num_envs=int(getattr(env, "num_envs", 0)),
+                                )
+                                .detach()
+                                .clone()
+                            )
                     phases.append(
                         _issue_phase_receipt(
                             phase=phase,
@@ -2111,11 +2189,18 @@ def execute_pp_box_contact_calibration(
                                 "net_force_w": _tensor_runtime_evidence(
                                     touch_net_force
                                 ),
-                                "box_root_state_w": _tensor_runtime_evidence(
-                                    touch_box_state
+                                "touch_plan": touch_plan,
+                                "box_root_state_before_step_w": _tensor_runtime_evidence(
+                                    touch_box_state_before
                                 ),
-                                "sensor_body_pose_w": _tensor_runtime_evidence(
-                                    touch_body_pose
+                                "box_root_state_after_step_w": _tensor_runtime_evidence(
+                                    touch_box_state_after
+                                ),
+                                "sensor_body_pose_before_step_w": _tensor_runtime_evidence(
+                                    touch_body_pose_before
+                                ),
+                                "sensor_body_pose_after_step_w": _tensor_runtime_evidence(
+                                    touch_body_pose_after
                                 ),
                             },
                         ) from exc

@@ -1929,6 +1929,8 @@ def _install_fake_contact_calibration_runtime(
     emit_touch_force: bool,
     corrupt_roundtrip: bool = False,
 ):
+    env.cfg.sim = SimpleNamespace(dt=0.005)
+    env.cfg.decimation = 4
     env.action_manager = SimpleNamespace(_action=torch.zeros(1, 1, dtype=torch.float64))
     env.common_step_counter = 0
     env.step_calls = 0
@@ -1968,7 +1970,13 @@ def _install_fake_contact_calibration_runtime(
                     dtype=box_position.dtype,
                 )
                 inward_velocity = torch.tensor(
-                    [[0.0, 0.0, telemetry.EMPIRICAL_CONTACT_TOUCH_VELOCITY_M_S]],
+                    [
+                        [
+                            0.0,
+                            0.0,
+                            telemetry._contact_calibration_touch_velocity_m_s(env),
+                        ]
+                    ],
                     dtype=box_position.dtype,
                 )
                 if (
@@ -2112,11 +2120,48 @@ def test_contact_calibration_touch_places_box_surface_at_sensor_body(
     torch.testing.assert_close(
         env.scene["box"].data.root_state_w[:, 7:10],
         torch.tensor(
-            [[0.0, 0.0, telemetry.EMPIRICAL_CONTACT_TOUCH_VELOCITY_M_S]],
+            [[0.0, 0.0, -0.3]],
             dtype=box_position.dtype,
         ),
     )
     assert not torch.equal(box_position, body_position)
+
+
+def test_contact_calibration_touch_velocity_targets_final_physics_substep(
+    telemetry,
+) -> None:
+    env = SimpleNamespace(
+        cfg=SimpleNamespace(
+            decimation=4,
+            sim=SimpleNamespace(dt=0.005),
+        )
+    )
+
+    assert telemetry._contact_calibration_touch_velocity_m_s(env) == pytest.approx(-0.3)
+
+
+@pytest.mark.parametrize(
+    ("dt", "decimation"),
+    [(0.0, 4), (float("nan"), 4), (0.005, 0), (0.005, True)],
+)
+def test_contact_calibration_touch_velocity_rejects_invalid_cadence(
+    telemetry,
+    dt,
+    decimation,
+) -> None:
+    env = SimpleNamespace(
+        cfg=SimpleNamespace(
+            decimation=decimation,
+            sim=SimpleNamespace(dt=dt),
+        )
+    )
+
+    with pytest.raises(telemetry.RecoveryTelemetryIncompleteError) as exc_info:
+        telemetry._contact_calibration_touch_velocity_m_s(env)
+
+    assert exc_info.value.missing_capabilities == (
+        "runtime_contact_calibration_cadence",
+    )
 
 
 def test_contact_calibration_touch_follows_live_body_orientation(telemetry) -> None:
@@ -2134,13 +2179,14 @@ def test_contact_calibration_touch_follows_live_body_orientation(telemetry) -> N
         body_pose,
         body_bounds,
         box_bounds,
+        touch_velocity_m_s=-0.3,
     )
 
     torch.testing.assert_close(
         target[:, :3], torch.tensor([[1.15, 2.0, 3.0]], dtype=torch.float64)
     )
     torch.testing.assert_close(
-        target[:, 7:10], torch.tensor([[-1.0, 0.0, 0.0]], dtype=torch.float64)
+        target[:, 7:10], torch.tensor([[-0.3, 0.0, 0.0]], dtype=torch.float64)
     )
     torch.testing.assert_close(target[:, 3:7], body_pose[:, 3:7])
 
@@ -2220,8 +2266,18 @@ def test_controlled_contact_executor_rejects_all_zero_claimed_touch_and_publishe
     )
     assert evidence["filtered_force"]["shape"] == (1, 1, 1, 3)
     assert len(evidence["filtered_force"]["raw_sha256"]) == 64
-    assert evidence["box_root_state_w"]["shape"] == (1, 13)
-    assert evidence["sensor_body_pose_w"]["shape"] == (1, 7)
+    assert evidence["touch_plan"] == {
+        "sim_dt_s": 0.005,
+        "decimation": 4,
+        "primitive_step_s": 0.02,
+        "velocity_m_s": -0.3,
+        "body_collision_bounds": ((-0.02, 0.02, -0.03, 0.03, -0.01, 0.04),),
+        "box_collision_bounds": ((-0.105, 0.105, -0.105, 0.105, -0.105, 0.105),),
+    }
+    assert evidence["box_root_state_before_step_w"]["shape"] == (1, 13)
+    assert evidence["box_root_state_after_step_w"]["shape"] == (1, 13)
+    assert evidence["sensor_body_pose_before_step_w"]["shape"] == (1, 7)
+    assert evidence["sensor_body_pose_after_step_w"]["shape"] == (1, 7)
 
     with pytest.raises(telemetry.RecoveryTelemetryIncompleteError):
         telemetry.validate_runtime_hand_contact_sensors(env)
