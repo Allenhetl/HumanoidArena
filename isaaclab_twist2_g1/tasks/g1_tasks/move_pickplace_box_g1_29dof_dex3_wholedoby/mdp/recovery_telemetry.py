@@ -42,16 +42,7 @@ EMPIRICAL_CONTACT_TOUCH_MIN_N = 0.25
 EMPIRICAL_CONTACT_INITIAL_PENETRATION_M = 0.005
 EMPIRICAL_CONTACT_TOUCH_ADVANCE_M = 0.001
 
-_HAND_CONTACT_LINK_TOKENS = (
-    "palm",
-    "index_0",
-    "index_1",
-    "middle_0",
-    "middle_1",
-    "thumb_0",
-    "thumb_1",
-    "thumb_2",
-)
+_HAND_CONTACT_LINK_TOKENS = ("palm",)
 
 _FALL_CRITICAL_BODY_TOKENS = (
     "pelvis",
@@ -431,7 +422,7 @@ class ContactSensorCalibrationReceipt:
 
 @dataclass(frozen=True, init=False)
 class ContactCalibrationExecutionReceipt:
-    """Runtime-owned, registry-bound receipt for all 16 pairwise sensors."""
+    """Runtime-owned receipt for the bilateral palm-to-Box sensor pair."""
 
     schema_version: int
     task_identity: str
@@ -502,7 +493,7 @@ def _default_hand_contact_binding(side: Literal["left", "right"]) -> HandContact
 
 
 def default_hand_contact_bindings() -> dict[str, HandContactBinding]:
-    """Return the USD-evidenced candidates; runtime identity is still required."""
+    """Return the minimal bilateral palm bindings used by the grasp predicate."""
 
     return {side: _default_hand_contact_binding(side) for side in ("left", "right")}
 
@@ -2119,7 +2110,7 @@ def _registered_contact_calibration_receipts(
 def execute_pp_box_contact_calibration(
     env: object,
 ) -> ContactCalibrationExecutionReceipt:
-    """Run 16 sensors x 3 phases x 4 explicit physics substeps once."""
+    """Run two palm sensors x three phases x four physics substeps once."""
 
     bindings = _resolve_hand_contact_bindings(env)
     history_length = _runtime_contact_history_length(env)
@@ -2489,7 +2480,7 @@ def _resolve_hand_contact_bindings(env: object) -> dict[str, HandContactBinding]
 def validate_runtime_hand_contact_sensors(
     env: object,
 ) -> tuple[RuntimeContactSensorReport, ...]:
-    """Materialize and validate all 16 exact hand-to-Box contact sensors."""
+    """Materialize and validate the bilateral palm-to-Box sensor pair."""
 
     bindings = _resolve_hand_contact_bindings(env)
     num_envs = int(getattr(env, "num_envs", 0))
@@ -3411,8 +3402,8 @@ def extract_privileged_telemetry(
         for sensor in bindings[side].sensors
     }
     if (
-        len(contact_reports) != 16
-        or len(reports_by_scene_key) != 16
+        len(contact_reports) != 2
+        or len(reports_by_scene_key) != 2
         or set(reports_by_scene_key) != expected_contact_scene_keys
     ):
         raise RecoveryTelemetryIncompleteError(("runtime_contact_sensor_set",))

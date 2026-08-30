@@ -47,24 +47,11 @@ class PickPlaceBoxTaskSceneCfg(PickPlaceBoxSceneCfg):
         debug_vis=False,
     )
 
-    # Each filtered sensor names exactly one USD leaf. Runtime telemetry still
-    # validates the resolved body name, body count, filter count, and matrix shape.
+    # The bilateral grasp predicate needs one Box-filtered palm sensor per side.
+    # Runtime telemetry still validates the resolved body name, body count,
+    # filter count, matrix shape, and an empirical three-phase receipt.
     left_box_contact_palm = _box_contact_sensor_cfg("left_hand_palm_link")
-    left_box_contact_index_0 = _box_contact_sensor_cfg("left_hand_index_0_link")
-    left_box_contact_index_1 = _box_contact_sensor_cfg("left_hand_index_1_link")
-    left_box_contact_middle_0 = _box_contact_sensor_cfg("left_hand_middle_0_link")
-    left_box_contact_middle_1 = _box_contact_sensor_cfg("left_hand_middle_1_link")
-    left_box_contact_thumb_0 = _box_contact_sensor_cfg("left_hand_thumb_0_link")
-    left_box_contact_thumb_1 = _box_contact_sensor_cfg("left_hand_thumb_1_link")
-    left_box_contact_thumb_2 = _box_contact_sensor_cfg("left_hand_thumb_2_link")
     right_box_contact_palm = _box_contact_sensor_cfg("right_hand_palm_link")
-    right_box_contact_index_0 = _box_contact_sensor_cfg("right_hand_index_0_link")
-    right_box_contact_index_1 = _box_contact_sensor_cfg("right_hand_index_1_link")
-    right_box_contact_middle_0 = _box_contact_sensor_cfg("right_hand_middle_0_link")
-    right_box_contact_middle_1 = _box_contact_sensor_cfg("right_hand_middle_1_link")
-    right_box_contact_thumb_0 = _box_contact_sensor_cfg("right_hand_thumb_0_link")
-    right_box_contact_thumb_1 = _box_contact_sensor_cfg("right_hand_thumb_1_link")
-    right_box_contact_thumb_2 = _box_contact_sensor_cfg("right_hand_thumb_2_link")
 
     front_camera = CameraPresets.g1_front_camera()
 

@@ -25,20 +25,7 @@ REWARDS_PATH = MDP_DIR / "rewards.py"
 ENV_CFG_PATH = MDP_DIR.parent / "move_pickplace_box_g1_29dof_dex3_hw_env_cfg.py"
 
 EXPECTED_HAND_CONTACT_BODIES = {
-    side: tuple(
-        f"{side}_hand_{link}_link"
-        for link in (
-            "palm",
-            "index_0",
-            "index_1",
-            "middle_0",
-            "middle_1",
-            "thumb_0",
-            "thumb_1",
-            "thumb_2",
-        )
-    )
-    for side in ("left", "right")
+    side: (f"{side}_hand_palm_link",) for side in ("left", "right")
 }
 
 
@@ -283,7 +270,7 @@ def test_hand_contact_aggregation_rejects_empty_duplicate_or_mixed_side_evidence
         telemetry.aggregate_hand_contact_evidence("left", (left, right))
 
 
-def test_default_contact_bindings_are_exact_palm_and_finger_leaf_sensors(
+def test_default_contact_bindings_are_minimal_bilateral_palm_sensors(
     telemetry,
 ) -> None:
     bindings = telemetry.default_hand_contact_bindings()
@@ -297,16 +284,14 @@ def test_default_contact_bindings_are_exact_palm_and_finger_leaf_sensors(
         assert (
             tuple(sensor.sensor_body_name for sensor in hand.sensors) == expected_bodies
         )
-        assert (
-            tuple(sensor.filtered_body_name for sensor in hand.sensors) == ("Box",) * 8
-        )
+        assert tuple(sensor.filtered_body_name for sensor in hand.sensors) == ("Box",)
         assert tuple(sensor.sensor_scene_key for sensor in hand.sensors) == tuple(
             f"{side}_box_contact_{body.removeprefix(f'{side}_hand_').removesuffix('_link')}"
             for body in expected_bodies
         )
         all_scene_keys.extend(sensor.sensor_scene_key for sensor in hand.sensors)
 
-    assert len(all_scene_keys) == len(set(all_scene_keys)) == 16
+    assert len(all_scene_keys) == len(set(all_scene_keys)) == 2
     assert not any(
         "wrist" in body or "camera" in body
         for body in sum(EXPECTED_HAND_CONTACT_BODIES.values(), ())
@@ -814,8 +799,8 @@ def _complete_runtime_env(telemetry, *, include_contact_mapping_proofs: bool = T
         }
     )
     contact_forces = {
-        "left_hand_index_0_link": (0.0, 0.0, 2.0),
-        "right_hand_thumb_2_link": (0.0, 0.0, 3.0),
+        "left_hand_palm_link": (0.0, 0.0, 2.0),
+        "right_hand_palm_link": (0.0, 0.0, 3.0),
     }
     for hand in bindings.values():
         for sensor_binding in hand.sensors:
@@ -1215,14 +1200,14 @@ def test_runtime_contact_validator_accepts_u_probe_filtered_force(
         execution, "receipt_digest", telemetry._execution_receipt_digest(execution)
     )
 
-    assert len(telemetry.validate_runtime_hand_contact_sensors(env)) == 16
+    assert len(telemetry.validate_runtime_hand_contact_sensors(env)) == 2
 
 
 def test_runtime_contact_validator_rejects_miswired_executor_receipt(
     telemetry,
 ) -> None:
     env = _complete_runtime_env(telemetry)
-    sensor_key = "right_box_contact_thumb_2"
+    sensor_key = "right_box_contact_palm"
     receipt = next(
         item
         for item in env.recovery_contact_mapping_receipt.sensor_receipts
@@ -1253,7 +1238,7 @@ def test_runtime_contact_validator_rejects_digest_valid_noncausal_receipt_bytes(
     forces: tuple[float, float, float],
 ) -> None:
     env = _complete_runtime_env(telemetry)
-    sensor_key = "left_box_contact_index_0"
+    sensor_key = "left_box_contact_palm"
     execution = env.recovery_contact_mapping_receipt
     receipt = next(
         item
@@ -1285,7 +1270,7 @@ def test_runtime_contact_validator_requires_exact_complete_receipt_set(
     telemetry,
 ) -> None:
     env = _complete_runtime_env(telemetry)
-    missing_key = "right_box_contact_middle_1"
+    missing_key = "right_box_contact_palm"
     execution = env.recovery_contact_mapping_receipt
     object.__setattr__(
         execution,
@@ -1356,7 +1341,7 @@ def test_runtime_contact_sensor_report_records_all_materialized_identities(
 
     reports = telemetry.validate_runtime_hand_contact_sensors(env)
 
-    assert len(reports) == 16
+    assert len(reports) == 2
     assert tuple(report.sensor_scene_key for report in reports) == tuple(
         sensor.sensor_scene_key
         for hand in telemetry.default_hand_contact_bindings().values()
@@ -1438,7 +1423,7 @@ def test_runtime_extractor_invokes_validator_and_actor_leak_assertion_once(
     )
 
     assert len(validator_reports) == 1
-    assert len(validator_reports[0]) == 16
+    assert len(validator_reports[0]) == 2
     assert leak_calls == [(actor_observation, states[0])]
 
 
@@ -1503,27 +1488,27 @@ def test_runtime_extractor_rejects_fall_evidence_from_another_control_step(
     ("mutation", "expected_key"),
     [
         (
-            lambda env: env.scene.pop("left_box_contact_middle_1"),
-            "left_box_contact_middle_1",
+            lambda env: env.scene.pop("right_box_contact_palm"),
+            "right_box_contact_palm",
         ),
         (
             lambda env: setattr(
-                env.scene["left_box_contact_index_0"].body_physx_view,
+                env.scene["left_box_contact_palm"].body_physx_view,
                 "prim_paths",
                 [
-                    "/World/envs/env_0/Robot/left_hand_index_0_link",
-                    "/World/envs/env_0/Robot/left_hand_index_0_link",
+                    "/World/envs/env_0/Robot/left_hand_palm_link",
+                    "/World/envs/env_0/Robot/left_hand_palm_link",
                 ],
             ),
-            "left_box_contact_index_0",
+            "left_box_contact_palm",
         ),
         (
             lambda env: setattr(
-                env.scene["right_box_contact_thumb_2"].body_physx_view,
+                env.scene["right_box_contact_palm"].body_physx_view,
                 "prim_paths",
                 ["/World/envs/env_0/Robot/right_hand_thumb_1_link"],
             ),
-            "right_box_contact_thumb_2",
+            "right_box_contact_palm",
         ),
         (
             lambda env: setattr(
@@ -1535,11 +1520,11 @@ def test_runtime_extractor_rejects_fall_evidence_from_another_control_step(
         ),
         (
             lambda env: setattr(
-                env.scene["left_box_contact_thumb_0"].data,
+                env.scene["right_box_contact_palm"].data,
                 "force_matrix_w_history",
                 torch.full((1, 4, 1, 1, 3), float("nan"), dtype=torch.float64),
             ),
-            "left_box_contact_thumb_0",
+            "right_box_contact_palm",
         ),
         (
             lambda env: setattr(
@@ -1551,11 +1536,11 @@ def test_runtime_extractor_rejects_fall_evidence_from_another_control_step(
         ),
         (
             lambda env: setattr(
-                env.scene["right_box_contact_index_1"].data,
+                env.scene["left_box_contact_palm"].data,
                 "force_matrix_w",
                 torch.zeros((1, 1, 1, 3), dtype=torch.int64),
             ),
-            "right_box_contact_index_1",
+            "left_box_contact_palm",
         ),
         (
             lambda env: setattr(env, "device", "cuda:0"),
@@ -1563,11 +1548,11 @@ def test_runtime_extractor_rejects_fall_evidence_from_another_control_step(
         ),
         (
             lambda env: setattr(
-                env.scene["right_box_contact_middle_0"].data,
+                env.scene["right_box_contact_palm"].data,
                 "force_matrix_w",
                 torch.zeros((1, 1, 1, 3), dtype=torch.float32),
             ),
-            "right_box_contact_middle_0",
+            "right_box_contact_palm",
         ),
     ],
 )
@@ -1606,10 +1591,10 @@ def test_runtime_extractor_reads_exact_pairwise_force_matrix_and_dynamics(
     assert state.box_angular_velocity_w == (0.4, 0.5, 0.6)
     assert state.left_ee_pose_w[:3] == (0.15, 0.0, 0.505)
     assert state.right_ee_pose_w[:3] == (-0.15, 0.0, 0.505)
-    assert len(state.left_box_contact.links) == 8
-    assert len(state.right_box_contact.links) == 8
-    assert state.left_box_contact.contacting_bodies == ("left_hand_index_0_link",)
-    assert state.right_box_contact.contacting_bodies == ("right_hand_thumb_2_link",)
+    assert len(state.left_box_contact.links) == 1
+    assert len(state.right_box_contact.links) == 1
+    assert state.left_box_contact.contacting_bodies == ("left_hand_palm_link",)
+    assert state.right_box_contact.contacting_bodies == ("right_hand_palm_link",)
     assert state.left_box_contact.resultant_force_w == (0.0, 0.0, 2.0)
     assert state.right_box_contact.resultant_force_w == (0.0, 0.0, 3.0)
     assert state.grasp is True
@@ -1643,15 +1628,15 @@ def test_runtime_extractor_does_not_treat_contact_history_as_current_grasp(
     [
         (
             lambda env: setattr(
-                env.scene["left_box_contact_index_0"],
+                env.scene["left_box_contact_palm"],
                 "body_names",
-                ["left_hand_index_0_link", "another_body"],
+                ["left_hand_palm_link", "another_body"],
             ),
             "left_box_pairwise_contact",
         ),
         (
             lambda env: setattr(
-                env.scene["right_box_contact_thumb_2"].data,
+                env.scene["right_box_contact_palm"].data,
                 "force_matrix_w",
                 torch.zeros(1, 1, 2, 3),
             ),
@@ -1665,21 +1650,19 @@ def test_runtime_extractor_does_not_treat_contact_history_as_current_grasp(
         ),
         (
             lambda env: setattr(
-                env.scene["left_box_contact_index_0"].cfg,
+                env.scene["left_box_contact_palm"].cfg,
                 "filter_prim_paths_expr",
                 ["{ENV_REGEX_NS}/Shelf"],
             ),
             "left_box_pairwise_contact",
         ),
         (
-            lambda env: setattr(
-                env.scene["right_box_contact_thumb_2"], "num_bodies", 2
-            ),
+            lambda env: setattr(env.scene["right_box_contact_palm"], "num_bodies", 2),
             "right_box_pairwise_contact",
         ),
         (
             lambda env: setattr(
-                env.scene["left_box_contact_index_0"].contact_physx_view,
+                env.scene["left_box_contact_palm"].contact_physx_view,
                 "filter_count",
                 2,
             ),
@@ -2408,7 +2391,7 @@ def test_controlled_contact_executor_binds_three_phases_and_four_physics_steps(
     )
 
     receipt = telemetry.execute_pp_box_contact_calibration(env)
-    assert len(receipt.sensor_receipts) == 16
+    assert len(receipt.sensor_receipts) == 2
     assert all(
         tuple(phase.phase for phase in sensor.phases)
         == ("baseline", "target_touch", "target_removed")
@@ -2429,10 +2412,10 @@ def test_controlled_contact_executor_binds_three_phases_and_four_physics_steps(
         for force in telemetry._decode_phase_forces(touch_phase)
     )
     assert env.step_calls == 0
-    assert env.physics_step_calls == 16 * 3 * 4
+    assert env.physics_step_calls == 2 * 3 * 4
     assert env.common_step_counter == 0
     assert env._sim_step_counter == 0
-    assert len(telemetry.validate_runtime_hand_contact_sensors(env)) == 16
+    assert len(telemetry.validate_runtime_hand_contact_sensors(env)) == 2
 
 
 def test_controlled_contact_executor_rejects_all_zero_claimed_touch_and_publishes_nothing(
