@@ -720,6 +720,32 @@ def test_actor_observation_leak_check_is_recursive_and_identity_aware(
     assert "$.policy.camera_image.opaque_alias" in exc_info.value.leak_paths
 
 
+def test_actor_observation_factory_projects_live_rlinf_policy_to_safe_allowlist(
+    telemetry,
+) -> None:
+    env = _complete_runtime_env(telemetry)
+    manager = env.observation_manager
+    privileged_terms = {
+        "vla_state64": torch.full((1, 64), 7.0),
+        "vla_front_rgb": torch.full((1, 2, 2, 3), 8.0),
+        "up_alignment": torch.tensor([0.5]),
+        "critical_contact_force_max": torch.tensor([91.0]),
+        "critical_contact_force_available": torch.tensor([True]),
+    }
+    manager._group_obs_term_names["policy"].extend(privileged_terms)
+    manager._obs_buffer["policy"].update(privileged_terms)
+
+    issued = telemetry.issue_residual_actor_observation(env)
+
+    assert issued.policy_term_names == (
+        "robot_joint_state",
+        "robot_gipper_state",
+        "camera_image",
+    )
+    assert set(issued.policy) == set(issued.policy_term_names)
+    assert not set(privileged_terms).intersection(issued.policy)
+
+
 def test_runtime_extractor_rejects_unproven_pairwise_contact_bindings(
     telemetry,
 ) -> None:

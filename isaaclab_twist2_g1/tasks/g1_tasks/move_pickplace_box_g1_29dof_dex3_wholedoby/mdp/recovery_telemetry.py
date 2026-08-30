@@ -75,6 +75,16 @@ _ACTOR_POLICY_TERM_ALLOWLIST = (
     "robot_gipper_state",
     "camera_image",
 )
+_RLINF_POLICY_SOURCE_TERMS = _ACTOR_POLICY_TERM_ALLOWLIST + (
+    "vla_state64",
+    "vla_front_rgb",
+    "up_alignment",
+    "critical_contact_force_max",
+    "critical_contact_force_available",
+)
+_ACTOR_POLICY_SOURCE_TERM_CONTRACTS = frozenset(
+    {_ACTOR_POLICY_TERM_ALLOWLIST, _RLINF_POLICY_SOURCE_TERMS}
+)
 
 
 class RecoveryTelemetryIncompleteError(RuntimeError):
@@ -964,11 +974,14 @@ def issue_residual_actor_observation(env: object) -> ResidualActorObservation:
     configured_policy = (
         configured.get("policy") if isinstance(configured, Mapping) else None
     )
-    term_names = tuple(str(name) for name in (configured_policy or ()))
-    if term_names != _ACTOR_POLICY_TERM_ALLOWLIST or set(policy) != set(
-        _ACTOR_POLICY_TERM_ALLOWLIST
+    source_term_names = tuple(str(name) for name in (configured_policy or ()))
+    if (
+        source_term_names not in _ACTOR_POLICY_SOURCE_TERM_CONTRACTS
+        or len(set(source_term_names)) != len(source_term_names)
+        or set(policy) != set(source_term_names)
     ):
         raise RecoveryTelemetryIncompleteError(("actor_observation_allowlist",))
+    term_names = _ACTOR_POLICY_TERM_ALLOWLIST
     issued_policy = MappingProxyType({name: policy[name] for name in term_names})
     observation = object.__new__(ResidualActorObservation)
     values = {
