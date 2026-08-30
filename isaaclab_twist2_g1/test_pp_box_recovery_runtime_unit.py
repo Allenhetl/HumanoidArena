@@ -174,6 +174,18 @@ def test_live_runtime_builds_dropped_from_provider_and_task_state(modules) -> No
     assert identity["exclusive_num_envs"] == 1
 
 
+def test_live_runtime_compares_telemetry_with_box_com_center(modules) -> None:
+    env, provider = _live_env()
+    box_data = env.scene["box"].data
+    box_data.root_com_pos_w = torch.tensor([[-0.5, -4.0, 0.105]], dtype=torch.float32)
+    box_data.root_state_w[0, :3] = torch.tensor([-0.5, -4.0, 0.0], dtype=torch.float32)
+    runtime = modules.recovery_runtime.PPBoxLiveRecoveryRuntime(env, provider)
+
+    context = runtime.observe(_telemetry(modules.recovery_telemetry, step=1))
+
+    assert context.ground_supported is True
+
+
 def test_runtime_snapshot_roundtrip_has_no_recovery_stage_or_fsm(modules) -> None:
     env, provider = _live_env()
     runtime = modules.recovery_runtime.PPBoxLiveRecoveryRuntime(env, provider)

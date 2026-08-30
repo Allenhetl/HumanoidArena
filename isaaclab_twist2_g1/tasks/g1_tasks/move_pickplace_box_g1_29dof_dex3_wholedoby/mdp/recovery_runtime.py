@@ -135,14 +135,28 @@ def _scene_box(env: object) -> object:
 
 
 def _box_pose_w(env: object) -> tuple[tuple[float, float, float], tuple[float, ...]]:
-    state = getattr(getattr(_scene_box(env), "data", None), "root_state_w", None)
+    data = getattr(_scene_box(env), "data", None)
+    state = getattr(data, "root_state_w", None)
     if not isinstance(state, torch.Tensor) or tuple(state.shape) != (1, 13):
         raise RuntimeError("HOI_pp_box Box root_state_w must be tensor [1,13]")
-    row = state.detach().to(device="cpu", dtype=torch.float64).contiguous().numpy()[0]
-    if not np.isfinite(row).all():
-        raise ValueError("HOI_pp_box Box root_state_w must be finite")
-    return tuple(float(value) for value in row[:3]), tuple(
-        float(value) for value in row[3:7]
+    center = getattr(data, "root_com_pos_w", None)
+    if center is None:
+        center = getattr(data, "root_pos_w", None)
+    if center is None:
+        center = state[:, :3]
+    if not isinstance(center, torch.Tensor) or tuple(center.shape) != (1, 3):
+        raise RuntimeError("HOI_pp_box Box center must be tensor [1,3]")
+    pose_row = (
+        torch.cat((center, state[:, 3:7]), dim=1)
+        .detach()
+        .to(device="cpu", dtype=torch.float64)
+        .contiguous()
+        .numpy()[0]
+    )
+    if not np.isfinite(pose_row).all():
+        raise ValueError("HOI_pp_box Box pose must be finite")
+    return tuple(float(value) for value in pose_row[:3]), tuple(
+        float(value) for value in pose_row[3:7]
     )
 
 
@@ -239,7 +253,7 @@ class PPBoxLiveRecoveryRuntime:
             )
             for index in range(3)
         ):
-            raise RuntimeError("live Box root pose differs from privileged telemetry")
+            raise RuntimeError("live Box center differs from privileged telemetry")
         box_bottom = position[2] - rewards.BOX_HALF_EXTENTS_M[2]
         ground_supported = bool(
             abs(box_bottom - self.thresholds.ground_surface_z_m)
