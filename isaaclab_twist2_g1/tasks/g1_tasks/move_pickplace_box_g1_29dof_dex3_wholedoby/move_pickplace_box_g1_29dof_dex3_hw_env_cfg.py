@@ -130,6 +130,17 @@ class MovePickPlaceBoxG129Dex3WholedobyEnvCfg(ManagerBasedRLEnvCfg):
         "contact_force_n": mdp.DEFAULT_CONTACT_FORCE_THRESHOLD_N,
         "max_ee_box_distance_m": mdp.DEFAULT_MAX_EE_BOX_DISTANCE_M,
     }
+    recovery_runtime_thresholds = {  # noqa: RUF012
+        "ground_surface_z_m": 0.0,
+        "ground_support_tolerance_m": 0.02,
+        "linear_stable_speed_mps": 0.02,
+        "angular_stable_speed_radps": 0.05,
+        "progress_epsilon_m": 0.005,
+        "stall_confirm_steps": 10,
+        "stable_confirm_steps": 5,
+        "place_attempt_distance_m": 0.25,
+        "axis_alignment_tolerance_deg": 10.0,
+    }
 
     def __post_init__(self):
         self.decimation = 4
