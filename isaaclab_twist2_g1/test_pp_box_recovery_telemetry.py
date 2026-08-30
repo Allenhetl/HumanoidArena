@@ -443,6 +443,51 @@ def test_collision_bounds_ignore_colliders_owned_by_descendant_rigid_bodies(
     )
 
 
+def test_scene_asset_scale_converts_authored_box_bounds_to_runtime_meters(
+    telemetry,
+) -> None:
+    env = SimpleNamespace(
+        cfg=SimpleNamespace(
+            scene=SimpleNamespace(
+                box=SimpleNamespace(spawn=SimpleNamespace(scale=(0.01, 0.01, 0.01)))
+            )
+        )
+    )
+
+    scale = telemetry._scene_asset_scale(env, "box")
+    scaled = telemetry._scale_collision_bounds(
+        (-10.5, 10.5, -10.5, 10.5, 0.0, 21.0),
+        scale,
+    )
+
+    assert scale == (0.01, 0.01, 0.01)
+    assert scaled == pytest.approx((-0.105, 0.105, -0.105, 0.105, 0.0, 0.21))
+
+
+@pytest.mark.parametrize(
+    "scale",
+    [None, (0.01, 0.01), (0.01, float("nan"), 0.01), (0.01, 0.0, 0.01)],
+)
+def test_scene_asset_scale_rejects_missing_or_invalid_runtime_scale(
+    telemetry,
+    scale,
+) -> None:
+    env = SimpleNamespace(
+        cfg=SimpleNamespace(
+            scene=SimpleNamespace(
+                box=SimpleNamespace(spawn=SimpleNamespace(scale=scale))
+            )
+        )
+    )
+
+    with pytest.raises(telemetry.RecoveryTelemetryIncompleteError) as exc_info:
+        telemetry._scene_asset_scale(env, "box")
+
+    assert exc_info.value.missing_capabilities == (
+        "runtime_contact_collision_geometry_scale:box",
+    )
+
+
 @pytest.mark.parametrize(
     ("left_contact", "right_contact", "left_pos", "right_pos", "expected"),
     [
@@ -1931,6 +1976,9 @@ def _install_fake_contact_calibration_runtime(
 ):
     env.cfg.sim = SimpleNamespace(dt=0.005)
     env.cfg.decimation = 4
+    env.cfg.scene = SimpleNamespace(
+        box=SimpleNamespace(spawn=SimpleNamespace(scale=(1.0, 1.0, 1.0)))
+    )
     env.action_manager = SimpleNamespace(_action=torch.zeros(1, 1, dtype=torch.float64))
     env.common_step_counter = 0
     env.step_calls = 0

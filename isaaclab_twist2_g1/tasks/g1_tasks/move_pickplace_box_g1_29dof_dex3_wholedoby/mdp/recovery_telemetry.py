@@ -1370,6 +1370,45 @@ def _collision_belongs_to_rigid_body(
     return False
 
 
+def _scene_asset_scale(env: object, scene_key: str) -> tuple[float, float, float]:
+    scene_cfg = getattr(getattr(env, "cfg", None), "scene", None)
+    asset_cfg = getattr(scene_cfg, scene_key, None)
+    scale = getattr(getattr(asset_cfg, "spawn", None), "scale", None)
+    capability = f"runtime_contact_collision_geometry_scale:{scene_key}"
+    if not isinstance(scale, (tuple, list)) or len(scale) != 3:
+        raise RecoveryTelemetryIncompleteError((capability,))
+    try:
+        normalized = tuple(float(value) for value in scale)
+    except (TypeError, ValueError) as exc:
+        raise RecoveryTelemetryIncompleteError((capability,)) from exc
+    if not all(math.isfinite(value) and value > 0.0 for value in normalized):
+        raise RecoveryTelemetryIncompleteError((capability,))
+    return normalized
+
+
+def _scale_collision_bounds(
+    bounds: Sequence[float],
+    scale: Sequence[float],
+) -> tuple[float, float, float, float, float, float]:
+    if len(bounds) != 6 or len(scale) != 3:
+        raise RecoveryTelemetryIncompleteError(("runtime_contact_collision_geometry",))
+    values = tuple(float(value) for value in (*bounds, *scale))
+    if not all(math.isfinite(value) for value in values):
+        raise RecoveryTelemetryIncompleteError(("runtime_contact_collision_geometry",))
+    x_lo, x_hi, y_lo, y_hi, z_lo, z_hi = values[:6]
+    x_scale, y_scale, z_scale = values[6:]
+    if x_scale <= 0.0 or y_scale <= 0.0 or z_scale <= 0.0:
+        raise RecoveryTelemetryIncompleteError(("runtime_contact_collision_geometry",))
+    return (
+        x_lo * x_scale,
+        x_hi * x_scale,
+        y_lo * y_scale,
+        y_hi * y_scale,
+        z_lo * z_scale,
+        z_hi * z_scale,
+    )
+
+
 def _runtime_collision_local_bounds(
     root_prim_paths: Sequence[str],
 ) -> tuple[tuple[float, float, float, float, float, float], ...]:
@@ -1604,7 +1643,10 @@ def _write_contact_calibration_phase(
             box_state,
             body_pose,
             _runtime_collision_local_bounds(body_prim_paths),
-            _runtime_collision_local_bounds(box_prim_paths),
+            tuple(
+                _scale_collision_bounds(bounds, _scene_asset_scale(env, "box"))
+                for bounds in _runtime_collision_local_bounds(box_prim_paths)
+            ),
             touch_velocity_m_s=_contact_calibration_touch_velocity_m_s(env),
         )
     else:
