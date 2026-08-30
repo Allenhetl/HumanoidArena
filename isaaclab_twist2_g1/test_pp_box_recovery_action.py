@@ -42,8 +42,8 @@ def test_recovla_gr00t_arms14_contract_is_exact_and_explicit() -> None:
 
     assert contract.name == "ReCoVLA-GR00T-arms14"
     assert contract.canonical_action_dim == 40
-    assert contract.reference_horizon == 16
-    assert contract.committed_horizon == 10
+    assert contract.reference_horizon == 40
+    assert contract.committed_horizon == 40
     assert contract.residual_cadence == "primitive-control-step"
     assert contract.residual_owned_indices == (
         20,

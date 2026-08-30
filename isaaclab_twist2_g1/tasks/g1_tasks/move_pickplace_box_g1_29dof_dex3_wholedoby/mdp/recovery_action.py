@@ -53,8 +53,8 @@ class RecoveryActionContract:
             raise ValueError("recovery action contract name is not arms14")
         if self.canonical_action_dim != 40:
             raise ValueError("arms14 requires canonical semantic40 actions")
-        if self.reference_horizon != 16 or self.committed_horizon != 10:
-            raise ValueError("arms14 requires Base H=16 and committed C=10")
+        if self.reference_horizon != 40 or self.committed_horizon != 40:
+            raise ValueError("arms14 requires HumanoidArena Base H=40 and committed C=40")
         if self.residual_cadence != "primitive-control-step":
             raise ValueError("arms14 residual cadence must be primitive-control-step")
         if tuple(self.residual_owned_indices) != RECOVLA_GR00T_ARMS14_OWNED_INDICES:
@@ -111,8 +111,8 @@ class RecoveryActionComposition:
 _ACTION_CONTRACT = RecoveryActionContract(
     name=RECOVLA_GR00T_ARMS14_NAME,
     canonical_action_dim=40,
-    reference_horizon=16,
-    committed_horizon=10,
+    reference_horizon=40,
+    committed_horizon=40,
     residual_cadence="primitive-control-step",
     residual_owned_indices=RECOVLA_GR00T_ARMS14_OWNED_INDICES,
     hand_indices=RECOVLA_GR00T_ARMS14_HAND_INDICES,
