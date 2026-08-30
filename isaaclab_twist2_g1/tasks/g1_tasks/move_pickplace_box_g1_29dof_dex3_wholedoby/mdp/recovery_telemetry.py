@@ -38,6 +38,7 @@ HARD_FALL_UP_ALIGNMENT = math.cos(math.radians(75.0))
 CRITICAL_BODY_CONTACT_THRESHOLD_N = 50.0
 EMPIRICAL_CONTACT_QUIET_MAX_N = 0.05
 EMPIRICAL_CONTACT_TOUCH_MIN_N = 1.0
+EMPIRICAL_CONTACT_TOUCH_CENTER_OFFSET_M = 0.095
 
 _HAND_CONTACT_LINK_TOKENS = (
     "palm",
@@ -1378,8 +1379,13 @@ def _write_contact_calibration_phase(
         robot, binding.sensor_body_name, num_envs=box_state.shape[0]
     )
     target_state = box_state.detach().clone()
-    target_state[:, :7] = body_pose
-    if phase != "target_touch":
+    target_state[:, :3] = body_pose[:, :3]
+    if phase == "target_touch":
+        # The fixed 21 cm box uses a shallow 1 cm surface intersection. Placing
+        # its center at the link origin leaves the link fully enclosed and
+        # produces no collision surface contact in PhysX.
+        target_state[:, 2] += EMPIRICAL_CONTACT_TOUCH_CENTER_OFFSET_M
+    else:
         target_state[:, 2] += 2.0 if phase == "baseline" else 3.0
     target_state[:, 7:13] = 0.0
     env_ids = torch.arange(

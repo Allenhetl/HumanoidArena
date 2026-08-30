@@ -1890,7 +1890,13 @@ def _install_fake_contact_calibration_runtime(
                 sensor.data.force_matrix_w.zero_()
                 body_index = robot.data.body_names.index(binding.sensor_body_name)
                 body_position = robot.data.body_state_w[:, body_index, :3]
-                if emit_touch_force and torch.equal(box_position, body_position):
+                touch_offset = torch.tensor(
+                    [[0.0, 0.0, telemetry.EMPIRICAL_CONTACT_TOUCH_CENTER_OFFSET_M]],
+                    dtype=box_position.dtype,
+                )
+                if emit_touch_force and torch.equal(
+                    box_position, body_position + touch_offset
+                ):
                     sensor.data.force_matrix_w[:, 0, 0, 2] = 2.0
         return (
             {},
@@ -2000,6 +2006,30 @@ def test_contact_calibration_roundtrip_fails_before_any_simulator_step(
         "runtime_contact_calibration_snapshot_roundtrip",
     )
     assert env.step_calls == 0
+
+
+def test_contact_calibration_touch_places_box_surface_at_sensor_body(
+    telemetry,
+) -> None:
+    env = _install_fake_contact_calibration_runtime(
+        telemetry,
+        _complete_runtime_env(telemetry, include_contact_mapping_proofs=False),
+        emit_touch_force=True,
+    )
+    binding = telemetry.default_hand_contact_bindings()["left"].sensors[0]
+    robot = env.scene["robot"]
+    body_index = robot.data.body_names.index(binding.sensor_body_name)
+    body_position = robot.data.body_state_w[:, body_index, :3]
+
+    telemetry._write_contact_calibration_phase(env, binding, "target_touch")
+
+    box_position = env.scene["box"].data.root_state_w[:, :3]
+    expected_offset = torch.tensor(
+        [[0.0, 0.0, telemetry.EMPIRICAL_CONTACT_TOUCH_CENTER_OFFSET_M]],
+        dtype=box_position.dtype,
+    )
+    torch.testing.assert_close(box_position - body_position, expected_offset)
+    assert not torch.equal(box_position, body_position)
 
 
 def test_contact_calibration_receipt_binds_coordinator_and_state_only_fidelity(
