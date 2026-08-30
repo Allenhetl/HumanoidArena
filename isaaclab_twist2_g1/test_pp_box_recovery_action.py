@@ -35,6 +35,12 @@ def _provider_canonical_reference() -> np.ndarray:
     return reference
 
 
+def _provider_canonical_reference_with_negative_zero() -> np.ndarray:
+    reference = _provider_canonical_reference()
+    reference[0] = np.float32(-0.0)
+    return reference
+
+
 def test_recovla_gr00t_arms14_contract_is_exact_and_explicit() -> None:
     action = _load_recovery_action()
 
@@ -64,6 +70,10 @@ def test_recovla_gr00t_arms14_contract_is_exact_and_explicit() -> None:
     assert contract.hand_indices == (38, 39)
     assert len(contract.residual_scale) == 14
     assert contract.residual_scale == (0.25,) * 14
+    assert (
+        contract.residual_scale_config_id
+        == "explicit-uniform-reconstruction-configuration"
+    )
     assert set(contract.base_owned_indices) == set(range(40)) - set(
         contract.residual_owned_indices
     )
@@ -71,7 +81,7 @@ def test_recovla_gr00t_arms14_contract_is_exact_and_explicit() -> None:
 
 def test_zero_residual_is_byte_identical_to_provider_canonical_base() -> None:
     action = _load_recovery_action()
-    reference = _provider_canonical_reference()
+    reference = _provider_canonical_reference_with_negative_zero()
 
     result = action.compose_recovla_gr00t_arms14_action(
         reference,
@@ -82,6 +92,26 @@ def test_zero_residual_is_byte_identical_to_provider_canonical_base() -> None:
     assert result.non_owned_mutation_count == 0
     assert result.hand_mutation_count == 0
     assert result.owned_mutation_count == 0
+
+
+def test_disabled_residual_route_is_byte_identical_to_provider_canonical_base() -> None:
+    action = _load_recovery_action()
+    reference = _provider_canonical_reference_with_negative_zero()
+
+    result = action.compose_recovla_gr00t_arms14_action(
+        reference,
+        np.ones(14, dtype=np.float32),
+        enabled=False,
+    )
+
+    assert result.canonical_reference40.tobytes() == reference.tobytes()
+    assert result.executed_action.tobytes() == reference.tobytes()
+    assert result.scaled_residual40.tobytes() == bytes(
+        40 * np.dtype(np.float32).itemsize
+    )
+    assert result.owned_mutation_count == 0
+    assert result.non_owned_mutation_count == 0
+    assert result.hand_mutation_count == 0
 
 
 def test_only_owned_indices_receive_scaled_primitive_residual() -> None:
@@ -104,6 +134,71 @@ def test_only_owned_indices_receive_scaled_primitive_residual() -> None:
     assert result.hand_mutation_count == 0
     assert result.owned_mutation_count == 14
     assert result.executed_action[38:40].tobytes() == reference[38:40].tobytes()
+
+
+def test_nonzero_residual_preserves_every_base_owned_canonical_byte() -> None:
+    action = _load_recovery_action()
+    reference = _provider_canonical_reference_with_negative_zero()
+    residual = np.ones(14, dtype=np.float32)
+
+    result = action.compose_recovla_gr00t_arms14_action(reference, residual)
+    base_owned = np.asarray(
+        (
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            22,
+            23,
+            26,
+            27,
+            38,
+            39,
+        ),
+        dtype=np.int64,
+    )
+
+    np.testing.assert_array_equal(
+        result.executed_action.view(np.uint32)[base_owned],
+        result.canonical_reference40.view(np.uint32)[base_owned],
+    )
+
+
+def test_canonicalizer_unowned_mutation_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    action = _load_recovery_action()
+    canonicalize = action.canonicalize_provider_semantic40
+
+    def mutate_unowned(*args: object, **kwargs: object) -> np.ndarray:
+        result = canonicalize(*args, **kwargs)
+        if kwargs["field"] == "ReCoVLA-GR00T-arms14 provider candidate":
+            result[0] = np.float32(1.0)
+        return result
+
+    monkeypatch.setattr(action, "canonicalize_provider_semantic40", mutate_unowned)
+
+    with pytest.raises(ValueError, match="Base-owned"):
+        action.compose_recovla_gr00t_arms14_action(
+            _provider_canonical_reference(),
+            np.ones(14, dtype=np.float32),
+        )
 
 
 def test_provider_canonicalization_owns_hand_projection() -> None:
@@ -162,7 +257,6 @@ def test_contract_rejects_implicit_or_misindexed_scale() -> None:
         action.RecoveryActionContract(
             **{
                 **contract.as_dict(),
-                "residual_owned_indices": contract.residual_owned_indices[:-1]
-                + (38,),
+                "residual_owned_indices": contract.residual_owned_indices[:-1] + (38,),
             }
         )
