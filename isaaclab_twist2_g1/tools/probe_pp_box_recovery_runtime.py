@@ -395,6 +395,18 @@ def main() -> int:
     report = initial_report(args)
     try:
         run_runtime_probe(args, report)
+    except SystemExit as exc:
+        report["status"] = "failed"
+        report["failure"] = {
+            "type": type(exc).__name__,
+            "message": str(exc),
+            "exit_code": _jsonable(exc.code),
+            "traceback": traceback.format_exc(),
+        }
+        write_report_exclusive(args.output, report)
+        raise RuntimeError(
+            f"PP-box runtime raised SystemExit before completion: {exc.code!r}"
+        ) from exc
     except Exception as exc:
         report["status"] = "failed"
         report["failure"] = {

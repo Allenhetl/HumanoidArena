@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import math
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -86,3 +87,48 @@ def test_probe_report_write_is_exclusive_and_ascii(tmp_path: Path) -> None:
 
     with pytest.raises(FileExistsError):
         probe.write_report_exclusive(output, report)
+
+
+def test_probe_system_exit_before_completion_is_reported_and_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = _load_probe_module()
+    output = tmp_path / "probe-system-exit.json"
+
+    class FakeAppLauncher:
+        @staticmethod
+        def add_app_launcher_args(parser) -> None:
+            parser.add_argument("--device", default="cpu")
+
+    fake_app = SimpleNamespace(AppLauncher=FakeAppLauncher)
+    monkeypatch.setitem(sys.modules, "isaaclab", SimpleNamespace(app=fake_app))
+    monkeypatch.setitem(sys.modules, "isaaclab.app", fake_app)
+    monkeypatch.setattr(
+        probe,
+        "run_runtime_probe",
+        lambda _args, _report: (_ for _ in ()).throw(SystemExit(0)),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(PROBE_PATH),
+            "--run_id",
+            "RECOVLA-HA-PPBOX-SYSTEM-EXIT-TEST",
+            "--source_sha",
+            "a" * 40,
+            "--source_archive_sha256",
+            "b" * 64,
+            "--output",
+            str(output),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="SystemExit before completion"):
+        probe.main()
+
+    report = json.loads(output.read_text(encoding="ascii"))
+    assert report["status"] == "failed"
+    assert report["failure"]["type"] == "SystemExit"
+    assert report["failure"]["exit_code"] == 0
