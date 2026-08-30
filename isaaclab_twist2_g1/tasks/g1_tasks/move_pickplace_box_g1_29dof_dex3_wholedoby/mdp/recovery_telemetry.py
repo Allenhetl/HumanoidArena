@@ -3205,6 +3205,278 @@ def _registered_evaluator_terminal_evidence(
     return evidence
 
 
+_EVALUATOR_TERMINAL_PRODUCER_STATE_SCHEMA = (
+    "ha_pp_box_evaluator_terminal_producer_state_v1"
+)
+
+
+def _fall_detector_state(config: EvaluatorFallDetectorConfig) -> dict[str, object]:
+    return {
+        "enabled": config.enabled,
+        "soft_up_alignment": config.soft_up_alignment,
+        "hard_up_alignment": config.hard_up_alignment,
+        "contact_force_threshold_n": config.contact_force_threshold_n,
+        "confirm_steps": config.confirm_steps,
+        "critical_body_indices": list(config.critical_body_indices),
+        "critical_body_names": list(config.critical_body_names),
+    }
+
+
+def _terminal_evidence_state(evidence: EvaluatorTerminalEvidence) -> dict[str, object]:
+    return {
+        "schema_version": evidence.schema_version,
+        "task_identity": evidence.task_identity,
+        "runtime_identity_digest": evidence.runtime_identity_digest,
+        "detector_config": _fall_detector_state(evidence.detector_config),
+        "detector_config_digest": evidence.detector_config_digest,
+        "step_idx": evidence.step_idx,
+        "max_steps": evidence.max_steps,
+        "previous_evidence_digest": evidence.previous_evidence_digest,
+        "contexts": [
+            {
+                "control_step_count": context.control_step_count,
+                "max_control_steps": context.max_control_steps,
+                "fall_streak": context.fall_streak,
+                "fall_confirm_steps": context.fall_confirm_steps,
+                "time_limit": context.time_limit,
+                "fall_confirmed": context.fall_confirmed,
+            }
+            for context in evidence.contexts
+        ],
+        "live_fall_evidence": {
+            "schema_version": evidence.live_fall_evidence.schema_version,
+            "task_identity": evidence.live_fall_evidence.task_identity,
+            "runtime_identity_digest": (
+                evidence.live_fall_evidence.runtime_identity_digest
+            ),
+            "detector_config_digest": (
+                evidence.live_fall_evidence.detector_config_digest
+            ),
+            "lanes": [
+                {
+                    "env_index": lane.env_index,
+                    "control_step_count": lane.control_step_count,
+                    "root_quat_wxyz": list(lane.root_quat_wxyz),
+                    "root_up_alignment": lane.root_up_alignment,
+                    "critical_body_contact": lane.critical_body_contact,
+                    "fall_candidate": lane.fall_candidate,
+                    "detector_enabled": lane.detector_enabled,
+                    "soft_up_alignment": lane.soft_up_alignment,
+                    "hard_up_alignment": lane.hard_up_alignment,
+                }
+                for lane in evidence.live_fall_evidence.lanes
+            ],
+            "evidence_digest": evidence.live_fall_evidence.evidence_digest,
+        },
+        "evidence_digest": evidence.evidence_digest,
+    }
+
+
+def capture_evaluator_terminal_producer_state(env: object) -> dict[str, object]:
+    """Capture the unique evaluator chain head for exact continuation restore."""
+
+    _require_pp_box_task_identity(env)
+    registered = _registered_evaluator_terminal_evidence(env)
+    payload = {
+        "schema": _EVALUATOR_TERMINAL_PRODUCER_STATE_SCHEMA,
+        "task_identity": PP_BOX_TASK_IDENTITY,
+        "evidence": (
+            None if registered is None else _terminal_evidence_state(registered)
+        ),
+    }
+    return {**payload, "state_sha256": _canonical_json_digest(payload)}
+
+
+def _decode_evaluator_terminal_producer_state(
+    env: object,
+    state: object,
+) -> EvaluatorTerminalEvidence | None:
+    _require_pp_box_task_identity(env)
+    if not isinstance(state, Mapping) or set(state) != {
+        "schema",
+        "task_identity",
+        "evidence",
+        "state_sha256",
+    }:
+        raise RecoveryTelemetryIncompleteError(("evaluator_terminal_snapshot",))
+    payload = {
+        "schema": state["schema"],
+        "task_identity": state["task_identity"],
+        "evidence": state["evidence"],
+    }
+    if (
+        payload["schema"] != _EVALUATOR_TERMINAL_PRODUCER_STATE_SCHEMA
+        or payload["task_identity"] != PP_BOX_TASK_IDENTITY
+        or not isinstance(state["state_sha256"], str)
+        or state["state_sha256"] != _canonical_json_digest(payload)
+    ):
+        raise RecoveryTelemetryIncompleteError(("evaluator_terminal_snapshot",))
+    raw = payload["evidence"]
+    if raw is None:
+        return None
+    evidence_keys = {
+        "schema_version",
+        "task_identity",
+        "runtime_identity_digest",
+        "detector_config",
+        "detector_config_digest",
+        "step_idx",
+        "max_steps",
+        "previous_evidence_digest",
+        "contexts",
+        "live_fall_evidence",
+        "evidence_digest",
+    }
+    if not isinstance(raw, Mapping) or set(raw) != evidence_keys:
+        raise RecoveryTelemetryIncompleteError(("evaluator_terminal_snapshot",))
+    raw_detector = raw["detector_config"]
+    if not isinstance(raw_detector, Mapping) or set(raw_detector) != {
+        "enabled",
+        "soft_up_alignment",
+        "hard_up_alignment",
+        "contact_force_threshold_n",
+        "confirm_steps",
+        "critical_body_indices",
+        "critical_body_names",
+    }:
+        raise RecoveryTelemetryIncompleteError(("evaluator_terminal_snapshot",))
+    detector_input = None
+    if raw_detector["enabled"] is True:
+        detector_input = {
+            "soft_up_alignment": raw_detector["soft_up_alignment"],
+            "hard_up_alignment": raw_detector["hard_up_alignment"],
+            "contact_force_threshold": raw_detector["contact_force_threshold_n"],
+            "confirm_steps": raw_detector["confirm_steps"],
+            "critical_body_indices": raw_detector["critical_body_indices"],
+            "critical_body_names": raw_detector["critical_body_names"],
+        }
+    elif raw_detector["enabled"] is not False:
+        raise RecoveryTelemetryIncompleteError(("evaluator_terminal_snapshot",))
+    detector = _normalize_evaluator_fall_detector(env, detector_input)
+    if _fall_detector_state(detector) != dict(raw_detector):
+        raise RecoveryTelemetryIncompleteError(("evaluator_terminal_snapshot",))
+    detector_digest = _fall_detector_config_digest(detector)
+    if raw["detector_config_digest"] != detector_digest:
+        raise RecoveryTelemetryIncompleteError(("evaluator_terminal_snapshot",))
+
+    raw_live = raw["live_fall_evidence"]
+    if not isinstance(raw_live, Mapping) or set(raw_live) != {
+        "schema_version",
+        "task_identity",
+        "runtime_identity_digest",
+        "detector_config_digest",
+        "lanes",
+        "evidence_digest",
+    }:
+        raise RecoveryTelemetryIncompleteError(("evaluator_terminal_snapshot",))
+    raw_lanes = raw_live["lanes"]
+    if not isinstance(raw_lanes, Sequence) or isinstance(
+        raw_lanes, (str, bytes, bytearray)
+    ):
+        raise RecoveryTelemetryIncompleteError(("evaluator_terminal_snapshot",))
+    try:
+        lanes = tuple(LiveFallLaneEvidence(**dict(lane)) for lane in raw_lanes)
+        contexts = tuple(
+            DriverTerminalContext.from_value(context) for context in raw["contexts"]
+        )
+        for context in contexts:
+            context.validate()
+    except (TypeError, ValueError) as exc:
+        raise RecoveryTelemetryIncompleteError(
+            ("evaluator_terminal_snapshot",)
+        ) from exc
+    live = object.__new__(LiveFallProducerEvidence)
+    live_values = {
+        "schema_version": raw_live["schema_version"],
+        "task_identity": raw_live["task_identity"],
+        "runtime_identity_digest": raw_live["runtime_identity_digest"],
+        "detector_config_digest": raw_live["detector_config_digest"],
+        "lanes": lanes,
+        "evidence_digest": raw_live["evidence_digest"],
+        "_producer_token": _LIVE_FALL_PRODUCER_TOKEN,
+    }
+    for name, value in live_values.items():
+        object.__setattr__(live, name, value)
+    evidence = object.__new__(EvaluatorTerminalEvidence)
+    values = {
+        "schema_version": raw["schema_version"],
+        "task_identity": raw["task_identity"],
+        "runtime_identity_digest": raw["runtime_identity_digest"],
+        "detector_config": detector,
+        "detector_config_digest": detector_digest,
+        "step_idx": raw["step_idx"],
+        "max_steps": raw["max_steps"],
+        "previous_evidence_digest": raw["previous_evidence_digest"],
+        "contexts": contexts,
+        "live_fall_evidence": live,
+        "evidence_digest": raw["evidence_digest"],
+        "_producer_token": _EVALUATOR_TERMINAL_EVIDENCE_TOKEN,
+    }
+    for name, value in values.items():
+        object.__setattr__(evidence, name, value)
+    num_envs = int(getattr(env, "num_envs", 0))
+    try:
+        if (
+            evidence.schema_version != EVALUATOR_TERMINAL_EVIDENCE_SCHEMA_VERSION
+            or evidence.task_identity != PP_BOX_TASK_IDENTITY
+            or type(evidence.step_idx) is not int
+            or evidence.step_idx <= 0
+            or type(evidence.max_steps) is not int
+            or evidence.max_steps <= 0
+            or len(contexts) != num_envs
+            or live.schema_version != LIVE_FALL_EVIDENCE_SCHEMA_VERSION
+            or live.task_identity != PP_BOX_TASK_IDENTITY
+            or live.detector_config_digest != detector_digest
+            or live.evidence_digest != live_fall_evidence_digest(live)
+            or evidence.runtime_identity_digest != live.runtime_identity_digest
+            or evidence.evidence_digest != evaluator_terminal_evidence_digest(evidence)
+            or (evidence.step_idx == 1 and evidence.previous_evidence_digest != "")
+            or (
+                evidence.step_idx > 1
+                and (
+                    not isinstance(evidence.previous_evidence_digest, str)
+                    or len(evidence.previous_evidence_digest) != 64
+                )
+            )
+        ):
+            raise ValueError("invalid evaluator terminal snapshot")
+        _validate_live_fall_evidence(
+            env,
+            live,
+            contexts,
+            num_envs=num_envs,
+        )
+    except (TypeError, ValueError, RecoveryTelemetryIncompleteError) as exc:
+        raise RecoveryTelemetryIncompleteError(
+            ("evaluator_terminal_snapshot",)
+        ) from exc
+    return evidence
+
+
+def preflight_evaluator_terminal_producer_state(
+    env: object,
+    state: object,
+) -> None:
+    """Validate a producer snapshot without changing the registered chain head."""
+
+    _decode_evaluator_terminal_producer_state(env, state)
+
+
+def restore_evaluator_terminal_producer_state(
+    env: object,
+    state: object,
+) -> None:
+    """Restore the digest-bound evaluator chain head after simulator restore."""
+
+    evidence = _decode_evaluator_terminal_producer_state(env, state)
+    if evidence is None:
+        registered = _EVALUATOR_TERMINAL_EVIDENCE.get(id(env))
+        if registered is not None and registered[0] is env:
+            _EVALUATOR_TERMINAL_EVIDENCE.pop(id(env), None)
+        return
+    _EVALUATOR_TERMINAL_EVIDENCE[id(env)] = (env, evidence)
+
+
 def produce_evaluator_terminal_evidence(
     env: object,
     *,
@@ -3552,6 +3824,7 @@ __all__ = [
     "aggregate_hand_contact_evidence",
     "assert_actor_observation_isolated",
     "build_privileged_telemetry",
+    "capture_evaluator_terminal_producer_state",
     "classify_bimanual_grasp",
     "classify_fall",
     "classify_terminal",
@@ -3564,6 +3837,8 @@ __all__ = [
     "issue_residual_actor_observation",
     "live_fall_evidence_digest",
     "pairwise_contact_evidence",
+    "preflight_evaluator_terminal_producer_state",
     "produce_evaluator_terminal_evidence",
+    "restore_evaluator_terminal_producer_state",
     "validate_runtime_hand_contact_sensors",
 ]

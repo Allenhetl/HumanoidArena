@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import hashlib
 import importlib.util
 import math
@@ -1833,6 +1834,73 @@ def test_evaluator_terminal_producer_rejects_skipped_control_step(
             fall_detector=detector,
         )
     assert exc_info.value.missing_capabilities == ("evaluator_terminal_sequence",)
+
+
+def test_evaluator_terminal_producer_snapshot_replays_next_step_exactly(
+    telemetry,
+) -> None:
+    env = _complete_runtime_env(telemetry)
+    detector = _evaluator_fall_detector(env)
+    first = telemetry.produce_evaluator_terminal_evidence(
+        env,
+        step_idx=1,
+        max_steps=20,
+        fall_detector=detector,
+    )
+    saved = telemetry.capture_evaluator_terminal_producer_state(env)
+    original = telemetry.produce_evaluator_terminal_evidence(
+        env,
+        step_idx=2,
+        max_steps=20,
+        fall_detector=detector,
+    )
+
+    telemetry.preflight_evaluator_terminal_producer_state(env, saved)
+    telemetry.restore_evaluator_terminal_producer_state(env, saved)
+    replay = telemetry.produce_evaluator_terminal_evidence(
+        env,
+        step_idx=2,
+        max_steps=20,
+        fall_detector=detector,
+    )
+
+    assert saved["evidence"]["evidence_digest"] == first.evidence_digest
+    assert replay.evidence_digest == original.evidence_digest
+    assert replay.previous_evidence_digest == first.evidence_digest
+    assert replay.contexts == original.contexts
+
+
+def test_evaluator_terminal_producer_snapshot_tamper_is_non_mutating(
+    telemetry,
+) -> None:
+    env = _complete_runtime_env(telemetry)
+    detector = _evaluator_fall_detector(env)
+    telemetry.produce_evaluator_terminal_evidence(
+        env,
+        step_idx=1,
+        max_steps=20,
+        fall_detector=detector,
+    )
+    saved = telemetry.capture_evaluator_terminal_producer_state(env)
+    current = telemetry.produce_evaluator_terminal_evidence(
+        env,
+        step_idx=2,
+        max_steps=20,
+        fall_detector=detector,
+    )
+    forged = copy.deepcopy(saved)
+    forged["evidence"]["contexts"][0]["fall_streak"] = 99
+
+    with pytest.raises(telemetry.RecoveryTelemetryIncompleteError):
+        telemetry.restore_evaluator_terminal_producer_state(env, forged)
+
+    third = telemetry.produce_evaluator_terminal_evidence(
+        env,
+        step_idx=3,
+        max_steps=20,
+        fall_detector=detector,
+    )
+    assert third.previous_evidence_digest == current.evidence_digest
 
 
 def test_evaluator_terminal_evidence_context_is_digest_bound(
