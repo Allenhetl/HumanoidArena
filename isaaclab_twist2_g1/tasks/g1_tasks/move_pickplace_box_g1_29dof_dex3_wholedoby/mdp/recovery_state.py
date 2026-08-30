@@ -1499,15 +1499,11 @@ def _preflight_pp_box_recovery_task_state(env: Any, state: Any) -> None:
         {"term_dones", "truncated_buf", "terminated_buf"},
         path="termination_manager",
     )
-    term_dones = _require_exact_mapping_keys(
+    _require_same_payload_schema(
+        env.termination_manager._term_dones,
         termination["term_dones"],
-        set(env.termination_manager._term_dones),
         path="termination_manager.term_dones",
     )
-    for name, current in env.termination_manager._term_dones.items():
-        _require_same_payload_schema(
-            current, term_dones[name], path=f"termination_manager.term_dones.{name}"
-        )
     _require_same_payload_schema(
         env.termination_manager._truncated_buf,
         termination["truncated_buf"],
@@ -1575,8 +1571,9 @@ def _restore_pp_box_recovery_task_state(env: Any, state: Any) -> None:
     env.reward_buf = env.reward_manager._reward_buf
 
     termination = state["termination_manager"]
-    for name, value in termination["term_dones"].items():
-        _restore_attribute(env.termination_manager._term_dones, name, value)
+    _restore_attribute(
+        env.termination_manager, "_term_dones", termination["term_dones"]
+    )
     _restore_attribute(
         env.termination_manager, "_truncated_buf", termination["truncated_buf"]
     )

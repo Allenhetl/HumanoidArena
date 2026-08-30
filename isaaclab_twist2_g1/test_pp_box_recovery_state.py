@@ -1773,6 +1773,24 @@ def test_pp_box_hook_install_initializes_pre_step_reset_buffer(
     assert torch.equal(snapshot.task_counters["reset_buf"], torch.tensor([True]))
 
 
+def test_pp_box_task_state_roundtrips_tensor_termination_dones(
+    recovery_state,
+) -> None:
+    env = _ProductionEnv(recovery_state.PP_BOX_TASK_IDENTITY)
+    env.termination_manager._term_dones = torch.tensor([False])
+    recovery_state.install_pp_box_recovery_task_state_hooks(env)
+    state = env.capture_recovery_task_state()
+
+    env.termination_manager._term_dones.fill_(True)
+    env.preflight_restore_recovery_task_state(state)
+    env.restore_recovery_task_state(state)
+
+    assert torch.equal(
+        env.termination_manager._term_dones,
+        torch.tensor([False]),
+    )
+
+
 def test_pp_box_task_state_key_mismatch_preserves_both_key_sets(
     recovery_state,
 ) -> None:
