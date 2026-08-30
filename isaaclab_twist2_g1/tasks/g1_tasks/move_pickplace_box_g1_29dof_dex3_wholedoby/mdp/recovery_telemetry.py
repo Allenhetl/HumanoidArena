@@ -1356,6 +1356,20 @@ def _calibration_fixed_action(env: object) -> torch.Tensor:
     return action.detach().clone()
 
 
+def _collision_belongs_to_rigid_body(
+    collision_prim: object,
+    rigid_body_prim: object,
+    rigid_body_api: object,
+) -> bool:
+    root_path = str(rigid_body_prim.GetPath())
+    current = collision_prim
+    while current and current.IsValid() and not current.IsPseudoRoot():
+        if current.HasAPI(rigid_body_api):
+            return str(current.GetPath()) == root_path
+        current = current.GetParent()
+    return False
+
+
 def _runtime_collision_local_bounds(
     root_prim_paths: Sequence[str],
 ) -> tuple[tuple[float, float, float, float, float, float], ...]:
@@ -1399,6 +1413,10 @@ def _runtime_collision_local_bounds(
             predicate = Usd.TraverseInstanceProxies()
             for prim in Usd.PrimRange(root, predicate):
                 if not prim.HasAPI(UsdPhysics.CollisionAPI):
+                    continue
+                if not _collision_belongs_to_rigid_body(
+                    prim, root, UsdPhysics.RigidBodyAPI
+                ):
                     continue
                 enabled = UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().Get()
                 if enabled is False:

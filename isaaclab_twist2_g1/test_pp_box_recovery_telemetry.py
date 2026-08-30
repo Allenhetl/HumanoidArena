@@ -408,6 +408,41 @@ def test_runtime_collision_bounds_include_collision_guide_purpose() -> None:
     } == {"default_", "render", "proxy", "guide"}
 
 
+def test_collision_bounds_ignore_colliders_owned_by_descendant_rigid_bodies(
+    telemetry,
+) -> None:
+    class FakePrim:
+        def __init__(self, name, *, rigid=False, parent=None):
+            self.name = name
+            self.rigid = rigid
+            self.parent = parent
+
+        def GetParent(self):
+            return self.parent
+
+        def GetPath(self):
+            return self.name
+
+        def HasAPI(self, _api):
+            return self.rigid
+
+        def IsPseudoRoot(self):
+            return False
+
+        def IsValid(self):
+            return True
+
+    root = FakePrim("/Robot/palm", rigid=True)
+    own_collision = FakePrim("/Robot/palm/collisions", parent=root)
+    finger = FakePrim("/Robot/palm/finger", rigid=True, parent=root)
+    finger_collision = FakePrim("/Robot/palm/finger/collisions", parent=finger)
+
+    assert telemetry._collision_belongs_to_rigid_body(own_collision, root, object())
+    assert not telemetry._collision_belongs_to_rigid_body(
+        finger_collision, root, object()
+    )
+
+
 @pytest.mark.parametrize(
     ("left_contact", "right_contact", "left_pos", "right_pos", "expected"),
     [
