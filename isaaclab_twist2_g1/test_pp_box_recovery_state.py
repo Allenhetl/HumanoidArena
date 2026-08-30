@@ -1748,6 +1748,31 @@ def test_pp_box_production_hooks_restore_every_reset_to_mutated_buffer(
     assert env.cfg._replay_initial_env_state_active is True
 
 
+def test_pp_box_hook_install_initializes_pre_step_reset_buffer(
+    recovery_state,
+) -> None:
+    env = _ProductionEnv(recovery_state.PP_BOX_TASK_IDENTITY)
+    for name in (
+        "reset_buf",
+        "reward_buf",
+        "reset_terminated",
+        "reset_time_outs",
+        "obs_buf",
+    ):
+        delattr(env, name)
+
+    recovery_state.install_pp_box_recovery_task_state_hooks(env)
+
+    assert torch.equal(env.reset_buf, torch.tensor([True]))
+    assert env.reward_buf is env.reward_manager._reward_buf
+    assert env.reset_terminated is env.termination_manager._terminated_buf
+    assert env.reset_time_outs is env.termination_manager._truncated_buf
+    assert env.obs_buf is env.observation_manager._obs_buffer
+    snapshot = recovery_state.capture_recovery_state(env, fidelity_tier="state_only")
+    assert snapshot.capabilities.available["task_counters"] is True
+    assert torch.equal(snapshot.task_counters["reset_buf"], torch.tensor([True]))
+
+
 def test_pp_box_hook_install_preflights_all_participants_before_binding(
     recovery_state,
 ) -> None:

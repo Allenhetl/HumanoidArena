@@ -1729,6 +1729,73 @@ def _restore_pp_box_action_manager_state(manager: Any, state: Any) -> None:
         _restore_attribute(term, "_processed_actions", saved["processed_actions"])
 
 
+def _initialize_pp_box_pre_step_driver_aliases(env: Any) -> None:
+    """Fill Isaac Lab driver aliases that are first assigned by ``step``."""
+
+    reward_manager = _require_runtime_attribute(
+        env,
+        "reward_manager",
+        path="reward_manager",
+        operation="install task state hooks",
+    )
+    termination_manager = _require_runtime_attribute(
+        env,
+        "termination_manager",
+        path="termination_manager",
+        operation="install task state hooks",
+    )
+    observation_manager = _require_runtime_attribute(
+        env,
+        "observation_manager",
+        path="observation_manager",
+        operation="install task state hooks",
+    )
+    aliases = {
+        "reward_buf": _require_runtime_attribute(
+            reward_manager,
+            "_reward_buf",
+            path="reward_manager._reward_buf",
+            operation="install task state hooks",
+        ),
+        "reset_terminated": _require_runtime_attribute(
+            termination_manager,
+            "_terminated_buf",
+            path="termination_manager._terminated_buf",
+            operation="install task state hooks",
+        ),
+        "reset_time_outs": _require_runtime_attribute(
+            termination_manager,
+            "_truncated_buf",
+            path="termination_manager._truncated_buf",
+            operation="install task state hooks",
+        ),
+        "obs_buf": _require_runtime_attribute(
+            observation_manager,
+            "_obs_buffer",
+            path="observation_manager._obs_buffer",
+            operation="install task state hooks",
+        ),
+    }
+    terminated = aliases["reset_terminated"]
+    truncated = aliases["reset_time_outs"]
+    if (
+        not isinstance(terminated, torch.Tensor)
+        or not isinstance(truncated, torch.Tensor)
+        or terminated.dtype != torch.bool
+        or truncated.dtype != torch.bool
+        or terminated.shape != truncated.shape
+        or terminated.device != truncated.device
+    ):
+        _raise_missing_task_state(
+            "termination_manager:buffer_contract",
+            operation="install task state hooks",
+        )
+    aliases["reset_buf"] = torch.logical_or(terminated, truncated)
+    for name, value in aliases.items():
+        if not hasattr(env, name):
+            setattr(env, name, value)
+
+
 def install_pp_box_recovery_task_state_hooks(env: Any) -> None:
     """Install task-specific state hooks on the production PP-box environment."""
 
@@ -1774,6 +1841,7 @@ def install_pp_box_recovery_task_state_hooks(env: Any) -> None:
             "conflicting_hook:recovery_state_coordinator",
             operation="install task state hooks",
         )
+    _initialize_pp_box_pre_step_driver_aliases(env)
     coordinator = RecoveryStateCoordinator(
         env,
         task_identity=PP_BOX_TASK_IDENTITY,
