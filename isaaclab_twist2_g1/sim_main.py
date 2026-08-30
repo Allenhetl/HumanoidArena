@@ -1192,7 +1192,8 @@ def main():
     controller.set_action_provider(action_provider)
 
     # Also set action_provider on env for camera_state.py to access
-    env.action_provider = action_provider
+    env.action_provider = controller.action_provider
+    env.recovery_controller = controller
     print(f"[sim_main] Set action_provider on env: {type(action_provider)}")
 
     # 立即启动录制（在第一次 get_action() 之前）

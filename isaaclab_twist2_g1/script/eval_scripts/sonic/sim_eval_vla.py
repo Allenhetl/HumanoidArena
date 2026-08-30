@@ -919,6 +919,8 @@ def main() -> int:
 
             controller = RobotController(env, control_config)
             controller.set_action_provider(action_provider)
+            env.action_provider = controller.action_provider
+            env.recovery_controller = controller
             _log_verbose(args_cli, "[sim_eval_vla] startup checkpoint=after_controller_setup")
 
             for spec in episode_specs:

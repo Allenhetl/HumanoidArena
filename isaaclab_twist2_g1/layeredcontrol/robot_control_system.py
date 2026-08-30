@@ -61,7 +61,84 @@ class RobotController:
             self.action_provider.cleanup()
 
         self.action_provider = provider
+        self.env.action_provider = self.action_provider
+        self.env.recovery_controller = self
         print(f"[SimpleController] set the action provider: {provider.name}")
+
+    def capture_recovery_controller_state(self) -> dict[str, Any]:
+        """Capture semantic controller state used by the next control step."""
+        state = {
+            "schema_version": 1,
+            "controller_type": f"{type(self).__module__}.{type(self).__qualname__}",
+            "provider_type": (
+                None
+                if self.action_provider is None
+                else f"{type(self.action_provider).__module__}.{type(self.action_provider).__qualname__}"
+            ),
+            "control_mode": {
+                "replay_mode": bool(self.config.replay_mode),
+                "use_rl_action_mode": bool(self.config.use_rl_action_mode),
+            },
+            "last_action": self._last_action.detach().clone(),
+            "step_count": int(self.step_count),
+        }
+        self.preflight_restore_recovery_controller_state(state)
+        return state
+
+    def preflight_restore_recovery_controller_state(self, state: Any) -> None:
+        """Validate controller recovery state without mutating the control loop."""
+        expected_keys = {
+            "schema_version",
+            "controller_type",
+            "provider_type",
+            "control_mode",
+            "last_action",
+            "step_count",
+        }
+        if not isinstance(state, dict) or set(state) != expected_keys:
+            raise ValueError("RobotController recovery state schema mismatch")
+        if state["schema_version"] != 1:
+            raise ValueError("RobotController recovery schema version mismatch")
+        controller_type = f"{type(self).__module__}.{type(self).__qualname__}"
+        if state["controller_type"] != controller_type:
+            raise ValueError("RobotController recovery controller type mismatch")
+        if self.action_provider is None:
+            raise ValueError("RobotController recovery action_provider is unavailable")
+        provider_type = (
+            f"{type(self.action_provider).__module__}."
+            f"{type(self.action_provider).__qualname__}"
+        )
+        if state["provider_type"] != provider_type:
+            raise ValueError("RobotController recovery provider type mismatch")
+        if getattr(self.env, "action_provider", None) is not self.action_provider:
+            raise ValueError("RobotController recovery env.action_provider alias mismatch")
+        if getattr(self.env, "recovery_controller", None) is not self:
+            raise ValueError("RobotController recovery env.recovery_controller alias mismatch")
+        expected_mode = {
+            "replay_mode": bool(self.config.replay_mode),
+            "use_rl_action_mode": bool(self.config.use_rl_action_mode),
+        }
+        if state["control_mode"] != expected_mode:
+            raise ValueError("RobotController recovery control mode mismatch")
+        last_action = state["last_action"]
+        if not (
+            isinstance(last_action, torch.Tensor)
+            and last_action.layout == torch.strided
+            and not last_action.is_quantized
+            and last_action.shape == self._last_action.shape
+            and last_action.dtype == self._last_action.dtype
+            and last_action.device == self._last_action.device
+            and bool(torch.isfinite(last_action).all())
+        ):
+            raise ValueError("RobotController recovery last_action schema mismatch")
+        if type(state["step_count"]) is not int or state["step_count"] < 0:
+            raise ValueError("RobotController recovery step_count schema mismatch")
+
+    def restore_recovery_controller_state(self, state: Any) -> None:
+        """Restore a preflighted controller fallback action and control cursor."""
+        self.preflight_restore_recovery_controller_state(state)
+        self._last_action.copy_(state["last_action"])
+        self.step_count = int(state["step_count"])
 
     def start(self):
         """start the controller"""

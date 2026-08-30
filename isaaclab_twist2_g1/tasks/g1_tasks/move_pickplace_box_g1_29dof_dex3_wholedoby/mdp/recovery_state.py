@@ -30,12 +30,14 @@ __all__ = [
     "RECOVERY_STATE_SCHEMA_VERSION",
     "RecoveryRngState",
     "RecoveryStateCapabilities",
+    "RecoveryStateCoordinator",
     "RecoveryStateDigestMismatchError",
     "RecoveryStateGlobalRngBusyError",
     "RecoveryStateIncompleteError",
     "RecoveryStatePreflightError",
     "RecoveryStateRestoreEvidence",
     "RecoveryStateSchemaError",
+    "RecoveryStateScope",
     "RecoveryStateSnapshot",
     "RecoveryStateTransactionError",
     "RngSourceState",
@@ -49,9 +51,10 @@ __all__ = [
 ]
 
 RECOVERY_DIGEST_SCHEMA_VERSION = 1
-RECOVERY_STATE_SCHEMA_VERSION = 2
+RECOVERY_STATE_SCHEMA_VERSION = 3
 PP_BOX_TASK_IDENTITY = "Isaac-Move-PickPlace-Box-G129-Dex3-Wholedoby"
-PP_BOX_TASK_STATE_SCHEMA_VERSION = 1
+PP_BOX_TASK_STATE_SCHEMA_VERSION = 2
+PP_BOX_ACTION_MANAGER_STATE_SCHEMA_VERSION = 1
 
 _CORE_TASK_COUNTER_NAMES = (
     "episode_length_buf",
@@ -87,8 +90,29 @@ _KNOWN_CAPABILITIES = (
     "wrapper_rng",
     "physics_solver_cache",
     "contact_cache",
+    "action_manager_state",
+    "action_provider_state",
+    "controller_state",
 )
 _RUNTIME_CACHE_NAMES = ("physics_solver_cache", "contact_cache")
+_CONTROL_PARTICIPANTS = (
+    ("action_manager_state", "action_manager", "recovery_action_manager_state"),
+    ("action_provider_state", "action_provider", "recovery_provider_state"),
+    ("controller_state", "recovery_controller", "recovery_controller_state"),
+)
+_EXACT_CONTINUATION_CAPABILITIES = frozenset(
+    {
+        "task_state",
+        "task_local_rng",
+        "wrapper_rng",
+        "physics_solver_cache",
+        "contact_cache",
+        "action_manager_state",
+        "action_provider_state",
+        "controller_state",
+    }
+)
+_FIDELITY_TIERS = frozenset({"state_only", "exact_continuation"})
 _PROCESS_GLOBAL_RNG_LOCK = threading.Lock()
 _PP_BOX_CFG_STATE_NAMES = (
     "_episode_runtime_seed",
@@ -245,17 +269,122 @@ class RecoveryRngState:
 
 
 @dataclass(frozen=True)
+class RecoveryStateScope:
+    """Digest-bound Isaac Lab vector scope for process-global recovery state."""
+
+    schema_version: int
+    num_envs: int
+    env_ids: tuple[int, ...]
+    is_relative: bool
+    process_global_rng_scope: str
+
+
+@dataclass(frozen=True)
 class RecoveryStateSnapshot:
     """A task-bound simulator snapshot with an explicit schema version."""
 
     schema_version: int
     task_identity: str
+    scope: RecoveryStateScope
+    fidelity_tier: str
     capabilities: RecoveryStateCapabilities
     scene_state: Mapping[str, Any]
     task_counters: Mapping[str, Any]
     task_state: Any
     rng_state: RecoveryRngState
     runtime_state: Mapping[str, Any] = field(default_factory=dict)
+
+
+class RecoveryStateCoordinator:
+    """Task-bound production entry point for transactional recovery snapshots."""
+
+    __slots__ = ("_coordinator_type", "_env", "_task_identity")
+
+    SCHEMA_VERSION = 1
+
+    def __init__(self, env: Any, *, task_identity: str) -> None:
+        self._env = env
+        self._task_identity = task_identity
+        self._coordinator_type = _type_identity(self)
+
+    def _validate_binding(self) -> None:
+        expected_type = _type_identity(self)
+        if (
+            type(self) is not RecoveryStateCoordinator
+            or self._coordinator_type != expected_type
+            or getattr(self._env, "recovery_state_coordinator", None) is not self
+        ):
+            raise RecoveryStateSchemaError(
+                "recovery state coordinator binding mismatch"
+            )
+        _validate_env_task_identity(self._env, self._task_identity)
+
+    @property
+    def binding_identity(self) -> Mapping[str, Any]:
+        self._validate_binding()
+        return MappingProxyType(
+            {
+                "schema_version": self.SCHEMA_VERSION,
+                "coordinator_type": self._coordinator_type,
+                "task_identity": self._task_identity,
+            }
+        )
+
+    def capture(
+        self,
+        *,
+        fidelity_tier: str,
+        required_capabilities: set[str] | frozenset[str] | None = None,
+    ) -> RecoveryStateSnapshot:
+        self._validate_binding()
+        return capture_recovery_state(
+            self._env,
+            required_capabilities=required_capabilities,
+            task_identity=self._task_identity,
+            fidelity_tier=fidelity_tier,
+        )
+
+    def digest(self, snapshot: RecoveryStateSnapshot) -> str:
+        self._validate_binding()
+        _validate_snapshot_schema(snapshot, self._task_identity)
+        return recovery_state_digest(snapshot, task_identity=self._task_identity)
+
+    def preflight(
+        self,
+        snapshot: RecoveryStateSnapshot,
+        *,
+        snapshot_digest: str,
+        required_capabilities: set[str] | frozenset[str] | None = None,
+    ) -> None:
+        self._validate_binding()
+        _validate_bound_snapshot_digest(
+            snapshot,
+            snapshot_digest,
+            task_identity=self._task_identity,
+        )
+        with _exclusive_process_global_rng("preflight"):
+            _preflight_recovery_restore(
+                self._env,
+                snapshot,
+                required_capabilities=required_capabilities,
+                task_identity=self._task_identity,
+            )
+
+    def restore(
+        self,
+        snapshot: RecoveryStateSnapshot,
+        *,
+        snapshot_digest: str,
+        required_capabilities: set[str] | frozenset[str] | None = None,
+    ) -> None:
+        self._validate_binding()
+        restore_recovery_state(
+            self._env,
+            snapshot,
+            snapshot_digest=snapshot_digest,
+            required_capabilities=required_capabilities,
+            task_identity=self._task_identity,
+        )
 
 
 def _digest_blob(hasher: Any, tag: bytes, payload: bytes) -> None:
@@ -449,6 +578,20 @@ def _has_transactional_hooks(env: Any, name: str) -> bool:
     )
 
 
+def _control_participant(env: Any, owner_name: str) -> Any | None:
+    return _optional_runtime_attribute(env, owner_name)
+
+
+def _required_for_fidelity(fidelity_tier: str) -> frozenset[str]:
+    if fidelity_tier not in _FIDELITY_TIERS:
+        raise RecoveryStateSchemaError(
+            f"unsupported recovery fidelity tier {fidelity_tier!r}"
+        )
+    if fidelity_tier == "exact_continuation":
+        return _EXACT_CONTINUATION_CAPABILITIES
+    return frozenset()
+
+
 def _has_writable_direct_task_state(env: Any) -> bool:
     name = "recovery_task_state"
     try:
@@ -552,7 +695,9 @@ def _single_env_ids(env: Any, *, operation: str) -> torch.Tensor:
         try:
             torch_device = torch.device(device)
             if torch_device.type not in {"cpu", "cuda"}:
-                raise ValueError(f"unsupported recovery device type: {torch_device.type}")
+                raise ValueError(
+                    f"unsupported recovery device type: {torch_device.type}"
+                )
             env_ids = torch.tensor([0], dtype=torch.long, device=torch_device)
         except (RuntimeError, TypeError, ValueError):
             missing.add("device")
@@ -570,8 +715,60 @@ def _single_env_ids(env: Any, *, operation: str) -> torch.Tensor:
     return env_ids
 
 
-def _absolute_scene_state(env: Any) -> Any:
-    return env.scene.get_state(is_relative=False)
+def _single_env_scope(
+    env: Any, *, operation: str
+) -> tuple[RecoveryStateScope, torch.Tensor]:
+    env_ids = _single_env_ids(env, operation=operation)
+    return (
+        RecoveryStateScope(
+            schema_version=RECOVERY_STATE_SCHEMA_VERSION,
+            num_envs=1,
+            env_ids=(0,),
+            is_relative=True,
+            process_global_rng_scope="exclusive_process_single_env",
+        ),
+        env_ids,
+    )
+
+
+def _scene_state(env: Any, *, is_relative: bool) -> Any:
+    return env.scene.get_state(is_relative=is_relative)
+
+
+def _validate_env_task_identity(env: Any, task_identity: str) -> None:
+    runtime_env = _unwrapped_env(env)
+    cfg = _optional_runtime_attribute(runtime_env, "cfg")
+    if cfg is None:
+        raise RecoveryStateSchemaError("recovery runtime cfg is unavailable")
+    env_name = _optional_runtime_attribute(cfg, "env_name")
+    if env_name != task_identity:
+        raise RecoveryStateSchemaError(
+            f"recovery runtime cfg.env_name {env_name!r} does not match {task_identity!r}"
+        )
+    configured_identity = _optional_runtime_attribute(cfg, "recovery_task_identity")
+    if configured_identity != task_identity:
+        raise RecoveryStateSchemaError(
+            "recovery runtime cfg.recovery_task_identity "
+            f"{configured_identity!r} does not match {task_identity!r}"
+        )
+
+
+def _validate_reset_to_signature(env: Any, env_ids: torch.Tensor) -> None:
+    reset_to = _optional_runtime_attribute(env, "reset_to")
+    if not callable(reset_to):
+        missing = {"reset_to_signature"}
+    else:
+        try:
+            inspect.signature(reset_to).bind({}, env_ids=env_ids, is_relative=True)
+            missing = set()
+        except (TypeError, ValueError):
+            missing = {"reset_to_signature"}
+    if missing:
+        raise RecoveryStateIncompleteError(
+            missing,
+            operation="restore preflight",
+            available={"reset_to_signature": False},
+        )
 
 
 def discover_recovery_state_capabilities(env: Any) -> RecoveryStateCapabilities:
@@ -592,7 +789,9 @@ def discover_recovery_state_capabilities(env: Any) -> RecoveryStateCapabilities:
     available.update(
         {
             "scene_state": has_scene,
-            "task_counters": all(hasattr(env, name) for name in _CORE_TASK_COUNTER_NAMES),
+            "task_counters": all(
+                hasattr(env, name) for name in _CORE_TASK_COUNTER_NAMES
+            ),
             "task_state": task_state_mode is not None,
             "python_rng": True,
             "numpy_rng": True,
@@ -609,6 +808,18 @@ def discover_recovery_state_capabilities(env: Any) -> RecoveryStateCapabilities:
             "contact_cache": _has_transactional_hooks(env, "contact_cache"),
         }
     )
+    for capability, owner_name, hook_name in _CONTROL_PARTICIPANTS:
+        owner = _control_participant(env, owner_name)
+        supported = owner is not None and _has_transactional_hooks(owner, hook_name)
+        support_probe = (
+            None if owner is None else getattr(owner, f"{hook_name}_supported", None)
+        )
+        if supported and callable(support_probe):
+            try:
+                supported = support_probe() is True
+            except Exception:  # noqa: BLE001 - capability discovery must fail closed.
+                supported = False
+        available[capability] = supported
     return RecoveryStateCapabilities(
         schema_version=RECOVERY_STATE_SCHEMA_VERSION,
         available=available,
@@ -621,9 +832,13 @@ def _capture_rng_source(source: Any | None) -> RngSourceState | None:
     if isinstance(source, torch.Generator):
         return RngSourceState("torch", source.get_state().clone())
     if isinstance(source, np.random.Generator):
-        return RngSourceState("numpy_generator", clone_recovery_value(source.bit_generator.state))
+        return RngSourceState(
+            "numpy_generator", clone_recovery_value(source.bit_generator.state)
+        )
     if isinstance(source, np.random.RandomState):
-        return RngSourceState("numpy_random_state", clone_recovery_value(source.get_state()))
+        return RngSourceState(
+            "numpy_random_state", clone_recovery_value(source.get_state())
+        )
     if isinstance(source, random.Random):
         return RngSourceState("python_random", clone_recovery_value(source.getstate()))
     return None
@@ -643,7 +858,9 @@ def _restore_rng_source(
     if snapshot.kind == "numpy_generator" and isinstance(source, np.random.Generator):
         source.bit_generator.state = clone_recovery_value(snapshot.state)
         return
-    if snapshot.kind == "numpy_random_state" and isinstance(source, np.random.RandomState):
+    if snapshot.kind == "numpy_random_state" and isinstance(
+        source, np.random.RandomState
+    ):
         source.set_state(clone_recovery_value(snapshot.state))
         return
     if snapshot.kind == "python_random" and isinstance(source, random.Random):
@@ -678,14 +895,16 @@ def capture_recovery_state(
     *,
     required_capabilities: set[str] | frozenset[str] | None = None,
     task_identity: str = PP_BOX_TASK_IDENTITY,
+    fidelity_tier: str = "state_only",
 ) -> RecoveryStateSnapshot:
-    """Capture state needed to replay the task's next observable transition."""
+    """Capture a digest-bound state tier; only exact tier claims continuation."""
 
     with _exclusive_process_global_rng("capture"):
         return _capture_recovery_state_unlocked(
             env,
             required_capabilities=required_capabilities,
             task_identity=task_identity,
+            fidelity_tier=fidelity_tier,
         )
 
 
@@ -694,13 +913,20 @@ def _capture_recovery_state_unlocked(
     *,
     required_capabilities: set[str] | frozenset[str] | None = None,
     task_identity: str = PP_BOX_TASK_IDENTITY,
+    fidelity_tier: str = "state_only",
 ) -> RecoveryStateSnapshot:
     """Capture while the caller owns ``_PROCESS_GLOBAL_RNG_LOCK``."""
 
-    _single_env_ids(env, operation="capture single-env selection")
+    _validate_env_task_identity(env, task_identity)
+    scope, _ = _single_env_scope(env, operation="capture single-env selection")
     capabilities = discover_recovery_state_capabilities(env)
-    _require_capabilities(capabilities, required_capabilities, operation="capture")
-    scene_state = clone_recovery_value(_absolute_scene_state(env))
+    fidelity_required = _required_for_fidelity(fidelity_tier)
+    _require_capabilities(
+        capabilities,
+        fidelity_required | frozenset(required_capabilities or ()),
+        operation=f"capture {fidelity_tier}",
+    )
+    scene_state = clone_recovery_value(_scene_state(env, is_relative=scope.is_relative))
     scene_state_keys = tuple(scene_state) if isinstance(scene_state, Mapping) else ()
 
     task_state = None
@@ -710,7 +936,8 @@ def _capture_recovery_state_unlocked(
         task_state = env.recovery_task_state
     task_state = clone_recovery_value(task_state)
     task_counters = {
-        name: clone_recovery_value(getattr(env, name)) for name in capabilities.counter_names
+        name: clone_recovery_value(getattr(env, name))
+        for name in capabilities.counter_names
     }
     capabilities = replace(
         capabilities,
@@ -720,7 +947,9 @@ def _capture_recovery_state_unlocked(
             (name, _payload_schema(value)) for name, value in task_counters.items()
         ),
         task_state_schema=(
-            _payload_schema(task_state) if capabilities.available["task_state"] else None
+            _payload_schema(task_state)
+            if capabilities.available["task_state"]
+            else None
         ),
     )
 
@@ -728,6 +957,18 @@ def _capture_recovery_state_unlocked(
     for name in _RUNTIME_CACHE_NAMES:
         if capabilities.available[name]:
             runtime_state[name] = getattr(env, f"capture_{name}")()
+    for capability, owner_name, hook_name in _CONTROL_PARTICIPANTS:
+        if capabilities.available[capability]:
+            owner = _control_participant(env, owner_name)
+            assert owner is not None
+            try:
+                runtime_state[capability] = getattr(owner, f"capture_{hook_name}")()
+            except Exception as exc:
+                raise RecoveryStateIncompleteError(
+                    {capability},
+                    operation="capture control participant",
+                    available=capabilities.available,
+                ) from exc
 
     torch_cuda = None
     if capabilities.available["torch_cuda_rng"]:
@@ -736,6 +977,8 @@ def _capture_recovery_state_unlocked(
     snapshot = RecoveryStateSnapshot(
         schema_version=RECOVERY_STATE_SCHEMA_VERSION,
         task_identity=task_identity,
+        scope=scope,
+        fidelity_tier=fidelity_tier,
         capabilities=capabilities,
         scene_state=scene_state,
         task_counters=task_counters,
@@ -764,7 +1007,10 @@ def _resolve_restore_attribute_owner(owner: Any, name: str) -> Any:
     if isinstance(owner, dict):
         return owner
     try:
-        if name in vars(owner) or inspect.getattr_static(type(owner), name, None) is not None:
+        if (
+            name in vars(owner)
+            or inspect.getattr_static(type(owner), name, None) is not None
+        ):
             return owner
     except TypeError:
         pass
@@ -929,10 +1175,13 @@ def _pp_box_runtime_identity(env: Any) -> Mapping[str, Any]:
             operation=operation,
         )
     )
-    if termination_names != () or tuple(
-        getattr(termination_manager, "_class_term_cfgs", ())
-    ) != ():
-        _raise_missing_task_state("termination_manager.term_contract", operation=operation)
+    if (
+        termination_names != ()
+        or tuple(getattr(termination_manager, "_class_term_cfgs", ())) != ()
+    ):
+        _raise_missing_task_state(
+            "termination_manager.term_contract", operation=operation
+        )
 
     observation_manager = _require_runtime_attribute(
         env, "observation_manager", path="observation_manager", operation=operation
@@ -951,7 +1200,9 @@ def _pp_box_runtime_identity(env: Any) -> Mapping[str, Any]:
         or normalized_observation_terms["policy"]
         not in _PP_BOX_OBSERVATION_TERM_CONTRACTS
     ):
-        _raise_missing_task_state("observation_manager.term_contract", operation=operation)
+        _raise_missing_task_state(
+            "observation_manager.term_contract", operation=operation
+        )
     history_buffers = _require_runtime_attribute(
         observation_manager,
         "_group_obs_term_history_buffer",
@@ -969,7 +1220,9 @@ def _pp_box_runtime_identity(env: Any) -> Mapping[str, Any]:
     if any(tuple(group_terms) for group_terms in class_terms.values()) or tuple(
         getattr(observation_manager, "_group_obs_class_instances", ())
     ):
-        _raise_missing_task_state("observation_manager.class_terms", operation=operation)
+        _raise_missing_task_state(
+            "observation_manager.class_terms", operation=operation
+        )
 
     passive_managers: dict[str, Any] = {}
     for manager_name in _PP_BOX_PASSIVE_MANAGER_NAMES:
@@ -981,7 +1234,9 @@ def _pp_box_runtime_identity(env: Any) -> Mapping[str, Any]:
             (bool(item[1]) if isinstance(item, tuple) and len(item) == 2 else True)
             for item in active
         ):
-            _raise_missing_task_state(f"{manager_name}.mutable_terms", operation=operation)
+            _raise_missing_task_state(
+                f"{manager_name}.mutable_terms", operation=operation
+            )
         passive_managers[manager_name] = {
             "type": _type_identity(manager),
             "active_terms": active,
@@ -1120,7 +1375,9 @@ def _capture_pp_box_recovery_task_state(env: Any) -> Mapping[str, Any]:
     return payload
 
 
-def _require_exact_mapping_keys(value: Any, expected: set[str], *, path: str) -> Mapping:
+def _require_exact_mapping_keys(
+    value: Any, expected: set[str], *, path: str
+) -> Mapping:
     if not isinstance(value, Mapping) or set(value) != expected:
         raise RecoveryStateSchemaError(
             f"PP-box recovery task state {path} keys do not match schema"
@@ -1155,7 +1412,9 @@ def _preflight_pp_box_recovery_task_state(env: Any, state: Any) -> None:
     if top["schema_version"] != PP_BOX_TASK_STATE_SCHEMA_VERSION:
         raise RecoveryStateSchemaError("unsupported PP-box recovery task state schema")
     if top["task_identity"] != PP_BOX_TASK_IDENTITY:
-        raise RecoveryStateSchemaError("PP-box recovery task state task identity mismatch")
+        raise RecoveryStateSchemaError(
+            "PP-box recovery task state task identity mismatch"
+        )
     if dict(top["runtime_identity"]) != dict(_pp_box_runtime_identity(env)):
         raise RecoveryStateSchemaError("PP-box recovery runtime identity mismatch")
 
@@ -1164,7 +1423,9 @@ def _preflight_pp_box_recovery_task_state(env: Any, state: Any) -> None:
     )
     if not isinstance(driver["sim_step_counter"], (int, np.integer)):
         raise RecoveryStateSchemaError("PP-box driver sim step counter is invalid")
-    if not isinstance(driver["extras"], Mapping) or not _payload_is_finite(driver["extras"]):
+    if not isinstance(driver["extras"], Mapping) or not _payload_is_finite(
+        driver["extras"]
+    ):
         raise RecoveryStateSchemaError("PP-box driver extras are invalid")
 
     action = _require_exact_mapping_keys(
@@ -1179,11 +1440,15 @@ def _preflight_pp_box_recovery_task_state(env: Any, state: Any) -> None:
         path="action_manager.prev_action",
     )
     terms = _require_exact_mapping_keys(
-        action["terms"], set(env.action_manager._term_names), path="action_manager.terms"
+        action["terms"],
+        set(env.action_manager._term_names),
+        path="action_manager.terms",
     )
     for name in env.action_manager._term_names:
         term_state = _require_exact_mapping_keys(
-            terms[name], {"raw_actions", "processed_actions"}, path=f"action_manager.{name}"
+            terms[name],
+            {"raw_actions", "processed_actions"},
+            path=f"action_manager.{name}",
         )
         term = env.action_manager._terms[name]
         _require_same_payload_schema(
@@ -1203,14 +1468,18 @@ def _preflight_pp_box_recovery_task_state(env: Any, state: Any) -> None:
         path="reward_manager",
     )
     episode_sums = _require_exact_mapping_keys(
-        reward["episode_sums"], set(env.reward_manager._episode_sums), path="reward_manager.episode_sums"
+        reward["episode_sums"],
+        set(env.reward_manager._episode_sums),
+        path="reward_manager.episode_sums",
     )
     for name, current in env.reward_manager._episode_sums.items():
         _require_same_payload_schema(
             current, episode_sums[name], path=f"reward_manager.episode_sums.{name}"
         )
     _require_same_payload_schema(
-        env.reward_manager._reward_buf, reward["reward_buf"], path="reward_manager.reward_buf"
+        env.reward_manager._reward_buf,
+        reward["reward_buf"],
+        path="reward_manager.reward_buf",
     )
     _require_same_payload_schema(
         env.reward_manager._step_reward,
@@ -1253,14 +1522,20 @@ def _preflight_pp_box_recovery_task_state(env: Any, state: Any) -> None:
     )
 
     targets = _require_exact_mapping_keys(
-        top["robot_targets"], {"joint_pos", "joint_vel", "joint_effort"}, path="robot_targets"
+        top["robot_targets"],
+        {"joint_pos", "joint_vel", "joint_effort"},
+        path="robot_targets",
     )
     robot = _pp_box_robot(env, operation="restore task state preflight")
     _require_same_payload_schema(
-        robot.data.joint_pos_target, targets["joint_pos"], path="robot_targets.joint_pos"
+        robot.data.joint_pos_target,
+        targets["joint_pos"],
+        path="robot_targets.joint_pos",
     )
     _require_same_payload_schema(
-        robot.data.joint_vel_target, targets["joint_vel"], path="robot_targets.joint_vel"
+        robot.data.joint_vel_target,
+        targets["joint_vel"],
+        path="robot_targets.joint_vel",
     )
     _require_same_payload_schema(
         robot.data.joint_effort_target,
@@ -1338,19 +1613,136 @@ def _restore_pp_box_recovery_task_state_bound(env: Any, state: Any) -> None:
     _restore_pp_box_recovery_task_state(env, state)
 
 
+def _capture_pp_box_action_manager_state(manager: Any) -> Mapping[str, Any]:
+    term_names = tuple(
+        _require_runtime_attribute(
+            manager,
+            "_term_names",
+            path="action_manager._term_names",
+            operation="capture action-manager state",
+        )
+    )
+    terms = _require_runtime_attribute(
+        manager,
+        "_terms",
+        path="action_manager._terms",
+        operation="capture action-manager state",
+    )
+    if tuple(terms) != term_names:
+        _raise_missing_task_state(
+            "action_manager.term_contract",
+            operation="capture action-manager state",
+        )
+    return {
+        "schema_version": PP_BOX_ACTION_MANAGER_STATE_SCHEMA_VERSION,
+        "manager_type": _type_identity(manager),
+        "term_identity": tuple(
+            (name, _type_identity(terms[name]), int(terms[name].action_dim))
+            for name in term_names
+        ),
+        "action": clone_recovery_value(
+            _require_runtime_attribute(
+                manager,
+                "_action",
+                path="action_manager._action",
+                operation="capture action-manager state",
+            )
+        ),
+        "prev_action": clone_recovery_value(
+            _require_runtime_attribute(
+                manager,
+                "_prev_action",
+                path="action_manager._prev_action",
+                operation="capture action-manager state",
+            )
+        ),
+        "terms": {
+            name: {
+                "raw_actions": clone_recovery_value(terms[name]._raw_actions),
+                "processed_actions": clone_recovery_value(
+                    terms[name]._processed_actions
+                ),
+            }
+            for name in term_names
+        },
+    }
+
+
+def _preflight_pp_box_action_manager_state(manager: Any, state: Any) -> None:
+    top = _require_exact_mapping_keys(
+        state,
+        {
+            "schema_version",
+            "manager_type",
+            "term_identity",
+            "action",
+            "prev_action",
+            "terms",
+        },
+        path="action_manager_runtime",
+    )
+    if top["schema_version"] != PP_BOX_ACTION_MANAGER_STATE_SCHEMA_VERSION:
+        raise RecoveryStateSchemaError("unsupported action-manager recovery schema")
+    current = _capture_pp_box_action_manager_state(manager)
+    for identity_name in ("manager_type", "term_identity"):
+        if top[identity_name] != current[identity_name]:
+            raise RecoveryStateSchemaError(
+                f"action-manager recovery {identity_name} mismatch"
+            )
+    _require_same_payload_schema(
+        manager._action, top["action"], path="action_manager_runtime.action"
+    )
+    _require_same_payload_schema(
+        manager._prev_action,
+        top["prev_action"],
+        path="action_manager_runtime.prev_action",
+    )
+    terms = _require_exact_mapping_keys(
+        top["terms"], set(manager._term_names), path="action_manager_runtime.terms"
+    )
+    for name in manager._term_names:
+        saved = _require_exact_mapping_keys(
+            terms[name],
+            {"raw_actions", "processed_actions"},
+            path=f"action_manager_runtime.{name}",
+        )
+        term = manager._terms[name]
+        _require_same_payload_schema(
+            term._raw_actions,
+            saved["raw_actions"],
+            path=f"action_manager_runtime.{name}.raw_actions",
+        )
+        _require_same_payload_schema(
+            term._processed_actions,
+            saved["processed_actions"],
+            path=f"action_manager_runtime.{name}.processed_actions",
+        )
+
+
+def _restore_pp_box_action_manager_state(manager: Any, state: Any) -> None:
+    _preflight_pp_box_action_manager_state(manager, state)
+    _restore_attribute(manager, "_action", state["action"])
+    _restore_attribute(manager, "_prev_action", state["prev_action"])
+    for name, saved in state["terms"].items():
+        term = manager._terms[name]
+        _restore_attribute(term, "_raw_actions", saved["raw_actions"])
+        _restore_attribute(term, "_processed_actions", saved["processed_actions"])
+
+
 def install_pp_box_recovery_task_state_hooks(env: Any) -> None:
     """Install task-specific state hooks on the production PP-box environment."""
 
     _single_env_ids(env, operation="install PP-box recovery task-state hooks")
-    cfg = getattr(env, "cfg", None)
-    identity = getattr(cfg, "recovery_task_identity", None)
-    if identity != PP_BOX_TASK_IDENTITY:
-        raise RecoveryStateSchemaError(
-            f"PP-box recovery task identity {identity!r} does not match "
-            f"{PP_BOX_TASK_IDENTITY!r}"
-        )
+    _validate_env_task_identity(env, PP_BOX_TASK_IDENTITY)
     marker = getattr(env, "_pp_box_recovery_task_state_hooks_version", None)
     if marker == PP_BOX_TASK_STATE_SCHEMA_VERSION:
+        coordinator = getattr(env, "recovery_state_coordinator", None)
+        if type(coordinator) is not RecoveryStateCoordinator:
+            _raise_missing_task_state(
+                "recovery_state_coordinator",
+                operation="validate installed task state hooks",
+            )
+        coordinator._validate_binding()
         return
     for name in (
         "capture_recovery_task_state",
@@ -1361,6 +1753,32 @@ def install_pp_box_recovery_task_state_hooks(env: Any) -> None:
             _raise_missing_task_state(
                 f"conflicting_hook:{name}", operation="install task state hooks"
             )
+    action_manager = _require_runtime_attribute(
+        env,
+        "action_manager",
+        path="action_manager",
+        operation="install task state hooks",
+    )
+    for name in (
+        "capture_recovery_action_manager_state",
+        "preflight_restore_recovery_action_manager_state",
+        "restore_recovery_action_manager_state",
+    ):
+        if callable(getattr(action_manager, name, None)):
+            _raise_missing_task_state(
+                f"conflicting_hook:action_manager.{name}",
+                operation="install task state hooks",
+            )
+    if getattr(env, "recovery_state_coordinator", None) is not None:
+        _raise_missing_task_state(
+            "conflicting_hook:recovery_state_coordinator",
+            operation="install task state hooks",
+        )
+    coordinator = RecoveryStateCoordinator(
+        env,
+        task_identity=PP_BOX_TASK_IDENTITY,
+    )
+
     env.capture_recovery_task_state = MethodType(
         _capture_pp_box_recovery_task_state_bound, env
     )
@@ -1370,6 +1788,16 @@ def install_pp_box_recovery_task_state_hooks(env: Any) -> None:
     env.restore_recovery_task_state = MethodType(
         _restore_pp_box_recovery_task_state_bound, env
     )
+    action_manager.capture_recovery_action_manager_state = MethodType(
+        _capture_pp_box_action_manager_state, action_manager
+    )
+    action_manager.preflight_restore_recovery_action_manager_state = MethodType(
+        _preflight_pp_box_action_manager_state, action_manager
+    )
+    action_manager.restore_recovery_action_manager_state = MethodType(
+        _restore_pp_box_action_manager_state, action_manager
+    )
+    env.recovery_state_coordinator = coordinator
     env.recovery_process_global_rng_exclusive = True
     env._pp_box_recovery_task_state_hooks_version = PP_BOX_TASK_STATE_SCHEMA_VERSION
 
@@ -1471,11 +1899,15 @@ def _valid_rng_source_state(source: Any | None, snapshot: Any) -> bool:
         if snapshot.kind == "torch" and isinstance(source, torch.Generator):
             torch.Generator(device=source.device).set_state(snapshot.state.clone())
             return True
-        if snapshot.kind == "numpy_generator" and isinstance(source, np.random.Generator):
+        if snapshot.kind == "numpy_generator" and isinstance(
+            source, np.random.Generator
+        ):
             bit_generator = copy.deepcopy(source.bit_generator)
             bit_generator.state = clone_recovery_value(snapshot.state)
             return True
-        if snapshot.kind == "numpy_random_state" and isinstance(source, np.random.RandomState):
+        if snapshot.kind == "numpy_random_state" and isinstance(
+            source, np.random.RandomState
+        ):
             np.random.RandomState().set_state(clone_recovery_value(snapshot.state))
             return True
         if snapshot.kind == "python_random" and isinstance(source, random.Random):
@@ -1500,7 +1932,7 @@ def _missing_snapshot_payloads(snapshot: RecoveryStateSnapshot, env: Any) -> set
             snapshot.scene_state,
             snapshot.capabilities.scene_state_schema,
         ) or (
-            _payload_schema(_absolute_scene_state(env))
+            _payload_schema(_scene_state(env, is_relative=snapshot.scope.is_relative))
             != snapshot.capabilities.scene_state_schema
         ):
             missing.add("scene_state")
@@ -1547,28 +1979,31 @@ def _missing_snapshot_payloads(snapshot: RecoveryStateSnapshot, env: Any) -> set
             missing.add("wrapper_rng")
     if snapshot.capabilities.available.get("task_state", False) and (
         snapshot.task_state is None
-        or (
-            isinstance(snapshot.task_state, Mapping) and not snapshot.task_state
-        )
+        or (isinstance(snapshot.task_state, Mapping) and not snapshot.task_state)
         or not _payload_matches_schema(
             snapshot.task_state,
             snapshot.capabilities.task_state_schema,
         )
     ):
         missing.add("task_state")
-    advertised_caches = {
+    advertised_runtime = {
         name
         for name in _RUNTIME_CACHE_NAMES
+        + tuple(capability for capability, _, _ in _CONTROL_PARTICIPANTS)
         if snapshot.capabilities.available.get(name, False)
     }
-    if advertised_caches and not isinstance(snapshot.runtime_state, Mapping):
-        missing.update(advertised_caches)
+    if advertised_runtime and not isinstance(snapshot.runtime_state, Mapping):
+        missing.update(advertised_runtime)
     else:
-        missing.update(name for name in advertised_caches if name not in snapshot.runtime_state)
+        missing.update(
+            name for name in advertised_runtime if name not in snapshot.runtime_state
+        )
     return missing
 
 
-def _validate_snapshot_schema(snapshot: RecoveryStateSnapshot, task_identity: str) -> None:
+def _validate_snapshot_schema(
+    snapshot: RecoveryStateSnapshot, task_identity: str
+) -> None:
     if snapshot.schema_version != RECOVERY_STATE_SCHEMA_VERSION:
         raise RecoveryStateSchemaError(
             f"unsupported recovery state schema version {snapshot.schema_version}; "
@@ -1583,9 +2018,26 @@ def _validate_snapshot_schema(snapshot: RecoveryStateSnapshot, task_identity: st
         raise RecoveryStateSchemaError(
             f"recovery state task identity {snapshot.task_identity!r} does not match {task_identity!r}"
         )
+    _required_for_fidelity(snapshot.fidelity_tier)
+    scope = snapshot.scope
+    if not isinstance(scope, RecoveryStateScope) or (
+        scope.schema_version != RECOVERY_STATE_SCHEMA_VERSION
+        or scope.num_envs != 1
+        or scope.env_ids != (0,)
+        or scope.is_relative is not True
+        or scope.process_global_rng_scope != "exclusive_process_single_env"
+    ):
+        raise RecoveryStateSchemaError(
+            "recovery snapshot scope must be exclusive num_envs=1, "
+            "env_ids=(0,), is_relative=True"
+        )
     task_state_available = snapshot.capabilities.available.get("task_state", False)
-    if task_state_available != (snapshot.capabilities.task_state_mode in {"hooks", "direct"}):
-        raise RecoveryStateSchemaError("recovery capability task-state mode is inconsistent")
+    if task_state_available != (
+        snapshot.capabilities.task_state_mode in {"hooks", "direct"}
+    ):
+        raise RecoveryStateSchemaError(
+            "recovery capability task-state mode is inconsistent"
+        )
 
 
 def _preflight_recovery_restore(
@@ -1596,18 +2048,26 @@ def _preflight_recovery_restore(
     task_identity: str,
 ) -> torch.Tensor:
     _validate_snapshot_schema(snapshot, task_identity)
+    _validate_env_task_identity(env, task_identity)
     env_ids = _single_env_ids(env, operation="restore single-env selection")
+    _validate_reset_to_signature(env, env_ids)
     capabilities = discover_recovery_state_capabilities(env)
     snapshot_capabilities = {
-        name for name, is_available in snapshot.capabilities.available.items() if is_available
+        name
+        for name, is_available in snapshot.capabilities.available.items()
+        if is_available
     }
     required = _require_capabilities(
         capabilities,
-        snapshot_capabilities | frozenset(required_capabilities or ()),
+        snapshot_capabilities
+        | _required_for_fidelity(snapshot.fidelity_tier)
+        | frozenset(required_capabilities or ()),
         operation="restore",
     )
     missing_from_snapshot = {
-        name for name in required if not snapshot.capabilities.available.get(name, False)
+        name
+        for name in required
+        if not snapshot.capabilities.available.get(name, False)
     }
     if snapshot.capabilities.available.get("task_state", False) and (
         snapshot.capabilities.task_state_mode != capabilities.task_state_mode
@@ -1663,6 +2123,16 @@ def _preflight_recovery_restore(
                 )
             except Exception as exc:
                 raise RecoveryStatePreflightError(name, exc) from exc
+    for capability, owner_name, hook_name in _CONTROL_PARTICIPANTS:
+        if snapshot.capabilities.available.get(capability, False):
+            owner = _control_participant(env, owner_name)
+            assert owner is not None
+            try:
+                getattr(owner, f"preflight_restore_{hook_name}")(
+                    clone_recovery_value(snapshot.runtime_state[capability])
+                )
+            except Exception as exc:
+                raise RecoveryStatePreflightError(capability, exc) from exc
     return env_ids
 
 
@@ -1675,7 +2145,7 @@ def _apply_recovery_restore(
     env.reset_to(
         clone_recovery_value(snapshot.scene_state),
         env_ids=env_ids,
-        is_relative=False,
+        is_relative=snapshot.scope.is_relative,
     )
     for name in snapshot.capabilities.counter_names:
         _restore_attribute(env, name, snapshot.task_counters[name])
@@ -1689,6 +2159,13 @@ def _apply_recovery_restore(
         if snapshot.capabilities.available.get(name, False):
             getattr(env, f"restore_{name}")(
                 clone_recovery_value(snapshot.runtime_state[name])
+            )
+    for capability, owner_name, hook_name in _CONTROL_PARTICIPANTS:
+        if snapshot.capabilities.available.get(capability, False):
+            owner = _control_participant(env, owner_name)
+            assert owner is not None
+            getattr(owner, f"restore_{hook_name}")(
+                clone_recovery_value(snapshot.runtime_state[capability])
             )
 
     random.setstate(clone_recovery_value(snapshot.rng_state.python))
@@ -1719,6 +2196,8 @@ def _project_snapshot_for_verification(
     return RecoveryStateSnapshot(
         schema_version=target.schema_version,
         task_identity=target.task_identity,
+        scope=target.scope,
+        fidelity_tier=target.fidelity_tier,
         capabilities=target.capabilities,
         scene_state=clone_recovery_value(current.scene_state),
         task_counters={
@@ -1753,6 +2232,7 @@ def _project_snapshot_for_verification(
         runtime_state={
             name: clone_recovery_value(current.runtime_state[name])
             for name in _RUNTIME_CACHE_NAMES
+            + tuple(capability for capability, _, _ in _CONTROL_PARTICIPANTS)
             if available.get(name, False)
         },
     )
@@ -1772,6 +2252,7 @@ def _verify_recovery_restore(
         env,
         required_capabilities=advertised,
         task_identity=task_identity,
+        fidelity_tier=target.fidelity_tier,
     )
     projected = _project_snapshot_for_verification(current, target)
     actual_digest = recovery_state_digest(projected, task_identity=task_identity)
@@ -1830,6 +2311,7 @@ def restore_recovery_state(
                 env,
                 required_capabilities=None,
                 task_identity=task_identity,
+                fidelity_tier=snapshot.fidelity_tier,
             )
             rollback_digest = recovery_state_digest(
                 rollback_snapshot, task_identity=task_identity
@@ -1880,7 +2362,9 @@ def restore_recovery_state(
                 failure_message=str(target_failure),
                 rollback_succeeded=rollback_failure is None,
                 rollback_failure_type=(
-                    None if rollback_failure is None else type(rollback_failure).__name__
+                    None
+                    if rollback_failure is None
+                    else type(rollback_failure).__name__
                 ),
                 rollback_failure_message=(
                     None if rollback_failure is None else str(rollback_failure)

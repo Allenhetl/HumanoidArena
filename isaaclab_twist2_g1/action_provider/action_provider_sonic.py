@@ -58,6 +58,12 @@ from action_provider.execution_identity import (
 )
 from action_provider.lerobot_vla_http_client import LeRobotVLAHttpClient
 from action_provider.recording_common import AsyncEpisodeRecorder
+from action_provider.recovery_snapshot import (
+    capture_sonic_recovery_state,
+    restore_sonic_recovery_state,
+    sonic_recovery_state_supported,
+    validate_sonic_recovery_state,
+)
 from action_provider.vision_video import write_rgb_video_mp4
 from action_provider.reset_control import (
     GMR_BODY_POS_KEY,
@@ -1806,6 +1812,18 @@ class SonicActionProvider(ActionProvider):
     # ------------------------------------------------------------------
     # Setup
     # ------------------------------------------------------------------
+
+    def capture_recovery_provider_state(self) -> dict[str, Any]:
+        return capture_sonic_recovery_state(self)
+
+    def recovery_provider_state_supported(self) -> bool:
+        return sonic_recovery_state_supported(self)
+
+    def preflight_restore_recovery_provider_state(self, state: Any) -> None:
+        validate_sonic_recovery_state(self, state)
+
+    def restore_recovery_provider_state(self, state: Any) -> None:
+        restore_sonic_recovery_state(self, state)
 
     def _setup_joint_mapping(self):
         all_names = list(self.env.scene["robot"].data.joint_names)

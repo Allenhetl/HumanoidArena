@@ -5,6 +5,8 @@ import importlib.util
 import io
 import random
 import sys
+import types
+from collections import deque
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,6 +32,8 @@ PP_BOX_CFG_PATH = (
     / "move_pickplace_box_g1_29dof_dex3_wholedoby"
     / "move_pickplace_box_g1_29dof_dex3_hw_env_cfg.py"
 )
+SIM_MAIN_PATH = THIS_DIR / "sim_main.py"
+SIM_EVAL_VLA_PATH = THIS_DIR / "script" / "eval_scripts" / "sonic" / "sim_eval_vla.py"
 
 
 def _load_recovery_state_module():
@@ -147,6 +151,10 @@ class _FakeEnv:
         self.num_envs = 1
         self.device = torch.device("cpu")
         self.recovery_process_global_rng_exclusive = True
+        self.cfg = SimpleNamespace(
+            env_name="Isaac-Move-PickPlace-Box-G129-Dex3-Wholedoby",
+            recovery_task_identity="Isaac-Move-PickPlace-Box-G129-Dex3-Wholedoby",
+        )
         self.joint_pos = torch.tensor([[0.1, 0.2]], dtype=torch.float32)
         self.box_root_state = np.arange(13, dtype=np.float32).reshape(1, 13)
         self.episode_length_buf = torch.tensor([7], dtype=torch.int64)
@@ -155,7 +163,7 @@ class _FakeEnv:
         self.episode_count = 3
         self.reset_count = torch.tensor([2], dtype=torch.int64)
         self.recovery_task_state = {
-            "fsm_stage": "grasp",
+            "task_success_enabled": True,
             "debug_score": 5,
             "hands_materialized": torch.tensor([[True, False]]),
         }
@@ -173,9 +181,9 @@ class _FakeEnv:
     def reset_to(
         self,
         state: dict[str, object],
-        env_ids: torch.Tensor | None = None,
+        env_ids: torch.Tensor,
         *,
-        is_relative: bool | None = None,
+        is_relative: bool,
     ) -> None:
         self.api_events.append(
             (
@@ -208,7 +216,11 @@ class _FakeEnv:
     def preflight_restore_recovery_task_state(self, state: dict[str, object]) -> None:
         if self.preflight_failure is not None:
             raise self.preflight_failure
-        assert set(state) == {"fsm_stage", "debug_score", "hands_materialized"}
+        assert set(state) == {
+            "task_success_enabled",
+            "debug_score",
+            "hands_materialized",
+        }
 
     def restore_recovery_task_state(self, state: dict[str, object]) -> None:
         self.restore_events.append("task")
@@ -256,7 +268,7 @@ class _FakeEnv:
         reward = float(observation.sum())
         terminal = (
             "success"
-            if self.recovery_task_state["fsm_stage"] == "grasp"
+            if self.recovery_task_state["task_success_enabled"]
             and bool(hands[0, 0])
             and not bool(self.reset_buf[0])
             else "running"
@@ -274,7 +286,9 @@ class _FakeEnv:
                 "reset_count": self.reset_count.clone(),
             },
             "task_state": {
-                "fsm_stage": self.recovery_task_state["fsm_stage"],
+                "task_success_enabled": self.recovery_task_state[
+                    "task_success_enabled"
+                ],
                 "debug_score": self.recovery_task_state["debug_score"],
                 "hands_materialized": hands.clone(),
             },
@@ -313,6 +327,85 @@ class _BothCacheEnv(_CacheEnv):
         assert set(state) == {"contact_epoch"}
 
 
+class _ControlParticipant:
+    def __init__(self, capability: str, value: int) -> None:
+        self.capability = capability
+        self.value = value
+        self.restore_failures_remaining = 0
+
+    def _capture(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "capability": self.capability,
+            "value": self.value,
+        }
+
+    def _preflight(self, state: dict[str, object]) -> None:
+        if set(state) != {"schema_version", "capability", "value"}:
+            raise ValueError("participant schema mismatch")
+        if state["schema_version"] != 1 or state["capability"] != self.capability:
+            raise ValueError("participant identity mismatch")
+        if type(state["value"]) is not int:
+            raise ValueError("participant value mismatch")
+
+    def _restore(self, state: dict[str, object]) -> None:
+        self.value = int(state["value"])
+        if self.restore_failures_remaining:
+            self.restore_failures_remaining -= 1
+            raise RuntimeError(f"injected {self.capability} restore failure")
+
+
+class _ProviderParticipant(_ControlParticipant):
+    def __init__(self, value: int) -> None:
+        super().__init__("action_provider_state", value)
+
+    def capture_recovery_provider_state(self):
+        return self._capture()
+
+    def preflight_restore_recovery_provider_state(self, state):
+        self._preflight(state)
+
+    def restore_recovery_provider_state(self, state):
+        self._restore(state)
+
+
+class _ControllerParticipant(_ControlParticipant):
+    def __init__(self, provider: _ProviderParticipant, value: int) -> None:
+        super().__init__("controller_state", value)
+        self.action_provider = provider
+
+    def capture_recovery_controller_state(self):
+        return self._capture()
+
+    def preflight_restore_recovery_controller_state(self, state):
+        self._preflight(state)
+
+    def restore_recovery_controller_state(self, state):
+        self._restore(state)
+
+
+class _ActionManagerParticipant(_ControlParticipant):
+    def __init__(self, value: int) -> None:
+        super().__init__("action_manager_state", value)
+
+    def capture_recovery_action_manager_state(self):
+        return self._capture()
+
+    def preflight_restore_recovery_action_manager_state(self, state):
+        self._preflight(state)
+
+    def restore_recovery_action_manager_state(self, state):
+        self._restore(state)
+
+
+class _ExactControlEnv(_BothCacheEnv):
+    def __init__(self) -> None:
+        super().__init__()
+        self.action_provider = _ProviderParticipant(31)
+        self.recovery_controller = _ControllerParticipant(self.action_provider, 32)
+        self.action_manager = _ActionManagerParticipant(33)
+
+
 class _CaptureOnlyTaskStateEnv(_FakeEnv):
     restore_recovery_task_state = None
 
@@ -321,7 +414,7 @@ class _CaptureOnlyTaskStateEnv(_FakeEnv):
         del self.recovery_task_state
 
     def capture_recovery_task_state(self) -> dict[str, str]:
-        return {"fsm_stage": "capture-only"}
+        return {"capture_only_marker": "present"}
 
 
 class _DirectTaskStateEnv(_FakeEnv):
@@ -338,6 +431,11 @@ class _ReadOnlyCounterEnv(_FakeEnv):
     @property
     def common_step_counter(self) -> int:
         return self._common_step_counter
+
+
+class _BadResetSignatureEnv(_FakeEnv):
+    def reset_to(self, state: dict[str, object]) -> None:
+        self.restore_events.append("bad-scene")
 
 
 class _ProductionRobot:
@@ -430,7 +528,12 @@ class _ProductionEnv:
             _group_obs_class_instances=[],
             _obs_buffer=observation,
         )
-        for name in ("command_manager", "curriculum_manager", "event_manager", "recorder_manager"):
+        for name in (
+            "command_manager",
+            "curriculum_manager",
+            "event_manager",
+            "recorder_manager",
+        ):
             setattr(self, name, SimpleNamespace(active_terms=[]))
         self._sim_step_counter = 14
         self.extras = {"log": {"episode": torch.tensor([15.0])}}
@@ -439,6 +542,7 @@ class _ProductionEnv:
         self.reset_time_outs = self.termination_manager._truncated_buf
         self.obs_buf = self.observation_manager._obs_buffer
         self.cfg = SimpleNamespace(
+            env_name=task_identity,
             recovery_task_identity=task_identity,
             _episode_runtime_seed=22,
             _episode_object_seed_counter=23,
@@ -450,7 +554,9 @@ class _ProductionEnv:
         self.wrapper_rng = np.random.default_rng(202)
         self.reset_calls = 0
 
-    def reset_to(self, state, env_ids=None, *, is_relative=False) -> None:
+    def reset_to(self, state, env_ids, *, is_relative) -> None:
+        assert torch.equal(env_ids, torch.tensor([0], device=self.device))
+        assert is_relative is True
         self.reset_calls += 1
         self.joint_pos.copy_(state["robot"]["joint_pos"])
         np.copyto(self.box_root_state, state["box"]["root_state"])
@@ -485,6 +591,33 @@ class _ProductionEnv:
         self.cfg._replay_initial_env_state_active = False
 
 
+class _ProductionExactEnv(_ProductionEnv):
+    def __init__(self, task_identity: str) -> None:
+        super().__init__(task_identity)
+        self.physics_solver_epoch = 4
+        self.contact_epoch = 6
+
+    def capture_physics_solver_cache(self):
+        return {"solver_epoch": self.physics_solver_epoch}
+
+    def preflight_restore_physics_solver_cache(self, state):
+        if set(state) != {"solver_epoch"} or type(state["solver_epoch"]) is not int:
+            raise ValueError("solver cache schema mismatch")
+
+    def restore_physics_solver_cache(self, state):
+        self.physics_solver_epoch = state["solver_epoch"]
+
+    def capture_contact_cache(self):
+        return {"contact_epoch": self.contact_epoch}
+
+    def preflight_restore_contact_cache(self, state):
+        if set(state) != {"contact_epoch"} or type(state["contact_epoch"]) is not int:
+            raise ValueError("contact cache schema mismatch")
+
+    def restore_contact_cache(self, state):
+        self.contact_epoch = state["contact_epoch"]
+
+
 class _DelegatingGymWrapper:
     def __init__(self, unwrapped: _FakeEnv, nested_env: object) -> None:
         self.unwrapped = unwrapped
@@ -503,7 +636,7 @@ class _EnvLink:
 class _AbsoluteScene(_Scene):
     def get_state(self, *, is_relative: bool | None = None) -> dict[str, object]:
         self._env.api_events.append(("get_state", is_relative))
-        offset = 0.0 if is_relative is False else 1000.0
+        offset = 0.0 if is_relative is True else 1000.0
         return {
             "robot": {"joint_pos": self._env.joint_pos + offset},
             "box": {"root_state": self._env.box_root_state + offset},
@@ -529,7 +662,7 @@ def _env_state(env: _FakeEnv) -> dict[str, Any]:
     task_state = getattr(env, "recovery_task_state", None)
     if task_state is not None:
         task_state = {
-            "fsm_stage": task_state["fsm_stage"],
+            "task_success_enabled": task_state["task_success_enabled"],
             "debug_score": task_state["debug_score"],
             "hands_materialized": task_state["hands_materialized"].clone(),
         }
@@ -551,7 +684,9 @@ def _env_state(env: _FakeEnv) -> dict[str, Any]:
 def _assert_env_state_equal(actual: dict[str, Any], expected: dict[str, Any]) -> None:
     torch.testing.assert_close(actual["joint_pos"], expected["joint_pos"])
     np.testing.assert_array_equal(actual["box_root_state"], expected["box_root_state"])
-    torch.testing.assert_close(actual["episode_length_buf"], expected["episode_length_buf"])
+    torch.testing.assert_close(
+        actual["episode_length_buf"], expected["episode_length_buf"]
+    )
     assert actual["common_step_counter"] == expected["common_step_counter"]
     torch.testing.assert_close(actual["reset_buf"], expected["reset_buf"])
     assert actual["episode_count"] == expected["episode_count"]
@@ -559,8 +694,13 @@ def _assert_env_state_equal(actual: dict[str, Any], expected: dict[str, Any]) ->
     if expected["task_state"] is None:
         assert actual["task_state"] is None
     else:
-        assert actual["task_state"]["fsm_stage"] == expected["task_state"]["fsm_stage"]
-        assert actual["task_state"]["debug_score"] == expected["task_state"]["debug_score"]
+        assert (
+            actual["task_state"]["task_success_enabled"]
+            is (expected["task_state"]["task_success_enabled"])
+        )
+        assert (
+            actual["task_state"]["debug_score"] == expected["task_state"]["debug_score"]
+        )
         torch.testing.assert_close(
             actual["task_state"]["hands_materialized"],
             expected["task_state"]["hands_materialized"],
@@ -571,7 +711,9 @@ def _assert_env_state_equal(actual: dict[str, Any], expected: dict[str, Any]) ->
 
 
 def _assert_transition_equal(actual: dict[str, Any], expected: dict[str, Any]) -> None:
-    torch.testing.assert_close(actual["scene"]["joint_pos"], expected["scene"]["joint_pos"])
+    torch.testing.assert_close(
+        actual["scene"]["joint_pos"], expected["scene"]["joint_pos"]
+    )
     np.testing.assert_array_equal(
         actual["scene"]["box_root_state"], expected["scene"]["box_root_state"]
     )
@@ -579,7 +721,10 @@ def _assert_transition_equal(actual: dict[str, Any], expected: dict[str, Any]) -
         torch.testing.assert_close(actual["counters"][name], expected["counters"][name])
     for name in ("common_step_counter", "episode_count"):
         assert actual["counters"][name] == expected["counters"][name]
-    assert actual["task_state"]["fsm_stage"] == expected["task_state"]["fsm_stage"]
+    assert (
+        actual["task_state"]["task_success_enabled"]
+        is (expected["task_state"]["task_success_enabled"])
+    )
     assert actual["task_state"]["debug_score"] == expected["task_state"]["debug_score"]
     torch.testing.assert_close(
         actual["task_state"]["hands_materialized"],
@@ -609,14 +754,17 @@ def _restore_bound(recovery_state, env, snapshot, **kwargs) -> None:
     )
 
 
-def test_capture_and_restore_use_absolute_single_env_isaac_api(recovery_state) -> None:
+def test_capture_and_restore_bind_relative_single_env_isaac_api(recovery_state) -> None:
     env = _FakeEnv()
 
     snapshot = recovery_state.capture_recovery_state(env)
 
+    assert snapshot.scope.num_envs == 1
+    assert snapshot.scope.env_ids == (0,)
+    assert snapshot.scope.is_relative is True
     assert env.api_events == [
-        ("get_state", False),
-        ("get_state", False),
+        ("get_state", True),
+        ("get_state", True),
     ]
     env.api_events.clear()
     _restore_bound(recovery_state, env, snapshot)
@@ -625,19 +773,21 @@ def test_capture_and_restore_use_absolute_single_env_isaac_api(recovery_state) -
     assert len(reset_events) == 1
     reset_event = reset_events[0]
     reset_index = env.api_events.index(reset_event)
-    assert all(event == ("get_state", False) for event in env.api_events[:reset_index])
-    assert all(event == ("get_state", False) for event in env.api_events[reset_index + 1 :])
+    assert all(event == ("get_state", True) for event in env.api_events[:reset_index])
+    assert all(
+        event == ("get_state", True) for event in env.api_events[reset_index + 1 :]
+    )
     torch.testing.assert_close(reset_event[1], torch.tensor([0]))
     assert reset_event[1].dtype == torch.long
     assert reset_event[1].device == env.device
-    assert reset_event[2] is False
+    assert reset_event[2] is True
     assert env.last_reset_state is not snapshot.scene_state
     assert env.last_reset_state["robot"] is not snapshot.scene_state["robot"]
     assert env.last_reset_env_ids is not None
     assert env.last_reset_env_ids.device == env.device
 
 
-def test_absolute_world_capture_restore_is_symmetric(recovery_state) -> None:
+def test_relative_scene_capture_restore_is_symmetric(recovery_state) -> None:
     env = _FakeEnv()
     env.scene = _AbsoluteScene(env)
     expected_joint_pos = env.joint_pos.clone()
@@ -645,7 +795,9 @@ def test_absolute_world_capture_restore_is_symmetric(recovery_state) -> None:
 
     snapshot = recovery_state.capture_recovery_state(env)
 
-    torch.testing.assert_close(snapshot.scene_state["robot"]["joint_pos"], expected_joint_pos)
+    torch.testing.assert_close(
+        snapshot.scene_state["robot"]["joint_pos"], expected_joint_pos
+    )
     np.testing.assert_array_equal(
         snapshot.scene_state["box"]["root_state"],
         expected_box_root_state,
@@ -658,7 +810,57 @@ def test_absolute_world_capture_restore_is_symmetric(recovery_state) -> None:
     np.testing.assert_array_equal(env.box_root_state, expected_box_root_state)
     reset_events = [event for event in env.api_events if event[0] == "reset_to"]
     assert len(reset_events) == 1
-    assert reset_events[0][2] is False
+    assert reset_events[0][2] is True
+
+
+def test_restore_rejects_digest_bound_scope_mismatch_before_environment_access(
+    recovery_state,
+) -> None:
+    env = _FakeEnv()
+    snapshot = recovery_state.capture_recovery_state(env)
+    invalid_scope = replace(snapshot.scope, is_relative=False)
+    invalid = replace(snapshot, scope=invalid_scope)
+    env.api_events.clear()
+    env_before = _env_state(env)
+
+    with pytest.raises(recovery_state.RecoveryStateSchemaError, match="scope"):
+        _restore_bound(recovery_state, env, invalid)
+
+    assert env.api_events == []
+    _assert_env_state_equal(_env_state(env), env_before)
+
+
+def test_restore_rejects_actual_cfg_env_name_before_environment_access(
+    recovery_state,
+) -> None:
+    env = _FakeEnv()
+    snapshot = recovery_state.capture_recovery_state(env)
+    env.cfg.env_name = "Isaac-Another-Task"
+    env.api_events.clear()
+    env_before = _env_state(env)
+
+    with pytest.raises(recovery_state.RecoveryStateSchemaError, match="cfg.env_name"):
+        _restore_bound(recovery_state, env, snapshot)
+
+    assert env.api_events == []
+    _assert_env_state_equal(_env_state(env), env_before)
+
+
+def test_restore_rejects_reset_to_without_explicit_env_ids_before_scene_access(
+    recovery_state,
+) -> None:
+    source = _FakeEnv()
+    snapshot = recovery_state.capture_recovery_state(source)
+    env = _BadResetSignatureEnv()
+    env.api_events.clear()
+    env_before = _env_state(env)
+
+    with pytest.raises(recovery_state.RecoveryStateIncompleteError) as exc_info:
+        _restore_bound(recovery_state, env, snapshot)
+
+    assert "reset_to_signature" in exc_info.value.missing_capabilities
+    assert env.api_events == []
+    _assert_env_state_equal(_env_state(env), env_before)
 
 
 @pytest.mark.parametrize(
@@ -697,7 +899,9 @@ def test_capture_and_restore_fail_closed_without_valid_single_env_selection(
     assert env.restore_events == []
 
 
-def test_unwrapped_np_random_is_bound_before_nested_or_forwarded_rng(recovery_state) -> None:
+def test_unwrapped_np_random_is_bound_before_nested_or_forwarded_rng(
+    recovery_state,
+) -> None:
     runtime = _FakeEnv()
     runtime.np_random = np.random.default_rng(303)
     nested = _EnvLink()
@@ -745,9 +949,9 @@ def test_snapshot_schema_is_versioned_and_task_bound(recovery_state) -> None:
 
     snapshot = recovery_state.capture_recovery_state(env)
 
-    assert snapshot.schema_version == recovery_state.RECOVERY_STATE_SCHEMA_VERSION == 2
+    assert snapshot.schema_version == recovery_state.RECOVERY_STATE_SCHEMA_VERSION == 3
     assert snapshot.task_identity == recovery_state.PP_BOX_TASK_IDENTITY
-    assert snapshot.capabilities.schema_version == 2
+    assert snapshot.capabilities.schema_version == 3
 
 
 def test_capability_mapping_is_structurally_immutable(recovery_state) -> None:
@@ -757,7 +961,9 @@ def test_capability_mapping_is_structurally_immutable(recovery_state) -> None:
         snapshot.capabilities.available["scene_state"] = False
 
 
-def test_restore_rejects_unknown_capability_schema_before_mutation(recovery_state) -> None:
+def test_restore_rejects_unknown_capability_schema_before_mutation(
+    recovery_state,
+) -> None:
     env = _FakeEnv()
     snapshot = recovery_state.capture_recovery_state(env)
     incompatible = replace(
@@ -767,7 +973,9 @@ def test_restore_rejects_unknown_capability_schema_before_mutation(recovery_stat
     env_before = _env_state(env)
     rng_before = _global_rng_state()
 
-    with pytest.raises(recovery_state.RecoveryStateSchemaError, match="capability schema"):
+    with pytest.raises(
+        recovery_state.RecoveryStateSchemaError, match="capability schema"
+    ):
         recovery_state.restore_recovery_state(
             env,
             incompatible,
@@ -815,7 +1023,9 @@ def test_global_python_numpy_and_torch_rng_roundtrip(recovery_state) -> None:
     torch.testing.assert_close(actual[2], expected[2])
 
 
-def test_required_unavailable_capabilities_fail_with_typed_diagnostics(recovery_state) -> None:
+def test_required_unavailable_capabilities_fail_with_typed_diagnostics(
+    recovery_state,
+) -> None:
     env = _FakeEnv()
 
     with pytest.raises(recovery_state.RecoveryStateIncompleteError) as exc_info:
@@ -864,7 +1074,7 @@ def test_direct_task_state_attribute_uses_symmetric_direct_mode(recovery_state) 
     env = _DirectTaskStateEnv()
     snapshot = recovery_state.capture_recovery_state(env)
     env.recovery_task_state = {
-        "fsm_stage": "corrupted",
+        "task_success_enabled": False,
         "debug_score": -1,
         "hands_materialized": torch.tensor([[False, False]]),
     }
@@ -872,7 +1082,7 @@ def test_direct_task_state_attribute_uses_symmetric_direct_mode(recovery_state) 
     _restore_bound(recovery_state, env, snapshot)
 
     assert snapshot.capabilities.task_state_mode == "direct"
-    assert env.recovery_task_state["fsm_stage"] == "grasp"
+    assert env.recovery_task_state["task_success_enabled"] is True
     assert env.recovery_task_state["debug_score"] == 5
     torch.testing.assert_close(
         env.recovery_task_state["hands_materialized"],
@@ -880,14 +1090,16 @@ def test_direct_task_state_attribute_uses_symmetric_direct_mode(recovery_state) 
     )
 
 
-def test_snapshot_without_task_state_can_restore_into_richer_runtime(recovery_state) -> None:
+def test_snapshot_without_task_state_can_restore_into_richer_runtime(
+    recovery_state,
+) -> None:
     snapshot = recovery_state.capture_recovery_state(_CaptureOnlyTaskStateEnv())
     target = _FakeEnv()
 
     _restore_bound(recovery_state, target, snapshot)
 
     assert target.restore_events == ["scene"]
-    assert target.recovery_task_state["fsm_stage"] == "grasp"
+    assert target.recovery_task_state["task_success_enabled"] is True
 
 
 @pytest.mark.parametrize(
@@ -1038,7 +1250,9 @@ def test_missing_rng_record_reports_every_advertised_rng_before_mutation(
     _assert_global_rng_state_equal(_global_rng_state(), rng_before)
 
 
-def test_restore_rejects_missing_required_cache_payload_before_reset(recovery_state) -> None:
+def test_restore_rejects_missing_required_cache_payload_before_reset(
+    recovery_state,
+) -> None:
     env = _CacheEnv()
     snapshot = recovery_state.capture_recovery_state(
         env,
@@ -1086,7 +1300,9 @@ def test_restore_rejects_non_mapping_runtime_cache_state_before_any_mutation(
     _assert_global_rng_state_equal(_global_rng_state(), rng_before)
 
 
-def test_capture_records_scene_task_counters_and_optional_task_state(recovery_state) -> None:
+def test_capture_records_scene_task_counters_and_optional_task_state(
+    recovery_state,
+) -> None:
     env = _FakeEnv()
 
     snapshot = recovery_state.capture_recovery_state(env)
@@ -1107,14 +1323,127 @@ def test_capture_records_scene_task_counters_and_optional_task_state(recovery_st
         "episode_count",
         "reset_count",
     )
-    torch.testing.assert_close(snapshot.task_counters["episode_length_buf"], torch.tensor([7]))
-    torch.testing.assert_close(snapshot.task_counters["reset_buf"], torch.tensor([False]))
+    torch.testing.assert_close(
+        snapshot.task_counters["episode_length_buf"], torch.tensor([7])
+    )
+    torch.testing.assert_close(
+        snapshot.task_counters["reset_buf"], torch.tensor([False])
+    )
     assert snapshot.task_counters["common_step_counter"] == 11
     assert snapshot.task_counters["episode_count"] == 3
     torch.testing.assert_close(snapshot.task_counters["reset_count"], torch.tensor([2]))
 
 
-def test_restore_uses_scene_reset_then_counters_task_state_and_rng(recovery_state) -> None:
+def test_exact_continuation_fails_closed_without_control_and_cache_participants(
+    recovery_state,
+) -> None:
+    env = _FakeEnv()
+
+    with pytest.raises(recovery_state.RecoveryStateIncompleteError) as exc_info:
+        recovery_state.capture_recovery_state(
+            env,
+            fidelity_tier="exact_continuation",
+        )
+
+    assert set(exc_info.value.missing_capabilities) >= {
+        "action_manager_state",
+        "action_provider_state",
+        "controller_state",
+        "physics_solver_cache",
+        "contact_cache",
+    }
+
+
+def test_exact_continuation_snapshot_binds_all_control_participants(
+    recovery_state,
+) -> None:
+    env = _ExactControlEnv()
+
+    snapshot = recovery_state.capture_recovery_state(
+        env,
+        fidelity_tier="exact_continuation",
+    )
+
+    assert snapshot.fidelity_tier == "exact_continuation"
+    assert set(snapshot.runtime_state) >= {
+        "action_manager_state",
+        "action_provider_state",
+        "controller_state",
+        "physics_solver_cache",
+        "contact_cache",
+    }
+    env.action_provider.value = 41
+    env.recovery_controller.value = 42
+    env.action_manager.value = 43
+    _restore_bound(recovery_state, env, snapshot)
+    assert env.action_provider.value == 31
+    assert env.recovery_controller.value == 32
+    assert env.action_manager.value == 33
+
+
+@pytest.mark.parametrize("participant_name", ["action_provider", "recovery_controller"])
+def test_late_control_participant_failure_rolls_back_all_control_state(
+    recovery_state,
+    participant_name: str,
+) -> None:
+    env = _ExactControlEnv()
+    target = recovery_state.capture_recovery_state(
+        env,
+        fidelity_tier="exact_continuation",
+    )
+    env.deterministic_step()
+    env.action_provider.value = 41
+    env.recovery_controller.value = 42
+    env.action_manager.value = 43
+    rollback_values = (41, 42, 43)
+    rollback = recovery_state.capture_recovery_state(
+        env,
+        fidelity_tier="exact_continuation",
+    )
+    rollback_digest = recovery_state.recovery_state_digest(rollback)
+    getattr(env, participant_name).restore_failures_remaining = 1
+
+    with pytest.raises(recovery_state.RecoveryStateTransactionError) as exc_info:
+        _restore_bound(recovery_state, env, target)
+
+    assert exc_info.value.evidence.rollback_succeeded is True
+    assert (
+        env.action_provider.value,
+        env.recovery_controller.value,
+        env.action_manager.value,
+    ) == rollback_values
+    restored = recovery_state.capture_recovery_state(
+        env,
+        fidelity_tier="exact_continuation",
+    )
+    assert recovery_state.recovery_state_digest(restored) == rollback_digest
+
+
+def test_control_participant_rollback_failure_preserves_both_errors(
+    recovery_state,
+) -> None:
+    env = _ExactControlEnv()
+    target = recovery_state.capture_recovery_state(
+        env,
+        fidelity_tier="exact_continuation",
+    )
+    env.action_provider.value = 41
+    env.action_provider.restore_failures_remaining = 2
+
+    with pytest.raises(recovery_state.RecoveryStateTransactionError) as exc_info:
+        _restore_bound(recovery_state, env, target)
+
+    evidence = exc_info.value.evidence
+    assert evidence.failure_type == "RuntimeError"
+    assert "action_provider_state" in evidence.failure_message
+    assert evidence.rollback_succeeded is False
+    assert evidence.rollback_failure_type == "RuntimeError"
+    assert "action_provider_state" in evidence.rollback_failure_message
+
+
+def test_restore_uses_scene_reset_then_counters_task_state_and_rng(
+    recovery_state,
+) -> None:
     env = _FakeEnv()
     snapshot = recovery_state.capture_recovery_state(env)
     env.episode_length_buf.fill_(99)
@@ -1122,7 +1451,7 @@ def test_restore_uses_scene_reset_then_counters_task_state_and_rng(recovery_stat
     env.reset_buf.fill_(True)
     env.episode_count = 99
     env.reset_count.fill_(99)
-    env.recovery_task_state = {"fsm_stage": "corrupted"}
+    env.recovery_task_state = {"task_success_enabled": False}
 
     _restore_bound(recovery_state, env, snapshot)
 
@@ -1132,7 +1461,7 @@ def test_restore_uses_scene_reset_then_counters_task_state_and_rng(recovery_stat
     torch.testing.assert_close(env.reset_buf, torch.tensor([False]))
     assert env.episode_count == 3
     torch.testing.assert_close(env.reset_count, torch.tensor([2]))
-    assert env.recovery_task_state["fsm_stage"] == "grasp"
+    assert env.recovery_task_state["task_success_enabled"] is True
 
 
 def test_restore_rejects_snapshot_from_unknown_schema(recovery_state) -> None:
@@ -1141,6 +1470,8 @@ def test_restore_rejects_snapshot_from_unknown_schema(recovery_state) -> None:
     incompatible = recovery_state.RecoveryStateSnapshot(
         schema_version=999,
         task_identity=snapshot.task_identity,
+        scope=snapshot.scope,
+        fidelity_tier=snapshot.fidelity_tier,
         capabilities=snapshot.capabilities,
         scene_state=snapshot.scene_state,
         task_counters=snapshot.task_counters,
@@ -1173,7 +1504,7 @@ def test_restore_replays_the_same_next_observable_step(recovery_state) -> None:
     env.episode_count = 92
     env.reset_count.fill_(93)
     env.recovery_task_state = {
-        "fsm_stage": "corrupted",
+        "task_success_enabled": False,
         "debug_score": -94,
         "hands_materialized": torch.tensor([[False, False]]),
     }
@@ -1191,7 +1522,9 @@ def test_restore_requires_caller_bound_snapshot_digest(recovery_state) -> None:
         recovery_state.restore_recovery_state(env, snapshot)
 
 
-def test_restore_rejects_digest_mismatch_before_environment_access(recovery_state) -> None:
+def test_restore_rejects_digest_mismatch_before_environment_access(
+    recovery_state,
+) -> None:
     env = _FakeEnv()
     snapshot = recovery_state.capture_recovery_state(env)
     env.api_events.clear()
@@ -1227,7 +1560,7 @@ def test_task_state_preflight_failure_happens_before_reset_or_rollback_capture(
             snapshot_digest=recovery_state.recovery_state_digest(snapshot),
         )
 
-    assert env.api_events == [("get_state", False)]
+    assert env.api_events == [("get_state", True)]
     assert env.restore_events == []
     _assert_env_state_equal(_env_state(env), env_before)
     _assert_global_rng_state_equal(_global_rng_state(), rng_before)
@@ -1244,7 +1577,7 @@ def test_read_only_task_counter_is_rejected_before_reset(recovery_state) -> None
         _restore_bound(recovery_state, env, snapshot)
 
     assert "task_counter:common_step_counter" in exc_info.value.missing_capabilities
-    assert env.api_events == [("get_state", False)]
+    assert env.api_events == [("get_state", True)]
     assert env.restore_events == []
     _assert_env_state_equal(_env_state(env), env_before)
     _assert_global_rng_state_equal(_global_rng_state(), rng_before)
@@ -1351,8 +1684,15 @@ def test_pp_box_production_hooks_restore_every_reset_to_mutated_buffer(
     recovery_state.install_pp_box_recovery_task_state_hooks(env)
     snapshot = recovery_state.capture_recovery_state(
         env,
-        required_capabilities={"task_state", "process_global_rng_exclusive"},
+        required_capabilities={
+            "task_state",
+            "process_global_rng_exclusive",
+            "action_manager_state",
+        },
     )
+
+    assert snapshot.capabilities.available["action_manager_state"] is True
+    assert "action_manager_state" in snapshot.runtime_state
 
     recovery_state.restore_recovery_state(
         env,
@@ -1362,7 +1702,9 @@ def test_pp_box_production_hooks_restore_every_reset_to_mutated_buffer(
 
     assert env.reset_calls == 1
     torch.testing.assert_close(env.action_manager._action, torch.tensor([[1.0, 2.0]]))
-    torch.testing.assert_close(env.action_manager._prev_action, torch.tensor([[3.0, 4.0]]))
+    torch.testing.assert_close(
+        env.action_manager._prev_action, torch.tensor([[3.0, 4.0]])
+    )
     term = env.action_manager._terms["joint_pos"]
     torch.testing.assert_close(term._raw_actions, torch.tensor([[5.0, 6.0]]))
     torch.testing.assert_close(term._processed_actions, torch.tensor([[7.0, 8.0]]))
@@ -1371,8 +1713,12 @@ def test_pp_box_production_hooks_restore_every_reset_to_mutated_buffer(
     )
     torch.testing.assert_close(env.reward_manager._reward_buf, torch.tensor([10.0]))
     torch.testing.assert_close(env.reward_manager._step_reward, torch.tensor([[11.0]]))
-    torch.testing.assert_close(env.termination_manager._truncated_buf, torch.tensor([False]))
-    torch.testing.assert_close(env.termination_manager._terminated_buf, torch.tensor([True]))
+    torch.testing.assert_close(
+        env.termination_manager._truncated_buf, torch.tensor([False])
+    )
+    torch.testing.assert_close(
+        env.termination_manager._terminated_buf, torch.tensor([True])
+    )
     torch.testing.assert_close(
         env.observation_manager._obs_buffer["policy"]["robot_joint_state"],
         torch.tensor([[12.0, 13.0]]),
@@ -1400,6 +1746,50 @@ def test_pp_box_production_hooks_restore_every_reset_to_mutated_buffer(
     assert env.cfg._current_episode_object_seed == 24
     assert env.cfg._current_episode_object_seed_source == "env_seed"
     assert env.cfg._replay_initial_env_state_active is True
+
+
+def test_pp_box_hook_install_preflights_all_participants_before_binding(
+    recovery_state,
+) -> None:
+    env = _ProductionEnv(recovery_state.PP_BOX_TASK_IDENTITY)
+    env.action_manager.capture_recovery_action_manager_state = dict
+
+    with pytest.raises(
+        recovery_state.RecoveryStateIncompleteError,
+        match="conflicting_hook:action_manager",
+    ):
+        recovery_state.install_pp_box_recovery_task_state_hooks(env)
+
+    assert not hasattr(env, "capture_recovery_task_state")
+    assert not hasattr(env, "preflight_restore_recovery_task_state")
+    assert not hasattr(env, "restore_recovery_task_state")
+    assert not hasattr(env, "_pp_box_recovery_task_state_hooks_version")
+
+
+def test_pp_box_installs_bound_recovery_state_coordinator(recovery_state) -> None:
+    env = _ProductionEnv(recovery_state.PP_BOX_TASK_IDENTITY)
+    recovery_state.install_pp_box_recovery_task_state_hooks(env)
+    coordinator = env.recovery_state_coordinator
+
+    assert type(coordinator) is recovery_state.RecoveryStateCoordinator
+    assert coordinator.binding_identity == {
+        "schema_version": 1,
+        "coordinator_type": ("pp_box_recovery_state.RecoveryStateCoordinator"),
+        "task_identity": recovery_state.PP_BOX_TASK_IDENTITY,
+    }
+    snapshot = coordinator.capture(fidelity_tier="state_only")
+    snapshot_digest = coordinator.digest(snapshot)
+    coordinator.preflight(snapshot, snapshot_digest=snapshot_digest)
+    env.joint_pos.fill_(-5.0)
+    coordinator.restore(snapshot, snapshot_digest=snapshot_digest)
+    torch.testing.assert_close(env.joint_pos, torch.tensor([[0.1, 0.2]]))
+
+    env.recovery_state_coordinator = object()
+    with pytest.raises(
+        recovery_state.RecoveryStateSchemaError,
+        match="coordinator binding",
+    ):
+        coordinator.capture(fidelity_tier="state_only")
 
 
 def test_pp_box_production_hook_accepts_rlinf_observation_contract(
@@ -1453,7 +1843,7 @@ def test_pp_box_production_hook_rejects_unknown_observation_extension(
 def test_pp_box_production_hook_rejects_wrong_task_identity(recovery_state) -> None:
     env = _ProductionEnv("Isaac-Another-Task")
 
-    with pytest.raises(recovery_state.RecoveryStateSchemaError, match="task identity"):
+    with pytest.raises(recovery_state.RecoveryStateSchemaError, match="cfg.env_name"):
         recovery_state.install_pp_box_recovery_task_state_hooks(env)
 
 
@@ -1469,7 +1859,10 @@ def test_pp_box_cfg_wires_task_identity_and_production_state_hooks() -> None:
         node
         for node in cfg_class.body
         if isinstance(node, ast.Assign)
-        and any(isinstance(target, ast.Name) and target.id == "recovery_task_identity" for target in node.targets)
+        and any(
+            isinstance(target, ast.Name) and target.id == "recovery_task_identity"
+            for target in node.targets
+        )
     )
     assert isinstance(identity_assignment.value, ast.Attribute)
     assert identity_assignment.value.attr == "PP_BOX_TASK_IDENTITY"
@@ -1487,3 +1880,341 @@ def test_pp_box_cfg_wires_task_identity_and_production_state_hooks() -> None:
         and call.args[0].id == "env"
         for call in calls
     )
+
+
+def _real_sonic_provider_for_recovery_test():
+    sys.modules.setdefault("cv2", types.ModuleType("cv2"))
+    from action_provider.action_provider_sonic import SonicActionProvider
+
+    provider = object.__new__(SonicActionProvider)
+    provider._use_lerobot_vla = True
+    provider.name = "SonicActionProvider"
+    provider._use_vla_latent64 = False
+    provider._vla_action_format = "semantic_v3"
+    provider._replay_enabled = False
+    provider._sonic_output_delay_steps = 0
+    provider._lerobot_action_chunk_queue = deque(
+        [
+            np.linspace(0.0, 0.39, 40, dtype=np.float32),
+            np.linspace(1.0, 1.39, 40, dtype=np.float32),
+        ]
+    )
+    array_shapes = {
+        "_smpl_joints_buf": (10, 24, 3),
+        "_smpl_pose_buf": (10, 21, 3),
+        "_body_rot6d_buf": (10, 6),
+        "_ref_smpl_joints_window": (10, 24, 3),
+        "_ref_body_quat_window": (10, 4),
+        "_ref_joint_pos_window": (10, 29),
+        "_robot_joint_pos_hist": (10, 29),
+        "_robot_joint_vel_hist": (10, 29),
+        "_motion_joint_pos_hist": (50, 29),
+        "_motion_joint_vel_hist": (50, 29),
+        "_motion_root_z_hist": (50,),
+        "_motion_anchor_rot6d_hist": (50, 6),
+        "_ang_vel_hist": (10, 3),
+        "_grav_dir_hist": (10, 3),
+        "_last_action_hist": (10, 29),
+        "_left_hand_target": (7,),
+        "_right_hand_target": (7,),
+        "_vr_3pt_position": (9,),
+        "_vr_3pt_orientation": (12,),
+        "_anchor_init_base_quat_wxyz": (4,),
+        "_anchor_init_ref_quat_wxyz": (4,),
+        "_anchor_heading_align_quat_wxyz": (4,),
+        "_tracking_target_buffer": (29,),
+        "_latest_canonical_action_raw": (40,),
+        "_latest_canonical_action": (40,),
+        "_sonic_last_executed_target": (29,),
+        "_latest_executed_canonical_action_raw": (40,),
+        "_latest_executed_canonical_action": (40,),
+        "_latest_encoder_input": (1762,),
+        "_latest_smpl_joint_window": (10, 24, 3),
+        "_latest_anchor_window": (10, 6),
+        "_latest_wrist_window": (10, 6),
+        "_latest_decoder_obs": (994,),
+        "_latest_decoder_raw_action": (29,),
+        "_latest_decoder_target": (29,),
+        "_latest_decoder_body_effort": (29,),
+        "_latest_aligned_body_quat_wxyz": (4,),
+        "_latest_consumed_anchor_rot6d": (6,),
+    }
+    for index, (name, shape) in enumerate(array_shapes.items(), start=1):
+        setattr(provider, name, np.full(shape, index / 100.0, dtype=np.float32))
+    provider._vla_initial_robot_quat_wxyz = np.array(
+        [1.0, 0.0, 0.0, 0.0], dtype=np.float32
+    )
+    provider._vla_prev_root_rot6d_action = np.arange(6, dtype=np.float32)
+    provider._latest_vla_action = np.arange(40, dtype=np.float32)
+    provider._ref_window_valid = True
+    provider._left_hand_binary_state = False
+    provider._right_hand_binary_state = True
+    provider._vla_semantic_history_fill = 7
+    provider._smpl_data_valid = True
+    provider._frame_count = 18
+    provider._smpl_history_fill = 10
+    provider._anchor_heading_initialized = True
+    provider._anchor_use_heading_align = True
+    provider._stream_ref_frames = {17: {"joint_pos": np.ones((29,), dtype=np.float32)}}
+    provider._stream_ref_indices = [17]
+    provider._stream_playback_frame_idx = 17
+    provider._stream_window_start = 17
+    provider._stream_current_frame = 0
+    provider._stream_frame_step = 1
+    provider._latest_frame_index = 23
+    provider._latest_timestamp_realtime = 1.25
+    provider._latest_timestamp_monotonic = 2.5
+    provider._latest_heading_increment = 0.125
+    provider._latest_consumed_new_this_step = True
+    provider._effort_mode_runtime_configured = False
+    provider._position_mode_runtime_configured = True
+    provider._latest_consumed_control_step = 24
+    provider._raw_input_frame_index = 23
+    provider._last_raw_frame_index = 23
+    provider._raw_input_timestamp_realtime = 1.25
+    provider._raw_input_timestamp_monotonic = 2.5
+    provider._raw_pose_payload = {"joint_pos": np.arange(29, dtype=np.float32)}
+    provider._latest_pose_payload = {"joint_pos": np.arange(29, dtype=np.float32)}
+    provider._latest_human_smplx_frame = None
+    provider._latent = np.arange(64, dtype=np.float32).reshape(1, 64)
+    provider._sonic_output_delay_queue = []
+    provider._sonic_last_executed_bundle = {
+        "body_action_29dof": np.arange(29, dtype=np.float32),
+        "canonical_action_raw": np.arange(40, dtype=np.float32),
+        "canonical_action_aligned": np.arange(40, dtype=np.float32),
+        "source_frame_index": 23,
+        "source_timestamp_realtime": 1.25,
+        "source_timestamp_monotonic": 2.5,
+        "source_control_step": 24,
+    }
+    provider._latest_executed_source_frame_index = 23
+    provider._latest_executed_source_timestamp_realtime = 1.25
+    provider._latest_executed_source_timestamp_monotonic = 2.5
+    provider._latest_executed_source_control_step = 24
+    provider._lerobot_vla_runtime = SimpleNamespace(
+        _body_xy_world=np.array([0.1, 0.2], dtype=np.float32),
+        _body_z_world=0.8,
+        _prev_target_root_quat_wxyz=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        _episode_ref_to_world_heading_quat_wxyz=np.array(
+            [1.0, 0.0, 0.0, 0.0], dtype=np.float32
+        ),
+        _prev_root_quat_wxyz=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        _prev_action_rel_quat_wxyz=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        _prev_joint_pos_canonical_29=np.arange(29, dtype=np.float32),
+        _last_selected_root_rot6d_layout="row",
+    )
+    return provider
+
+
+def test_real_sonic_provider_recovery_hooks_roundtrip_queue_history_and_execution() -> (
+    None
+):
+    provider = _real_sonic_provider_for_recovery_test()
+
+    snapshot = provider.capture_recovery_provider_state()
+    expected_first_row = snapshot["committed_action_queue"][0].copy()
+    expected_hist = snapshot["fields"]["_last_action_hist"].copy()
+    expected_runtime_xy = snapshot["vla_runtime"]["_body_xy_world"].copy()
+
+    provider._lerobot_action_chunk_queue.popleft()
+    provider._last_action_hist.fill(-9.0)
+    provider._stream_playback_frame_idx = 99
+    provider._sonic_last_executed_target.fill(-8.0)
+    provider._latest_executed_source_control_step = 99
+    provider._lerobot_vla_runtime._body_xy_world.fill(-7.0)
+    provider.restore_recovery_provider_state(snapshot)
+
+    assert len(provider._lerobot_action_chunk_queue) == 2
+    np.testing.assert_array_equal(
+        provider._lerobot_action_chunk_queue[0], expected_first_row
+    )
+    np.testing.assert_array_equal(provider._last_action_hist, expected_hist)
+    assert provider._stream_playback_frame_idx == 17
+    np.testing.assert_array_equal(
+        provider._sonic_last_executed_target,
+        snapshot["fields"]["_sonic_last_executed_target"],
+    )
+    assert provider._latest_executed_source_control_step == 24
+    np.testing.assert_array_equal(
+        provider._lerobot_vla_runtime._body_xy_world, expected_runtime_xy
+    )
+
+
+def test_real_sonic_provider_recovery_preflight_rejects_bad_committed_row() -> None:
+    provider = _real_sonic_provider_for_recovery_test()
+    snapshot = provider.capture_recovery_provider_state()
+    snapshot["committed_action_queue"] = (np.zeros((39,), dtype=np.float32),)
+
+    with pytest.raises(ValueError, match="committed_action_queue"):
+        provider.preflight_restore_recovery_provider_state(snapshot)
+
+
+def test_real_sonic_provider_capture_rejects_non_float32_live_committed_row() -> None:
+    provider = _real_sonic_provider_for_recovery_test()
+    provider._lerobot_action_chunk_queue[0] = np.zeros((40,), dtype=np.float64)
+
+    with pytest.raises(ValueError, match="committed_action_queue"):
+        provider.capture_recovery_provider_state()
+
+
+def test_real_robot_controller_recovery_hooks_roundtrip_and_require_env_aliases() -> (
+    None
+):
+    from layeredcontrol.robot_control_system import ControlConfig, RobotController
+
+    provider = _real_sonic_provider_for_recovery_test()
+    controller = object.__new__(RobotController)
+    controller.config = ControlConfig(
+        step_hz=50,
+        replay_mode=False,
+        use_rl_action_mode=True,
+    )
+    controller._last_action = torch.arange(43, dtype=torch.float32)
+    controller.step_count = 77
+    controller.action_provider = None
+    controller.env = SimpleNamespace()
+    controller.set_action_provider(provider)
+
+    assert controller.env.action_provider is provider
+    assert controller.env.recovery_controller is controller
+
+    snapshot = controller.capture_recovery_controller_state()
+    controller._last_action.fill_(-1.0)
+    controller.step_count = 99
+    controller.restore_recovery_controller_state(snapshot)
+
+    torch.testing.assert_close(
+        controller._last_action, torch.arange(43, dtype=torch.float32)
+    )
+    assert controller.step_count == 77
+    controller.env.action_provider = object()
+    with pytest.raises(ValueError, match="env.action_provider"):
+        controller.preflight_restore_recovery_controller_state(snapshot)
+
+
+@pytest.mark.parametrize("launcher_path", [SIM_MAIN_PATH, SIM_EVAL_VLA_PATH])
+def test_production_launchers_attach_provider_and_controller_to_environment(
+    launcher_path: Path,
+) -> None:
+    tree = ast.parse(launcher_path.read_text(encoding="utf-8"))
+    main = next(
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "main"
+    )
+    calls = [node for node in ast.walk(main) if isinstance(node, ast.Call)]
+    assert any(
+        isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "controller"
+        and call.func.attr == "set_action_provider"
+        for call in calls
+    )
+    assignments = [node for node in ast.walk(main) if isinstance(node, ast.Assign)]
+    assert any(
+        any(
+            isinstance(target, ast.Attribute)
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "env"
+            and target.attr == "action_provider"
+            for target in assignment.targets
+        )
+        and isinstance(assignment.value, ast.Attribute)
+        and isinstance(assignment.value.value, ast.Name)
+        and assignment.value.value.id == "controller"
+        and assignment.value.attr == "action_provider"
+        for assignment in assignments
+    )
+    assert any(
+        any(
+            isinstance(target, ast.Attribute)
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "env"
+            and target.attr == "recovery_controller"
+            for target in assignment.targets
+        )
+        and isinstance(assignment.value, ast.Name)
+        and assignment.value.id == "controller"
+        for assignment in assignments
+    )
+
+
+def test_production_shaped_exact_snapshot_roundtrips_real_sonic_and_controller() -> (
+    None
+):
+    recovery_state = _load_recovery_state_module()
+    from layeredcontrol.robot_control_system import ControlConfig, RobotController
+
+    env = _ProductionExactEnv(recovery_state.PP_BOX_TASK_IDENTITY)
+    recovery_state.install_pp_box_recovery_task_state_hooks(env)
+    provider = _real_sonic_provider_for_recovery_test()
+    controller = object.__new__(RobotController)
+    controller.config = ControlConfig(
+        step_hz=50,
+        replay_mode=False,
+        use_rl_action_mode=True,
+    )
+    controller._last_action = torch.arange(43, dtype=torch.float32)
+    controller.step_count = 77
+    controller.action_provider = None
+    controller.env = env
+    controller.set_action_provider(provider)
+
+    snapshot = recovery_state.capture_recovery_state(
+        env,
+        fidelity_tier="exact_continuation",
+    )
+    expected_digest = recovery_state.recovery_state_digest(snapshot)
+    env.joint_pos.fill_(-2.0)
+    env.action_manager._action.fill_(-3.0)
+    provider._lerobot_action_chunk_queue.popleft()
+    provider._last_action_hist.fill(-4.0)
+    controller._last_action.fill_(-5.0)
+    controller.step_count = 99
+    env.physics_solver_epoch = 40
+    env.contact_epoch = 60
+
+    recovery_state.restore_recovery_state(
+        env,
+        snapshot,
+        snapshot_digest=expected_digest,
+    )
+
+    restored = recovery_state.capture_recovery_state(
+        env,
+        fidelity_tier="exact_continuation",
+    )
+    assert recovery_state.recovery_state_digest(restored) == expected_digest
+    assert len(provider._lerobot_action_chunk_queue) == 2
+    torch.testing.assert_close(
+        controller._last_action, torch.arange(43, dtype=torch.float32)
+    )
+    assert controller.step_count == 77
+
+
+def test_exact_snapshot_reports_empty_committed_sonic_queue_as_typed_unsupported() -> (
+    None
+):
+    recovery_state = _load_recovery_state_module()
+    from layeredcontrol.robot_control_system import ControlConfig, RobotController
+
+    env = _ProductionExactEnv(recovery_state.PP_BOX_TASK_IDENTITY)
+    recovery_state.install_pp_box_recovery_task_state_hooks(env)
+    provider = _real_sonic_provider_for_recovery_test()
+    provider._lerobot_action_chunk_queue.clear()
+    controller = object.__new__(RobotController)
+    controller.config = ControlConfig(use_rl_action_mode=True)
+    controller._last_action = torch.zeros(43)
+    controller.step_count = 0
+    controller.action_provider = None
+    controller.env = env
+    controller.set_action_provider(provider)
+
+    with pytest.raises(recovery_state.RecoveryStateIncompleteError) as exc_info:
+        recovery_state.capture_recovery_state(
+            env,
+            fidelity_tier="exact_continuation",
+        )
+
+    assert "action_provider_state" in exc_info.value.missing_capabilities
