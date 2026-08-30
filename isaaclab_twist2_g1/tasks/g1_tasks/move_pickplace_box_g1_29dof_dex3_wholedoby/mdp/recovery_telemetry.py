@@ -13,11 +13,13 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass, replace
+from dataclasses import field as dataclass_field
 from typing import Any, Literal
 
 import torch
 
 RECOVERY_TELEMETRY_SCHEMA_VERSION = 1
+LIVE_FALL_EVIDENCE_SCHEMA_VERSION = 1
 RUNTIME_CONTACT_MAPPING_PROOF_SCHEMA_VERSION = 1
 RUNTIME_CONTACT_SENSOR_REPORT_SCHEMA_VERSION = 2
 PP_BOX_TASK_IDENTITY = "Isaac-Move-PickPlace-Box-G129-Dex3-Wholedoby"
@@ -55,6 +57,7 @@ _FALL_CRITICAL_BODY_TOKENS = (
 _FALL_SUPPORTED_BODY_TOKENS = ("ankle", "foot")
 
 TerminalReason = Literal["success", "fall", "time_limit", "running"]
+_LIVE_FALL_PRODUCER_TOKEN = object()
 
 
 class RecoveryTelemetryIncompleteError(RuntimeError):
@@ -156,6 +159,59 @@ class DriverTerminalContext:
             raise ValueError("driver time-limit flag contradicts its counters")
         if self.fall_confirmed != (self.fall_streak >= self.fall_confirm_steps):
             raise ValueError("driver fall flag contradicts its streak")
+
+
+@dataclass(frozen=True)
+class LiveFallLaneEvidence:
+    """One primitive step of root/contact fall truth for one environment lane."""
+
+    env_index: int
+    control_step_count: int
+    root_quat_wxyz: tuple[float, float, float, float]
+    root_up_alignment: float
+    critical_body_contact: bool | None
+    fall_candidate: bool
+
+    def __post_init__(self) -> None:
+        if type(self.env_index) is not int or self.env_index < 0:
+            raise ValueError("live fall env index must be a non-negative integer")
+        if type(self.control_step_count) is not int or self.control_step_count < 0:
+            raise ValueError("live fall control step must be a non-negative integer")
+        quaternion = _as_float_tuple(
+            self.root_quat_wxyz,
+            4,
+            name="live fall root quaternion",
+        )
+        alignment = float(self.root_up_alignment)
+        expected_alignment = compute_root_up_alignment(quaternion)
+        if not math.isclose(alignment, expected_alignment, rel_tol=0.0, abs_tol=1e-12):
+            raise ValueError("live fall root alignment contradicts its quaternion")
+        if self.critical_body_contact is not None and type(
+            self.critical_body_contact
+        ) is not bool:
+            raise ValueError("live fall critical body contact must be boolean or None")
+        if type(self.fall_candidate) is not bool:
+            raise ValueError("live fall candidate must be boolean")
+        expected_candidate = classify_fall(
+            alignment,
+            critical_body_contact=self.critical_body_contact,
+        )
+        if self.fall_candidate is not expected_candidate:
+            raise ValueError("live fall candidate contradicts root/contact truth")
+        object.__setattr__(self, "root_quat_wxyz", quaternion)
+        object.__setattr__(self, "root_up_alignment", alignment)
+
+
+@dataclass(frozen=True, init=False)
+class LiveFallProducerEvidence:
+    """Factory-issued, runtime-bound fall evidence consumed by driver and extractor."""
+
+    schema_version: int
+    task_identity: str
+    runtime_identity_digest: str
+    lanes: tuple[LiveFallLaneEvidence, ...]
+    evidence_digest: str
+    _producer_token: object = dataclass_field(repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -637,8 +693,37 @@ def classify_terminal(*, success: bool, fall: bool, time_limit: bool) -> Termina
     return "running"
 
 
+def _validate_live_fall_lane(
+    value: object,
+    *,
+    env_index: int,
+    control_step_count: int,
+) -> LiveFallLaneEvidence:
+    if not isinstance(value, LiveFallLaneEvidence):
+        raise RecoveryTelemetryIncompleteError(("live_fall_evidence",))
+    try:
+        normalized = LiveFallLaneEvidence(
+            env_index=value.env_index,
+            control_step_count=value.control_step_count,
+            root_quat_wxyz=value.root_quat_wxyz,
+            root_up_alignment=value.root_up_alignment,
+            critical_body_contact=value.critical_body_contact,
+            fall_candidate=value.fall_candidate,
+        )
+    except (TypeError, ValueError, RecoveryTelemetryIncompleteError) as exc:
+        raise RecoveryTelemetryIncompleteError(("live_fall_evidence",)) from exc
+    if (
+        normalized != value
+        or normalized.env_index != env_index
+        or normalized.control_step_count != control_step_count
+    ):
+        raise RecoveryTelemetryIncompleteError(("live_fall_evidence",))
+    return normalized
+
+
 def build_privileged_telemetry(
     *,
+    task_identity: str,
     env_index: int,
     box_center_w: object,
     box_linear_velocity_w: object,
@@ -648,11 +733,12 @@ def build_privileged_telemetry(
     right_ee_pose_w: object,
     left_contact: HandContactEvidence,
     right_contact: HandContactEvidence,
-    root_quat_wxyz: object,
-    critical_body_contact: bool | None,
+    live_fall_evidence: LiveFallLaneEvidence,
     terminal_context: DriverTerminalContext,
     max_ee_box_distance_m: float = DEFAULT_MAX_EE_BOX_DISTANCE_M,
 ) -> PrivilegedRecoveryTelemetry:
+    if task_identity != PP_BOX_TASK_IDENTITY:
+        raise ValueError("privileged telemetry task identity is not HOI_pp_box")
     if not isinstance(left_contact, HandContactEvidence) or left_contact.side != "left":
         raise ValueError("privileged telemetry requires aggregated left hand contact")
     if not isinstance(right_contact, HandContactEvidence) or right_contact.side != "right":
@@ -660,6 +746,11 @@ def build_privileged_telemetry(
     if not isinstance(terminal_context, DriverTerminalContext):
         raise ValueError("privileged telemetry requires authoritative driver terminal context")
     terminal_context.validate()
+    fall_evidence = _validate_live_fall_lane(
+        live_fall_evidence,
+        env_index=int(env_index),
+        control_step_count=terminal_context.control_step_count,
+    )
     box_center = _as_float_tuple(box_center_w, 3, name="box center")
     box_linear_velocity = _as_float_tuple(
         box_linear_velocity_w,
@@ -686,11 +777,8 @@ def build_privileged_telemetry(
         right_contact=right_contact.in_contact,
         max_ee_box_distance_m=max_ee_box_distance_m,
     )
-    root_up_alignment = compute_root_up_alignment(root_quat_wxyz)
-    fall_candidate = classify_fall(
-        root_up_alignment,
-        critical_body_contact=critical_body_contact,
-    )
+    root_up_alignment = fall_evidence.root_up_alignment
+    fall_candidate = fall_evidence.fall_candidate
     if fall_candidate != (terminal_context.fall_streak > 0):
         raise RecoveryTelemetryIncompleteError(("authoritative_terminal_context",))
     fall = terminal_context.fall_confirmed
@@ -699,7 +787,7 @@ def build_privileged_telemetry(
 
     return PrivilegedRecoveryTelemetry(
         schema_version=RECOVERY_TELEMETRY_SCHEMA_VERSION,
-        task_identity=PP_BOX_TASK_IDENTITY,
+        task_identity=task_identity,
         env_index=int(env_index),
         box_center_w=(box_center[0], box_center[1], box_center[2]),
         box_linear_velocity_w=(
@@ -834,6 +922,15 @@ def _scene_get(scene: object, key: str) -> object | None:
         return scene[key]  # type: ignore[index]
     except Exception:
         return getattr(scene, key, None)
+
+
+def _require_pp_box_task_identity(env: object) -> str:
+    cfg = getattr(env, "cfg", None)
+    cfg_identity = getattr(cfg, "recovery_task_identity", None)
+    env_identity = getattr(env, "recovery_task_identity", cfg_identity)
+    if cfg_identity != PP_BOX_TASK_IDENTITY or env_identity != PP_BOX_TASK_IDENTITY:
+        raise RecoveryTelemetryIncompleteError(("task_identity",))
+    return PP_BOX_TASK_IDENTITY
 
 
 _MATERIALIZED_ENV_PATH = re.compile(
@@ -1381,25 +1478,150 @@ def _critical_body_contact_by_env(
     ]
 
 
-def compute_live_fall_candidates(env: object) -> tuple[bool, ...]:
-    """Return instantaneous fall predicates without confirmation/streak state."""
+def live_fall_evidence_digest(evidence: LiveFallProducerEvidence) -> str:
+    """Recompute the canonical digest over all live root/contact observations."""
 
+    if type(evidence) is not LiveFallProducerEvidence:
+        raise TypeError("live fall digest requires LiveFallProducerEvidence")
+    payload = {
+        "schema_version": evidence.schema_version,
+        "task_identity": evidence.task_identity,
+        "runtime_identity_digest": evidence.runtime_identity_digest,
+        "lanes": [
+            {
+                "env_index": lane.env_index,
+                "control_step_count": lane.control_step_count,
+                "root_quat_wxyz": lane.root_quat_wxyz,
+                "root_up_alignment": lane.root_up_alignment,
+                "critical_body_contact": lane.critical_body_contact,
+                "fall_candidate": lane.fall_candidate,
+            }
+            for lane in evidence.lanes
+        ],
+    }
+    serialized = json.dumps(
+        payload,
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def produce_live_fall_evidence(
+    env: object,
+    *,
+    control_step_counts: Sequence[int],
+) -> LiveFallProducerEvidence:
+    """Read the sole live root/contact fall source for one primitive step."""
+
+    _require_pp_box_task_identity(env)
     num_envs = int(getattr(env, "num_envs", 0))
     scene = getattr(env, "scene", None)
     if num_envs <= 0 or scene is None:
         raise RecoveryTelemetryIncompleteError(("scene",))
+    if (
+        not isinstance(control_step_counts, Sequence)
+        or isinstance(control_step_counts, (str, bytes, bytearray))
+        or len(control_step_counts) != num_envs
+        or any(type(step) is not int or step < 0 for step in control_step_counts)
+    ):
+        raise RecoveryTelemetryIncompleteError(("live_fall_control_step",))
+    runtime_identity_digest = str(
+        getattr(env, "recovery_runtime_identity_digest", "")
+    )
+    if _SHA256_DIGEST.fullmatch(runtime_identity_digest) is None:
+        raise RecoveryTelemetryIncompleteError(("live_fall_runtime_identity",))
     robot = _scene_get(scene, "robot")
     if robot is None:
         raise RecoveryTelemetryIncompleteError(("robot_state",))
     root_quaternions = _root_quaternion_tensor(robot, num_envs=num_envs)
     critical_contacts = _critical_body_contact_by_env(scene, robot, num_envs=num_envs)
-    return tuple(
-        classify_fall(
-            compute_root_up_alignment(root_quaternions[env_index]),
-            critical_body_contact=critical_contacts[env_index],
+    lanes = []
+    for env_index in range(num_envs):
+        root_quaternion = _as_float_tuple(
+            root_quaternions[env_index],
+            4,
+            name="live fall root quaternion",
         )
-        for env_index in range(num_envs)
+        root_up_alignment = compute_root_up_alignment(root_quaternion)
+        critical_contact = critical_contacts[env_index]
+        lanes.append(
+            LiveFallLaneEvidence(
+                env_index=env_index,
+                control_step_count=control_step_counts[env_index],
+                root_quat_wxyz=(
+                    root_quaternion[0],
+                    root_quaternion[1],
+                    root_quaternion[2],
+                    root_quaternion[3],
+                ),
+                root_up_alignment=root_up_alignment,
+                critical_body_contact=critical_contact,
+                fall_candidate=classify_fall(
+                    root_up_alignment,
+                    critical_body_contact=critical_contact,
+                ),
+            )
+        )
+    evidence = object.__new__(LiveFallProducerEvidence)
+    values = {
+        "schema_version": LIVE_FALL_EVIDENCE_SCHEMA_VERSION,
+        "task_identity": PP_BOX_TASK_IDENTITY,
+        "runtime_identity_digest": runtime_identity_digest,
+        "lanes": tuple(lanes),
+        "_producer_token": _LIVE_FALL_PRODUCER_TOKEN,
+    }
+    for name, value in values.items():
+        object.__setattr__(evidence, name, value)
+    object.__setattr__(
+        evidence,
+        "evidence_digest",
+        live_fall_evidence_digest(evidence),
     )
+    return evidence
+
+
+def _validate_live_fall_evidence(
+    env: object,
+    evidence: object,
+    terminal_contexts: tuple[DriverTerminalContext, ...],
+    *,
+    num_envs: int,
+) -> tuple[LiveFallLaneEvidence, ...]:
+    runtime_identity_digest = str(
+        getattr(env, "recovery_runtime_identity_digest", "")
+    )
+    if (
+        type(evidence) is not LiveFallProducerEvidence
+        or evidence.schema_version != LIVE_FALL_EVIDENCE_SCHEMA_VERSION
+        or evidence.task_identity != PP_BOX_TASK_IDENTITY
+        or evidence.runtime_identity_digest != runtime_identity_digest
+        or evidence._producer_token is not _LIVE_FALL_PRODUCER_TOKEN
+        or not isinstance(evidence.lanes, tuple)
+        or len(evidence.lanes) != num_envs
+    ):
+        raise RecoveryTelemetryIncompleteError(("live_fall_evidence",))
+    try:
+        expected_digest = live_fall_evidence_digest(evidence)
+    except (TypeError, ValueError) as exc:
+        raise RecoveryTelemetryIncompleteError(("live_fall_evidence",)) from exc
+    if evidence.evidence_digest != expected_digest:
+        raise RecoveryTelemetryIncompleteError(("live_fall_evidence",))
+    lanes = []
+    for env_index, context in enumerate(terminal_contexts):
+        lane = _validate_live_fall_lane(
+            evidence.lanes[env_index],
+            env_index=env_index,
+            control_step_count=context.control_step_count,
+        )
+        if lane.fall_candidate != (context.fall_streak > 0):
+            raise RecoveryTelemetryIncompleteError(
+                ("authoritative_terminal_context", "live_fall_evidence")
+            )
+        lanes.append(lane)
+    return tuple(lanes)
 
 
 def extract_privileged_telemetry(
@@ -1407,9 +1629,14 @@ def extract_privileged_telemetry(
     *,
     support_resolver: Any | None = None,
     terminal_contexts: object | None = None,
+    live_fall_evidence: LiveFallProducerEvidence | None = None,
+    actor_observation: object | None = None,
 ) -> tuple[PrivilegedRecoveryTelemetry, ...]:
     """Extract privileged state without registering it as a policy observation."""
 
+    task_identity = _require_pp_box_task_identity(env)
+    if actor_observation is None:
+        raise RecoveryTelemetryIncompleteError(("actor_observation",))
     bindings = _resolve_hand_contact_bindings(env)
     num_envs = int(getattr(env, "num_envs", 0))
     scene = getattr(env, "scene", None)
@@ -1430,9 +1657,26 @@ def extract_privileged_telemetry(
     reports_by_scene_key = {
         report.sensor_scene_key: report for report in contact_reports
     }
+    expected_contact_scene_keys = {
+        sensor.sensor_scene_key
+        for side in ("left", "right")
+        for sensor in bindings[side].sensors
+    }
+    if (
+        len(contact_reports) != 16
+        or len(reports_by_scene_key) != 16
+        or set(reports_by_scene_key) != expected_contact_scene_keys
+    ):
+        raise RecoveryTelemetryIncompleteError(("runtime_contact_sensor_set",))
     resolved_terminal_contexts = _resolve_terminal_contexts(
         env,
         terminal_contexts,
+        num_envs=num_envs,
+    )
+    fall_evidence_by_env = _validate_live_fall_evidence(
+        env,
+        live_fall_evidence,
+        resolved_terminal_contexts,
         num_envs=num_envs,
     )
     contact_threshold, ee_distance_threshold = _resolve_telemetry_thresholds(env)
@@ -1475,9 +1719,6 @@ def extract_privileged_telemetry(
             )
             for sensor_binding in bindings[side].sensors
         )
-    root_quaternions = _root_quaternion_tensor(robot, num_envs=num_envs)
-    critical_contacts = _critical_body_contact_by_env(scene, robot, num_envs=num_envs)
-
     if support_resolver is None:
         try:
             from .rewards import compute_box_support_evidence
@@ -1508,6 +1749,7 @@ def extract_privileged_telemetry(
             hand_contacts[side] = aggregate_hand_contact_evidence(side, link_evidence)
         states.append(
             build_privileged_telemetry(
+                task_identity=task_identity,
                 env_index=env_index,
                 box_center_w=box_centers[env_index],
                 box_linear_velocity_w=box_linear_velocity[env_index],
@@ -1517,13 +1759,15 @@ def extract_privileged_telemetry(
                 right_ee_pose_w=right_poses[env_index],
                 left_contact=hand_contacts["left"],
                 right_contact=hand_contacts["right"],
-                root_quat_wxyz=root_quaternions[env_index],
-                critical_body_contact=critical_contacts[env_index],
+                live_fall_evidence=fall_evidence_by_env[env_index],
                 terminal_context=resolved_terminal_contexts[env_index],
                 max_ee_box_distance_m=ee_distance_threshold,
             )
         )
-    return tuple(states)
+    result = tuple(states)
+    for state in result:
+        assert_actor_observation_isolated(actor_observation, state)
+    return result
 
 
 __all__ = [
@@ -1532,6 +1776,7 @@ __all__ = [
     "EMPIRICAL_CONTACT_QUIET_MAX_N",
     "EMPIRICAL_CONTACT_TOUCH_MIN_N",
     "HARD_FALL_UP_ALIGNMENT",
+    "LIVE_FALL_EVIDENCE_SCHEMA_VERSION",
     "PP_BOX_TASK_IDENTITY",
     "RECOVERY_TELEMETRY_SCHEMA_VERSION",
     "RUNTIME_CONTACT_MAPPING_PROOF_SCHEMA_VERSION",
@@ -1542,6 +1787,8 @@ __all__ = [
     "EmpiricalContactMappingProof",
     "HandContactBinding",
     "HandContactEvidence",
+    "LiveFallLaneEvidence",
+    "LiveFallProducerEvidence",
     "PairwiseContactBinding",
     "PairwiseContactEvidence",
     "PrivilegedObservationLeakError",
@@ -1555,12 +1802,13 @@ __all__ = [
     "classify_bimanual_grasp",
     "classify_fall",
     "classify_terminal",
-    "compute_live_fall_candidates",
     "compute_root_up_alignment",
     "default_hand_contact_bindings",
     "empirical_contact_mapping_proof_digest",
     "extract_privileged_telemetry",
     "has_pairwise_bimanual_contact",
+    "live_fall_evidence_digest",
     "pairwise_contact_evidence",
+    "produce_live_fall_evidence",
     "validate_runtime_hand_contact_sensors",
 ]

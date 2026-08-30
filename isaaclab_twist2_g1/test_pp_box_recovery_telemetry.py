@@ -97,6 +97,28 @@ def _driver_terminal_context(
     )
 
 
+def _fall_lane(
+    telemetry,
+    *,
+    env_index: int = 0,
+    control_step_count: int = 10,
+    root_quat_wxyz=(1.0, 0.0, 0.0, 0.0),
+    critical_body_contact: bool | None = False,
+):
+    alignment = telemetry.compute_root_up_alignment(root_quat_wxyz)
+    return telemetry.LiveFallLaneEvidence(
+        env_index=env_index,
+        control_step_count=control_step_count,
+        root_quat_wxyz=root_quat_wxyz,
+        root_up_alignment=alignment,
+        critical_body_contact=critical_body_contact,
+        fall_candidate=telemetry.classify_fall(
+            alignment,
+            critical_body_contact=critical_body_contact,
+        ),
+    )
+
+
 @pytest.mark.parametrize(
     ("center_xyz", "inside_xy", "aligned_z", "placed"),
     [
@@ -405,6 +427,7 @@ def test_versioned_privileged_record_contains_required_truth(telemetry, rewards)
     right_contact = _single_link_hand_contact(telemetry, "right", (0.0, 0.0, 3.0))
 
     state = telemetry.build_privileged_telemetry(
+        task_identity=telemetry.PP_BOX_TASK_IDENTITY,
         env_index=0,
         box_center_w=(0.0, 0.0, 0.505),
         box_linear_velocity_w=(0.1, 0.2, 0.3),
@@ -414,8 +437,7 @@ def test_versioned_privileged_record_contains_required_truth(telemetry, rewards)
         right_ee_pose_w=(-0.15, 0.0, 0.505, 1.0, 0.0, 0.0, 0.0),
         left_contact=left_contact,
         right_contact=right_contact,
-        root_quat_wxyz=(1.0, 0.0, 0.0, 0.0),
-        critical_body_contact=False,
+        live_fall_evidence=_fall_lane(telemetry),
         terminal_context=_driver_terminal_context(telemetry),
         max_ee_box_distance_m=0.3,
     )
@@ -451,6 +473,7 @@ def test_privileged_record_rejects_unaggregated_or_wrong_side_contact(telemetry,
     )
     right_contact = _single_link_hand_contact(telemetry, "right", (0.0, 0.0, 2.0))
     common = {
+        "task_identity": telemetry.PP_BOX_TASK_IDENTITY,
         "env_index": 0,
         "box_center_w": (0.0, 0.0, 0.505),
         "box_linear_velocity_w": (0.0, 0.0, 0.0),
@@ -458,8 +481,7 @@ def test_privileged_record_rejects_unaggregated_or_wrong_side_contact(telemetry,
         "support": support,
         "left_ee_pose_w": (0.1, 0.0, 0.505, 1.0, 0.0, 0.0, 0.0),
         "right_ee_pose_w": (-0.1, 0.0, 0.505, 1.0, 0.0, 0.0, 0.0),
-        "root_quat_wxyz": (1.0, 0.0, 0.0, 0.0),
-        "critical_body_contact": False,
+        "live_fall_evidence": _fall_lane(telemetry),
         "terminal_context": _driver_terminal_context(telemetry),
     }
 
@@ -505,6 +527,7 @@ def test_actor_observation_leak_check_is_recursive_and_identity_aware(telemetry,
     left_contact = _single_link_hand_contact(telemetry, "left", (0.0, 0.0, 2.0))
     right_contact = _single_link_hand_contact(telemetry, "right", (0.0, 0.0, 2.0))
     privileged = telemetry.build_privileged_telemetry(
+        task_identity=telemetry.PP_BOX_TASK_IDENTITY,
         env_index=0,
         box_center_w=(0.0, 0.0, 0.505),
         box_linear_velocity_w=(0.0, 0.0, 0.0),
@@ -514,8 +537,7 @@ def test_actor_observation_leak_check_is_recursive_and_identity_aware(telemetry,
         right_ee_pose_w=(-0.15, 0.0, 0.505, 1.0, 0.0, 0.0, 0.0),
         left_contact=left_contact,
         right_contact=right_contact,
-        root_quat_wxyz=(1.0, 0.0, 0.0, 0.0),
-        critical_body_contact=False,
+        live_fall_evidence=_fall_lane(telemetry),
         terminal_context=_driver_terminal_context(telemetry),
         max_ee_box_distance_m=0.3,
     )
@@ -540,10 +562,19 @@ def test_actor_observation_leak_check_is_recursive_and_identity_aware(telemetry,
 
 
 def test_runtime_extractor_rejects_unproven_pairwise_contact_bindings(telemetry) -> None:
-    env = SimpleNamespace(num_envs=1, scene={}, device="cpu")
+    env = SimpleNamespace(
+        num_envs=1,
+        scene={},
+        device="cpu",
+        cfg=SimpleNamespace(recovery_task_identity=telemetry.PP_BOX_TASK_IDENTITY),
+    )
 
     with pytest.raises(telemetry.RecoveryTelemetryIncompleteError) as exc_info:
-        telemetry.extract_privileged_telemetry(env)
+        telemetry.extract_privileged_telemetry(
+            env,
+            actor_observation=_safe_actor_observation(),
+            live_fall_evidence=object(),
+        )
 
     assert "left_box_pairwise_contact" in exc_info.value.missing_capabilities
     assert "right_box_pairwise_contact" in exc_info.value.missing_capabilities
@@ -628,6 +659,7 @@ def _complete_runtime_env(telemetry, *, include_contact_mapping_proofs: bool = T
         device="cpu",
         scene=scene,
         cfg=SimpleNamespace(
+            recovery_task_identity=telemetry.PP_BOX_TASK_IDENTITY,
             recovery_contact_bindings=bindings,
             recovery_telemetry_thresholds={
                 "contact_force_n": 1.0,
@@ -680,13 +712,98 @@ def _attach_valid_contact_mapping_proofs(telemetry, env):
     return env
 
 
-def test_live_fall_candidate_producer_reuses_instantaneous_root_and_contact_truth(
+def _safe_actor_observation() -> dict[str, object]:
+    return {"policy": {"joint_state": torch.zeros(1, 4)}}
+
+
+def _live_fall_evidence(telemetry, env, terminal_contexts=None):
+    contexts = (
+        tuple(terminal_contexts)
+        if terminal_contexts is not None
+        else tuple(env.recovery_terminal_contexts)
+    )
+    return telemetry.produce_live_fall_evidence(
+        env,
+        control_step_counts=tuple(
+            context.control_step_count for context in contexts
+        ),
+    )
+
+
+def _extract_runtime_telemetry(
+    telemetry,
+    env,
+    *,
+    support_resolver,
+    terminal_contexts=None,
+    actor_observation=None,
+    live_fall_evidence=None,
+):
+    contexts = (
+        tuple(terminal_contexts)
+        if terminal_contexts is not None
+        else tuple(env.recovery_terminal_contexts)
+    )
+    evidence = (
+        _live_fall_evidence(telemetry, env, contexts)
+        if live_fall_evidence is None
+        else live_fall_evidence
+    )
+    return telemetry.extract_privileged_telemetry(
+        env,
+        support_resolver=support_resolver,
+        terminal_contexts=contexts,
+        live_fall_evidence=evidence,
+        actor_observation=(
+            _safe_actor_observation()
+            if actor_observation is None
+            else actor_observation
+        ),
+    )
+
+
+@pytest.mark.parametrize("task_identity", [None, "wrong-task"])
+def test_runtime_extractor_checks_task_identity_before_runtime_reads(
+    telemetry,
+    task_identity,
+) -> None:
+    class TrapCfg:
+        recovery_task_identity = task_identity
+
+        @property
+        def recovery_contact_bindings(self):
+            raise AssertionError("task identity must fail before contact binding reads")
+
+    env = SimpleNamespace(cfg=TrapCfg())
+
+    with pytest.raises(telemetry.RecoveryTelemetryIncompleteError) as exc_info:
+        telemetry.extract_privileged_telemetry(
+            env,
+            actor_observation=_safe_actor_observation(),
+            live_fall_evidence=object(),
+        )
+
+    assert "task_identity" in exc_info.value.missing_capabilities
+
+
+def test_live_fall_producer_reuses_instantaneous_root_and_contact_truth(
     telemetry,
 ) -> None:
     env = _complete_runtime_env(telemetry)
     del env.recovery_terminal_contexts
 
-    assert telemetry.compute_live_fall_candidates(env) == (False,)
+    def produce(step: int):
+        evidence = telemetry.produce_live_fall_evidence(
+            env,
+            control_step_counts=(step,),
+        )
+        assert evidence.task_identity == telemetry.PP_BOX_TASK_IDENTITY
+        assert evidence.runtime_identity_digest == env.recovery_runtime_identity_digest
+        assert len(evidence.evidence_digest) == 64
+        assert evidence.lanes[0].control_step_count == step
+        return evidence.lanes[0]
+
+    assert produce(10).fall_candidate is False
 
     up_alignment = 0.4
     root_x = math.sqrt((1.0 - up_alignment) / 2.0)
@@ -694,15 +811,19 @@ def test_live_fall_candidate_producer_reuses_instantaneous_root_and_contact_trut
     env.scene["robot"].data.root_state_w[0, 3:7] = torch.tensor(
         [root_w, root_x, 0.0, 0.0]
     )
-    assert telemetry.compute_live_fall_candidates(env) == (False,)
+    tilted = produce(11)
+    assert tilted.root_up_alignment == pytest.approx(up_alignment)
+    assert tilted.fall_candidate is False
 
     pelvis_index = env.scene["robot"].data.body_names.index("pelvis")
     env.scene["contact_forces"].data.net_forces_w[0, pelvis_index, 2] = 51.0
-    assert telemetry.compute_live_fall_candidates(env) == (True,)
+    contacted = produce(12)
+    assert contacted.critical_body_contact is True
+    assert contacted.fall_candidate is True
 
     env.scene["contact_forces"].data.net_forces_w = None
     env.scene["robot"].data.root_state_w[0, 3:7] = torch.tensor([0.0, 1.0, 0.0, 0.0])
-    assert telemetry.compute_live_fall_candidates(env) == (True,)
+    assert produce(13).fall_candidate is True
 
 
 def test_runtime_contact_validator_rejects_complete_but_wrong_env_namespace(
@@ -936,6 +1057,92 @@ def test_runtime_contact_sensor_report_records_all_materialized_identities(
     assert palm.force_matrix_finite is True
 
 
+def test_runtime_extractor_invokes_validator_and_actor_leak_assertion_once(
+    telemetry,
+    rewards,
+    monkeypatch,
+) -> None:
+    env = _complete_runtime_env(telemetry)
+    support = _support_case(rewards, (0.0, 0.0, 0.505))
+    actor_observation = _safe_actor_observation()
+    original_validator = telemetry.validate_runtime_hand_contact_sensors
+    original_assertion = telemetry.assert_actor_observation_isolated
+    validator_reports: list[tuple[object, ...]] = []
+    leak_calls: list[tuple[object, object]] = []
+
+    def validate_once(runtime_env):
+        reports = original_validator(runtime_env)
+        validator_reports.append(reports)
+        return reports
+
+    def assert_once(actor, privileged):
+        leak_calls.append((actor, privileged))
+        return original_assertion(actor, privileged)
+
+    monkeypatch.setattr(telemetry, "validate_runtime_hand_contact_sensors", validate_once)
+    monkeypatch.setattr(telemetry, "assert_actor_observation_isolated", assert_once)
+
+    states = _extract_runtime_telemetry(
+        telemetry,
+        env,
+        support_resolver=lambda _env: [support],
+        actor_observation=actor_observation,
+    )
+
+    assert len(validator_reports) == 1
+    assert len(validator_reports[0]) == 16
+    assert leak_calls == [(actor_observation, states[0])]
+
+
+def test_runtime_extractor_rejects_actor_key_leak_and_stale_fall_evidence(
+    telemetry,
+    rewards,
+) -> None:
+    env = _complete_runtime_env(telemetry)
+    support = _support_case(rewards, (0.0, 0.0, 0.505))
+    evidence = _live_fall_evidence(telemetry, env)
+
+    with pytest.raises(telemetry.PrivilegedObservationLeakError):
+        _extract_runtime_telemetry(
+            telemetry,
+            env,
+            support_resolver=lambda _env: [support],
+            actor_observation={"policy": {"box_center_w": torch.zeros(1, 3)}},
+            live_fall_evidence=evidence,
+        )
+
+    object.__setattr__(evidence, "evidence_digest", "f" * 64)
+    with pytest.raises(telemetry.RecoveryTelemetryIncompleteError) as exc_info:
+        _extract_runtime_telemetry(
+            telemetry,
+            env,
+            support_resolver=lambda _env: [support],
+            live_fall_evidence=evidence,
+        )
+    assert "live_fall_evidence" in exc_info.value.missing_capabilities
+
+
+def test_runtime_extractor_rejects_fall_evidence_from_another_control_step(
+    telemetry,
+    rewards,
+) -> None:
+    env = _complete_runtime_env(telemetry)
+    support = _support_case(rewards, (0.0, 0.0, 0.505))
+    stale = telemetry.produce_live_fall_evidence(
+        env,
+        control_step_counts=(9,),
+    )
+
+    with pytest.raises(telemetry.RecoveryTelemetryIncompleteError) as exc_info:
+        _extract_runtime_telemetry(
+            telemetry,
+            env,
+            support_resolver=lambda _env: [support],
+            live_fall_evidence=stale,
+        )
+    assert "live_fall_evidence" in exc_info.value.missing_capabilities
+
+
 @pytest.mark.parametrize(
     ("mutation", "expected_key"),
     [
@@ -1012,7 +1219,8 @@ def test_runtime_extractor_reads_exact_pairwise_force_matrix_and_dynamics(teleme
     env = _complete_runtime_env(telemetry)
     support = _support_case(rewards, (0.0, 0.0, 0.505))
 
-    states = telemetry.extract_privileged_telemetry(
+    states = _extract_runtime_telemetry(
+        telemetry,
         env,
         support_resolver=lambda _env: [support],
     )
@@ -1108,7 +1316,8 @@ def test_runtime_extractor_fails_closed_on_ambiguous_body_or_force_shape(
     support = _support_case(rewards, (0.0, 0.0, 0.505))
 
     with pytest.raises(telemetry.RecoveryTelemetryIncompleteError) as exc_info:
-        telemetry.extract_privileged_telemetry(
+        _extract_runtime_telemetry(
+            telemetry,
             env,
             support_resolver=lambda _env: [support],
         )
@@ -1137,7 +1346,8 @@ def test_runtime_extractor_fails_closed_on_missing_or_invalid_thresholds(
     support = _support_case(rewards, (0.0, 0.0, 0.505))
 
     with pytest.raises(telemetry.RecoveryTelemetryIncompleteError) as exc_info:
-        telemetry.extract_privileged_telemetry(
+        _extract_runtime_telemetry(
+            telemetry,
             env,
             support_resolver=lambda _env: [support],
         )
@@ -1157,6 +1367,8 @@ def test_runtime_extractor_requires_self_consistent_driver_terminal_context(
         telemetry.extract_privileged_telemetry(
             env,
             support_resolver=lambda _env: [support],
+            actor_observation=_safe_actor_observation(),
+            live_fall_evidence=object(),
         )
     assert "authoritative_terminal_context" in exc_info.value.missing_capabilities
 
@@ -1173,10 +1385,13 @@ def test_runtime_extractor_requires_self_consistent_driver_terminal_context(
             env,
             support_resolver=lambda _env: [support],
             terminal_contexts=(contradictory,),
+            actor_observation=_safe_actor_observation(),
+            live_fall_evidence=object(),
         )
     assert "authoritative_terminal_context" in exc_info.value.missing_capabilities
 
-    state = telemetry.extract_privileged_telemetry(
+    state = _extract_runtime_telemetry(
+        telemetry,
         env,
         support_resolver=lambda _env: [support],
         terminal_contexts=(_driver_terminal_context(telemetry),),
@@ -1195,12 +1410,16 @@ def test_runtime_extractor_rejects_nonzero_fall_streak_without_current_candidate
     support = _support_case(rewards, (0.0, 0.0, 0.7))
 
     with pytest.raises(telemetry.RecoveryTelemetryIncompleteError) as exc_info:
-        telemetry.extract_privileged_telemetry(
+        _extract_runtime_telemetry(
+            telemetry,
             env,
             support_resolver=lambda _env: [support],
         )
 
-    assert exc_info.value.missing_capabilities == ("authoritative_terminal_context",)
+    assert set(exc_info.value.missing_capabilities) == {
+        "authoritative_terminal_context",
+        "live_fall_evidence",
+    }
 
 
 def test_runtime_extractor_rejects_current_fall_candidate_with_zero_streak(
@@ -1215,12 +1434,16 @@ def test_runtime_extractor_rejects_current_fall_candidate_with_zero_streak(
     support = _support_case(rewards, (0.0, 0.0, 0.7))
 
     with pytest.raises(telemetry.RecoveryTelemetryIncompleteError) as exc_info:
-        telemetry.extract_privileged_telemetry(
+        _extract_runtime_telemetry(
+            telemetry,
             env,
             support_resolver=lambda _env: [support],
         )
 
-    assert exc_info.value.missing_capabilities == ("authoritative_terminal_context",)
+    assert set(exc_info.value.missing_capabilities) == {
+        "authoritative_terminal_context",
+        "live_fall_evidence",
+    }
 
 
 def test_runtime_extractor_rejects_fall_streak_longer_than_control_history(
@@ -1241,7 +1464,8 @@ def test_runtime_extractor_rejects_fall_streak_longer_than_control_history(
     support = _support_case(rewards, (0.0, 0.0, 0.7))
 
     with pytest.raises(telemetry.RecoveryTelemetryIncompleteError) as exc_info:
-        telemetry.extract_privileged_telemetry(
+        _extract_runtime_telemetry(
+            telemetry,
             env,
             support_resolver=lambda _env: [support],
         )
@@ -1264,7 +1488,8 @@ def test_runtime_extractor_uses_critical_body_contact_for_soft_tilt(telemetry, r
         _driver_terminal_context(telemetry, fall_streak=4),
     )
 
-    state = telemetry.extract_privileged_telemetry(
+    state = _extract_runtime_telemetry(
+        telemetry,
         env,
         support_resolver=lambda _env: [support],
     )[0]
@@ -1277,7 +1502,8 @@ def test_runtime_extractor_uses_critical_body_contact_for_soft_tilt(telemetry, r
     env.recovery_terminal_contexts = (
         _driver_terminal_context(telemetry, fall_streak=5),
     )
-    state = telemetry.extract_privileged_telemetry(
+    state = _extract_runtime_telemetry(
+        telemetry,
         env,
         support_resolver=lambda _env: [support],
     )[0]
@@ -1294,7 +1520,8 @@ def test_runtime_extractor_classifies_time_limit_without_changing_task_reward(
     support = _support_case(rewards, (0.0, 0.0, 0.7))
     env.episode_length_buf[:] = env.max_episode_length
 
-    state = telemetry.extract_privileged_telemetry(
+    state = _extract_runtime_telemetry(
+        telemetry,
         env,
         support_resolver=lambda _env: [support],
     )[0]
@@ -1311,7 +1538,8 @@ def test_runtime_extractor_classifies_time_limit_without_changing_task_reward(
             max_control_steps=2000,
         ),
     )
-    state = telemetry.extract_privileged_telemetry(
+    state = _extract_runtime_telemetry(
+        telemetry,
         env,
         support_resolver=lambda _env: [support],
     )[0]

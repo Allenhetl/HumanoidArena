@@ -165,7 +165,20 @@ def _telemetry_state(
     root_quat = (
         (0.0, 1.0, 0.0, 0.0) if (is_fall or fall_candidate) else (1.0, 0.0, 0.0, 0.0)
     )
+    root_up_alignment = telemetry.compute_root_up_alignment(root_quat)
+    live_fall_evidence = telemetry.LiveFallLaneEvidence(
+        env_index=env_index,
+        control_step_count=control_step,
+        root_quat_wxyz=root_quat,
+        root_up_alignment=root_up_alignment,
+        critical_body_contact=False,
+        fall_candidate=telemetry.classify_fall(
+            root_up_alignment,
+            critical_body_contact=False,
+        ),
+    )
     return telemetry.build_privileged_telemetry(
+        task_identity=telemetry.PP_BOX_TASK_IDENTITY,
         env_index=env_index,
         box_center_w=box_center,
         box_linear_velocity_w=(0.0, 0.0, 0.0),
@@ -175,8 +188,7 @@ def _telemetry_state(
         right_ee_pose_w=right_pose,
         left_contact=_hand_contact(telemetry, "left", grasp),
         right_contact=_hand_contact(telemetry, "right", grasp),
-        root_quat_wxyz=root_quat,
-        critical_body_contact=False,
+        live_fall_evidence=live_fall_evidence,
         terminal_context=telemetry.DriverTerminalContext(
             control_step_count=control_step,
             max_control_steps=2000,
