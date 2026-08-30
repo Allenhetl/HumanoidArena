@@ -761,6 +761,9 @@ def test_runtime_extractor_rejects_unproven_pairwise_contact_bindings(
 
 
 def _complete_runtime_env(telemetry, *, include_contact_mapping_proofs: bool = True):
+    class RuntimeScene(dict):
+        pass
+
     box_root_state = torch.zeros(1, 13, dtype=torch.float64)
     box_root_state[0, 0:3] = torch.tensor([0.0, 0.0, 0.505], dtype=torch.float64)
     box_root_state[0, 3] = 1.0
@@ -797,17 +800,19 @@ def _complete_runtime_env(telemetry, *, include_contact_mapping_proofs: bool = T
     )
 
     bindings = telemetry.default_hand_contact_bindings()
-    scene = {
-        "box": box,
-        "robot": robot,
-        "contact_forces": SimpleNamespace(
-            body_names=list(body_names),
-            num_bodies=len(body_names),
-            data=SimpleNamespace(
-                net_forces_w=torch.zeros(1, len(body_names), 3, dtype=torch.float64)
+    scene = RuntimeScene(
+        {
+            "box": box,
+            "robot": robot,
+            "contact_forces": SimpleNamespace(
+                body_names=list(body_names),
+                num_bodies=len(body_names),
+                data=SimpleNamespace(
+                    net_forces_w=torch.zeros(1, len(body_names), 3, dtype=torch.float64)
+                ),
             ),
-        ),
-    }
+        }
+    )
     contact_forces = {
         "left_hand_index_0_link": (0.0, 0.0, 2.0),
         "right_hand_thumb_2_link": (0.0, 0.0, 3.0),
@@ -1162,7 +1167,7 @@ def test_executor_receipt_digest_binds_actual_raw_measurement_bytes(
     assert (
         receipt.schema_version
         == telemetry.RUNTIME_CONTACT_MAPPING_RECEIPT_SCHEMA_VERSION
-        == 3
+        == 4
     )
     assert tuple(phase.phase for phase in receipt.phases) == (
         "baseline",
@@ -1352,7 +1357,7 @@ def test_runtime_contact_sensor_report_records_all_materialized_identities(
     assert palm.candidate_filter_asset_prim_paths == ("/World/envs/env_0/Box",)
     assert palm.proven_filter_prim_paths == ("/World/envs/env_0/Box",)
     assert palm.proven_filter_body_name == "Box"
-    assert palm.filter_mapping_proof_schema_version == 3
+    assert palm.filter_mapping_proof_schema_version == 4
     assert palm.filter_mapping_proof_source == "controlled_three_phase_executor"
     receipt = next(
         item
@@ -1585,6 +1590,26 @@ def test_runtime_extractor_reads_exact_pairwise_force_matrix_and_dynamics(
     assert state.success is True
     assert state.fall is False
     assert state.terminal_reason == "success"
+
+
+def test_runtime_extractor_does_not_treat_contact_history_as_current_grasp(
+    telemetry, rewards
+) -> None:
+    env = _complete_runtime_env(telemetry)
+    for hand in telemetry.default_hand_contact_bindings().values():
+        for binding in hand.sensors:
+            env.scene[binding.sensor_scene_key].data.force_matrix_w.zero_()
+    support = _support_case(rewards, (0.0, 0.0, 0.505))
+
+    state = _extract_runtime_telemetry(
+        telemetry,
+        env,
+        support_resolver=lambda _env: [support],
+    )[0]
+
+    assert state.left_box_contact.in_contact is False
+    assert state.right_box_contact.in_contact is False
+    assert state.grasp is False
 
 
 @pytest.mark.parametrize(
@@ -2018,7 +2043,10 @@ def _install_fake_contact_calibration_runtime(
     )
     env.action_manager = SimpleNamespace(_action=torch.zeros(1, 1, dtype=torch.float64))
     env.common_step_counter = 0
+    env._sim_step_counter = 0
+    env.physics_dt = 0.005
     env.step_calls = 0
+    env.physics_step_calls = 0
     box = env.scene["box"]
 
     def write_root_state_to_sim(root_state, *, env_ids):
@@ -2038,11 +2066,27 @@ def _install_fake_contact_calibration_runtime(
 
     telemetry._runtime_collision_local_bounds = collision_local_bounds
 
-    def step(action):
-        torch.testing.assert_close(action, env.action_manager._action)
-        env.common_step_counter += 1
+    def step(_action):
         env.step_calls += 1
+        raise AssertionError("contact calibration must not consume an env action row")
+
+    env.step = step
+
+    def write_data_to_sim():
+        return None
+
+    env.scene.write_data_to_sim = write_data_to_sim
+
+    def update_scene(*, dt):
+        assert dt == env.physics_dt
+
+    env.scene.update = update_scene
+
+    def physics_step(*, render):
+        assert render is False
+        env.physics_step_calls += 1
         box_position = box.data.root_state_w[:, :3]
+        box_position.add_(box.data.root_state_w[:, 7:10] * env.physics_dt)
         robot = env.scene["robot"]
         for hand in telemetry.default_hand_contact_bindings().values():
             for binding in hand.sensors:
@@ -2051,10 +2095,6 @@ def _install_fake_contact_calibration_runtime(
                 sensor.data.force_matrix_w_history.zero_()
                 body_index = robot.data.body_names.index(binding.sensor_body_name)
                 body_position = robot.data.body_state_w[:, body_index, :3]
-                touch_offset = torch.tensor(
-                    [[0.0, 0.0, 0.04 + 0.005 + 0.105]],
-                    dtype=box_position.dtype,
-                )
                 inward_velocity = torch.tensor(
                     [
                         [
@@ -2067,40 +2107,36 @@ def _install_fake_contact_calibration_runtime(
                 )
                 if (
                     emit_touch_force
-                    and torch.equal(box_position, body_position + touch_offset)
                     and torch.equal(box.data.root_state_w[:, 7:10], inward_velocity)
+                    and torch.equal(box_position[:, :2], body_position[:, :2])
+                    and env._sim_step_counter == 2
                 ):
                     # Reproduce the Isaac runtime: contact occurs during an
                     # earlier physics substep, while the final matrix is quiet.
-                    sensor.data.force_matrix_w_history[:, 2, 0, 0, 2] = 2.0
-        return (
-            {},
-            torch.zeros(1),
-            torch.zeros(1, dtype=torch.bool),
-            torch.zeros(1, dtype=torch.bool),
-            {},
-        )
+                    sensor.data.force_matrix_w[:, 0, 0, 2] = 2.0
 
-    env.step = step
+    env.sim = SimpleNamespace(step=physics_step)
 
     def capture_snapshot(runtime_env):
         return {
             "box_root_state": runtime_env.scene["box"].data.root_state_w.clone(),
             "common_step_counter": runtime_env.common_step_counter,
+            "sim_step_counter": runtime_env._sim_step_counter,
         }
 
     def snapshot_digest(snapshot):
-        payload = snapshot[
-            "box_root_state"
-        ].detach().cpu().contiguous().numpy().tobytes() + int(
-            snapshot["common_step_counter"]
-        ).to_bytes(8, "little", signed=True)
+        payload = (
+            snapshot["box_root_state"].detach().cpu().contiguous().numpy().tobytes()
+            + int(snapshot["common_step_counter"]).to_bytes(8, "little", signed=True)
+            + int(snapshot["sim_step_counter"]).to_bytes(8, "little", signed=True)
+        )
         return hashlib.sha256(payload).hexdigest()
 
     def restore_snapshot(runtime_env, snapshot, *, snapshot_digest: str):
         assert snapshot_digest == snapshot_digest_fn(snapshot)
         runtime_env.scene["box"].data.root_state_w.copy_(snapshot["box_root_state"])
         runtime_env.common_step_counter = snapshot["common_step_counter"]
+        runtime_env._sim_step_counter = snapshot["sim_step_counter"]
         for hand in telemetry.default_hand_contact_bindings().values():
             for binding in hand.sensors:
                 runtime_env.scene[binding.sensor_scene_key].data.force_matrix_w.zero_()
@@ -2308,7 +2344,7 @@ def test_contact_calibration_receipt_binds_coordinator_and_state_only_fidelity(
     ]
 
 
-def test_controlled_contact_executor_binds_three_real_steps_per_sensor_and_allows_quiet_live_state(
+def test_controlled_contact_executor_binds_three_phases_and_four_physics_steps(
     telemetry,
 ) -> None:
     env = _install_fake_contact_calibration_runtime(
@@ -2318,7 +2354,6 @@ def test_controlled_contact_executor_binds_three_real_steps_per_sensor_and_allow
     )
 
     receipt = telemetry.execute_pp_box_contact_calibration(env)
-    assert env.step_calls == 16 * 3
     assert len(receipt.sensor_receipts) == 16
     assert all(
         tuple(phase.phase for phase in sensor.phases)
@@ -2333,10 +2368,16 @@ def test_controlled_contact_executor_binds_three_real_steps_per_sensor_and_allow
     )
     touch_phase = receipt.sensor_receipts[0].phases[1]
     assert touch_phase.force_shape == (1, 4, 1, 1, 3)
+    assert touch_phase.control_step_after == touch_phase.control_step_before
+    assert touch_phase.physics_step_after == touch_phase.physics_step_before + 4
     assert any(
         sum(component * component for component in force) >= 1.0
         for force in telemetry._decode_phase_forces(touch_phase)
     )
+    assert env.step_calls == 0
+    assert env.physics_step_calls == 16 * 3 * 4
+    assert env.common_step_counter == 0
+    assert env._sim_step_counter == 0
     assert len(telemetry.validate_runtime_hand_contact_sensors(env)) == 16
 
 
@@ -2361,9 +2402,9 @@ def test_controlled_contact_executor_rejects_all_zero_claimed_touch_and_publishe
         "target_touch",
         "target_removed",
     )
-    assert evidence["filtered_force_history"]["shape"] == (1, 4, 1, 1, 3)
+    assert evidence["filtered_force_substeps"]["shape"] == (1, 4, 1, 1, 3)
     assert evidence["filtered_force_current"]["shape"] == (1, 1, 1, 3)
-    assert len(evidence["filtered_force_history"]["raw_sha256"]) == 64
+    assert len(evidence["filtered_force_substeps"]["raw_sha256"]) == 64
     assert evidence["touch_plan"] == {
         "sim_dt_s": 0.005,
         "decimation": 4,
@@ -2376,6 +2417,8 @@ def test_controlled_contact_executor_rejects_all_zero_claimed_touch_and_publishe
     assert evidence["box_root_state_after_step_w"]["shape"] == (1, 13)
     assert evidence["sensor_body_pose_before_step_w"]["shape"] == (1, 7)
     assert evidence["sensor_body_pose_after_step_w"]["shape"] == (1, 7)
+    assert env.common_step_counter == 0
+    assert env._sim_step_counter == 0
 
     with pytest.raises(telemetry.RecoveryTelemetryIncompleteError):
         telemetry.validate_runtime_hand_contact_sensors(env)

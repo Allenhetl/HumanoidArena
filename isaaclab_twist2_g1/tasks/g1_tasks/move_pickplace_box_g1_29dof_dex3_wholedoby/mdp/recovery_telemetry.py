@@ -26,7 +26,7 @@ from .recovery_state import RecoveryStateCoordinator
 RECOVERY_TELEMETRY_SCHEMA_VERSION = 2
 LIVE_FALL_EVIDENCE_SCHEMA_VERSION = 1
 EVALUATOR_TERMINAL_EVIDENCE_SCHEMA_VERSION = 1
-RUNTIME_CONTACT_MAPPING_RECEIPT_SCHEMA_VERSION = 3
+RUNTIME_CONTACT_MAPPING_RECEIPT_SCHEMA_VERSION = 4
 RUNTIME_CONTACT_SENSOR_REPORT_SCHEMA_VERSION = 3
 RESIDUAL_ACTOR_OBSERVATION_SCHEMA_VERSION = 1
 PP_BOX_TASK_IDENTITY = "Isaac-Move-PickPlace-Box-G129-Dex3-Wholedoby"
@@ -398,6 +398,8 @@ class ContactCalibrationPhaseReceipt:
     sensor_identity_digest: str
     control_step_before: int
     control_step_after: int
+    physics_step_before: int
+    physics_step_after: int
     force_shape: tuple[int, ...]
     force_dtype: str
     force_device: str
@@ -1371,16 +1373,6 @@ def _installed_contact_calibration_executor(env: object) -> _ContactCalibrationE
     return executor
 
 
-def _calibration_fixed_action(env: object) -> torch.Tensor:
-    manager = getattr(env, "action_manager", None)
-    action = getattr(manager, "_action", None)
-    if action is None:
-        action = getattr(manager, "action", None)
-    if not isinstance(action, torch.Tensor) or action.ndim != 2:
-        raise RecoveryTelemetryIncompleteError(("runtime_contact_calibration_action",))
-    return action.detach().clone()
-
-
 def _collision_belongs_to_rigid_body(
     collision_prim: object,
     rigid_body_prim: object,
@@ -1691,6 +1683,97 @@ def _control_step_cursor(env: object) -> int:
     return value
 
 
+def _physics_step_cursor(env: object) -> int:
+    value = getattr(env, "_sim_step_counter", None)
+    if type(value) is not int or value < 0:
+        raise RecoveryTelemetryIncompleteError(("runtime_contact_calibration_step",))
+    return value
+
+
+def _sample_contact_calibration_substeps(
+    env: object,
+    sensor: object,
+) -> tuple[int, int, int, int, torch.Tensor]:
+    """Advance one primitive interval while materializing every filtered sample."""
+
+    substep_count = _runtime_contact_history_length(env)
+    num_envs = int(getattr(env, "num_envs", 0))
+    scene = getattr(env, "scene", None)
+    sim = getattr(env, "sim", None)
+    write_data = getattr(scene, "write_data_to_sim", None)
+    update_scene = getattr(scene, "update", None)
+    step_sim = getattr(sim, "step", None)
+    physics_dt = getattr(env, "physics_dt", None)
+    if (
+        num_envs <= 0
+        or not callable(write_data)
+        or not callable(update_scene)
+        or not callable(step_sim)
+        or type(physics_dt) not in (float, int)
+        or not math.isfinite(float(physics_dt))
+        or float(physics_dt) <= 0.0
+    ):
+        raise RecoveryTelemetryIncompleteError(
+            ("runtime_contact_calibration_physics_step",)
+        )
+
+    control_step_before = _control_step_cursor(env)
+    physics_step_before = _physics_step_cursor(env)
+    force_samples = []
+    for _ in range(substep_count):
+        try:
+            write_data()
+            step_sim(render=False)
+            env._sim_step_counter = _physics_step_cursor(env) + 1  # type: ignore[attr-defined]
+            update_scene(dt=float(physics_dt))
+            force_matrix = getattr(
+                getattr(sensor, "data", None), "force_matrix_w", None
+            )
+        except Exception as exc:
+            raise RecoveryTelemetryIncompleteError(
+                ("runtime_contact_calibration_physics_step",)
+            ) from exc
+        if (
+            not isinstance(force_matrix, torch.Tensor)
+            or force_matrix.shape != (num_envs, 1, 1, 3)
+            or not force_matrix.is_floating_point()
+            or (
+                force_samples
+                and (
+                    force_matrix.dtype != force_samples[0].dtype
+                    or force_matrix.device != force_samples[0].device
+                )
+            )
+        ):
+            raise RecoveryTelemetryIncompleteError(
+                ("runtime_contact_calibration_physics_step",)
+            )
+        force_samples.append(force_matrix.detach().clone())
+
+    control_step_after = _control_step_cursor(env)
+    physics_step_after = _physics_step_cursor(env)
+    if (
+        control_step_after != control_step_before
+        or physics_step_after != physics_step_before + substep_count
+    ):
+        raise RecoveryTelemetryIncompleteError(
+            ("runtime_contact_calibration_physics_step",)
+        )
+    try:
+        force_window = torch.stack(force_samples, dim=1)
+    except RuntimeError as exc:
+        raise RecoveryTelemetryIncompleteError(
+            ("runtime_contact_calibration_physics_step",)
+        ) from exc
+    return (
+        control_step_before,
+        control_step_after,
+        physics_step_before,
+        physics_step_after,
+        force_window,
+    )
+
+
 def _phase_receipt_digest(receipt: ContactCalibrationPhaseReceipt) -> str:
     return _canonical_json_digest(
         {
@@ -1705,6 +1788,8 @@ def _phase_receipt_digest(receipt: ContactCalibrationPhaseReceipt) -> str:
             "sensor_identity_digest": receipt.sensor_identity_digest,
             "control_step_before": receipt.control_step_before,
             "control_step_after": receipt.control_step_after,
+            "physics_step_before": receipt.physics_step_before,
+            "physics_step_after": receipt.physics_step_after,
             "force_shape": receipt.force_shape,
             "force_dtype": receipt.force_dtype,
             "force_device": receipt.force_device,
@@ -1725,6 +1810,8 @@ def _issue_phase_receipt(
     sensor_identity_digest: str,
     control_step_before: int,
     control_step_after: int,
+    physics_step_before: int,
+    physics_step_after: int,
     force_matrix: torch.Tensor,
 ) -> ContactCalibrationPhaseReceipt:
     raw_force_bytes = (
@@ -1743,6 +1830,8 @@ def _issue_phase_receipt(
         "sensor_identity_digest": sensor_identity_digest,
         "control_step_before": control_step_before,
         "control_step_after": control_step_after,
+        "physics_step_before": physics_step_before,
+        "physics_step_after": physics_step_after,
         "force_shape": tuple(force_matrix.shape),
         "force_dtype": str(force_matrix.dtype),
         "force_device": str(force_matrix.device),
@@ -1924,7 +2013,9 @@ def _validate_sensor_calibration_receipt(
                 or phase.source_snapshot_digest != source_snapshot_digest
                 or phase.runtime_identity_digest != runtime_identity_digest
                 or phase.sensor_identity_digest != sensor_identity_digest
-                or phase.control_step_after != phase.control_step_before + 1
+                or phase.control_step_after != phase.control_step_before
+                or phase.physics_step_after
+                != phase.physics_step_before + history_length
                 or phase.force_shape != (num_envs, history_length, 1, 1, 3)
                 or hashlib.sha256(phase.raw_force_bytes).hexdigest()
                 != phase.raw_force_sha256
@@ -2030,7 +2121,7 @@ def _registered_contact_calibration_receipts(
 def execute_pp_box_contact_calibration(
     env: object,
 ) -> ContactCalibrationExecutionReceipt:
-    """Run the one-time 16-sensor calibration (48 primitive simulator steps)."""
+    """Run 16 sensors x 3 phases x 4 explicit physics substeps once."""
 
     bindings = _resolve_hand_contact_bindings(env)
     history_length = _runtime_contact_history_length(env)
@@ -2066,7 +2157,6 @@ def execute_pp_box_contact_calibration(
         raise RecoveryTelemetryIncompleteError(
             ("runtime_contact_calibration_snapshot_roundtrip",)
         )
-    fixed_action = _calibration_fixed_action(env)
     _CONTACT_CALIBRATION_RECEIPTS.pop(id(env), None)
     sensor_receipts = []
     try:
@@ -2085,10 +2175,10 @@ def execute_pp_box_contact_calibration(
                         snapshot_digest=source_snapshot_digest,
                     )
                     _write_contact_calibration_phase(env, binding, phase)
+                    sensor = _scene_get(
+                        getattr(env, "scene", None), binding.sensor_scene_key
+                    )
                     if phase == "target_touch":
-                        sensor = _scene_get(
-                            getattr(env, "scene", None), binding.sensor_scene_key
-                        )
                         box = _scene_get(getattr(env, "scene", None), "box")
                         if box is None:
                             box = _scene_get(getattr(env, "scene", None), "Box")
@@ -2146,9 +2236,13 @@ def execute_pp_box_contact_calibration(
                                 )
                             ),
                         }
-                    step_before = _control_step_cursor(env)
-                    env.step(fixed_action.detach().clone())  # type: ignore[attr-defined]
-                    step_after = _control_step_cursor(env)
+                    (
+                        step_before,
+                        step_after,
+                        physics_step_before,
+                        physics_step_after,
+                        force_window,
+                    ) = _sample_contact_calibration_substeps(env, sensor)
                     phase_snapshot = coordinator.capture(
                         fidelity_tier=executor.snapshot_fidelity_tier,
                     )
@@ -2183,7 +2277,16 @@ def execute_pp_box_contact_calibration(
                         or force_history.device != force_matrix.device
                         or getattr(getattr(sensor, "cfg", None), "history_length", None)
                         != history_length
-                        or step_after != step_before + 1
+                        or step_after != step_before
+                        or physics_step_after != physics_step_before + history_length
+                        or force_window.shape
+                        != (
+                            int(getattr(env, "num_envs", 0)),
+                            history_length,
+                            1,
+                            1,
+                            3,
+                        )
                         or _SHA256_DIGEST.fullmatch(phase_state_digest) is None
                     ):
                         raise RecoveryTelemetryIncompleteError(
@@ -2222,7 +2325,9 @@ def execute_pp_box_contact_calibration(
                             ],
                             control_step_before=step_before,
                             control_step_after=step_after,
-                            force_matrix=force_history,
+                            physics_step_before=physics_step_before,
+                            physics_step_after=physics_step_after,
+                            force_matrix=force_window,
                         )
                     )
                 sensor_receipt = _issue_sensor_receipt(
@@ -2296,7 +2401,7 @@ def execute_pp_box_contact_calibration(
                                     contact_view, "filter_count", None
                                 ),
                                 "phase_receipts": tuple(phases),
-                                "filtered_force_history": (
+                                "filtered_force_substeps": (
                                     _phase_force_runtime_evidence(touch)
                                 ),
                                 "filtered_force_current": _tensor_runtime_evidence(
@@ -2703,20 +2808,18 @@ def _batched_pairwise_force_rows(
     num_envs: int,
     reports_by_scene_key: Mapping[str, RuntimeContactSensorReport],
 ) -> tuple[tuple[tuple[float, float, float], ...], ...]:
-    force_histories = []
+    force_rows = []
     for side in ("left", "right"):
         for binding in bindings[side].sensors:
             sensor = _scene_get(scene, binding.sensor_scene_key)
-            force_history = getattr(
-                getattr(sensor, "data", None), "force_matrix_w_history", None
+            force_matrix = getattr(
+                getattr(sensor, "data", None), "force_matrix_w", None
             )
             report = reports_by_scene_key[binding.sensor_scene_key]
             if (
-                not isinstance(force_history, torch.Tensor)
-                or force_history.shape != report.force_matrix_history_shape
-                or force_history.shape[0] != num_envs
-                or force_history.shape[2:] != (1, 1, 3)
-                or not force_history.is_floating_point()
+                not isinstance(force_matrix, torch.Tensor)
+                or force_matrix.shape != (num_envs, 1, 1, 3)
+                or not force_matrix.is_floating_point()
                 or getattr(sensor, "num_bodies", None) != 1
                 or tuple(getattr(sensor, "body_names", ()) or ())
                 != (binding.sensor_body_name,)
@@ -2726,25 +2829,19 @@ def _batched_pairwise_force_rows(
                 or not report.proven_filter_prim_paths
                 or report.filter_mapping_proof_source
                 != "controlled_three_phase_executor"
-                or str(force_history.dtype) != report.force_matrix_history_dtype
-                or str(force_history.device) != report.force_matrix_history_device
+                or str(force_matrix.dtype) != report.force_matrix_dtype
+                or str(force_matrix.device) != report.force_matrix_device
             ):
                 raise RecoveryTelemetryIncompleteError(
                     (f"{side}_box_pairwise_contact",)
                 )
-            force_histories.append(force_history[:, :, 0, 0, :])
-    stacked = torch.stack(force_histories, dim=1)
-    finite_by_sensor = torch.isfinite(stacked).all(dim=(2, 3))
+            force_rows.append(force_matrix[:, 0, 0, :])
+    stacked = torch.stack(force_rows, dim=1)
+    finite_by_sensor = torch.isfinite(stacked).all(dim=-1)
     safe_stacked = torch.where(torch.isfinite(stacked), stacked, 0.0)
-    peak_indices = torch.linalg.vector_norm(safe_stacked, dim=-1).argmax(dim=2)
-    peak_forces = torch.gather(
-        safe_stacked,
-        2,
-        peak_indices[:, :, None, None].expand(-1, -1, 1, 3),
-    ).squeeze(2)
     materialized = (
         torch.cat(
-            (peak_forces, finite_by_sensor.unsqueeze(-1).to(peak_forces.dtype)),
+            (safe_stacked, finite_by_sensor.unsqueeze(-1).to(safe_stacked.dtype)),
             dim=-1,
         )
         .detach()
