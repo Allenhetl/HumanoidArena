@@ -1402,6 +1402,54 @@ def test_pp_box_production_hooks_restore_every_reset_to_mutated_buffer(
     assert env.cfg._replay_initial_env_state_active is True
 
 
+def test_pp_box_production_hook_accepts_rlinf_observation_contract(
+    recovery_state,
+) -> None:
+    env = _ProductionEnv(recovery_state.PP_BOX_TASK_IDENTITY)
+    env.observation_manager._group_obs_term_names["policy"].extend(
+        [
+            "vla_state64",
+            "vla_front_rgb",
+            "up_alignment",
+            "critical_contact_force_max",
+            "critical_contact_force_available",
+        ]
+    )
+    recovery_state.install_pp_box_recovery_task_state_hooks(env)
+
+    snapshot = recovery_state.capture_recovery_state(
+        env,
+        required_capabilities={"task_state", "process_global_rng_exclusive"},
+    )
+
+    assert snapshot.task_state["runtime_identity"]["observation_terms"] == {
+        "policy": (
+            "robot_joint_state",
+            "robot_gipper_state",
+            "camera_image",
+            "vla_state64",
+            "vla_front_rgb",
+            "up_alignment",
+            "critical_contact_force_max",
+            "critical_contact_force_available",
+        )
+    }
+
+
+def test_pp_box_production_hook_rejects_unknown_observation_extension(
+    recovery_state,
+) -> None:
+    env = _ProductionEnv(recovery_state.PP_BOX_TASK_IDENTITY)
+    env.observation_manager._group_obs_term_names["policy"].append("unknown_term")
+    recovery_state.install_pp_box_recovery_task_state_hooks(env)
+
+    with pytest.raises(
+        recovery_state.RecoveryStateIncompleteError,
+        match="observation_manager.term_contract",
+    ):
+        recovery_state.capture_recovery_state(env)
+
+
 def test_pp_box_production_hook_rejects_wrong_task_identity(recovery_state) -> None:
     env = _ProductionEnv("Isaac-Another-Task")
 

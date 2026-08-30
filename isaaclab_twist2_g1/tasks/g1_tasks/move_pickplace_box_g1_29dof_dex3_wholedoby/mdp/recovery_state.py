@@ -103,13 +103,21 @@ _PP_BOX_PASSIVE_MANAGER_NAMES = (
     "event_manager",
     "recorder_manager",
 )
-_PP_BOX_OBSERVATION_TERMS = {
-    "policy": (
-        "robot_joint_state",
-        "robot_gipper_state",
-        "camera_image",
-    )
-}
+_PP_BOX_BASE_OBSERVATION_TERMS = (
+    "robot_joint_state",
+    "robot_gipper_state",
+    "camera_image",
+)
+_PP_BOX_RLINF_OBSERVATION_TERMS = _PP_BOX_BASE_OBSERVATION_TERMS + (
+    "vla_state64",
+    "vla_front_rgb",
+    "up_alignment",
+    "critical_contact_force_max",
+    "critical_contact_force_available",
+)
+_PP_BOX_OBSERVATION_TERM_CONTRACTS = frozenset(
+    {_PP_BOX_BASE_OBSERVATION_TERMS, _PP_BOX_RLINF_OBSERVATION_TERMS}
+)
 
 
 class RecoveryStateSchemaError(ValueError):
@@ -938,7 +946,11 @@ def _pp_box_runtime_identity(env: Any) -> Mapping[str, Any]:
     normalized_observation_terms = {
         str(group): tuple(names) for group, names in observation_terms.items()
     }
-    if normalized_observation_terms != _PP_BOX_OBSERVATION_TERMS:
+    if (
+        set(normalized_observation_terms) != {"policy"}
+        or normalized_observation_terms["policy"]
+        not in _PP_BOX_OBSERVATION_TERM_CONTRACTS
+    ):
         _raise_missing_task_state("observation_manager.term_contract", operation=operation)
     history_buffers = _require_runtime_attribute(
         observation_manager,
