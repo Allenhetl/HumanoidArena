@@ -82,8 +82,16 @@ _ACTOR_POLICY_TERM_ALLOWLIST = (
 class RecoveryTelemetryIncompleteError(RuntimeError):
     """Raised when required simulator truth is absent or structurally invalid."""
 
-    def __init__(self, missing_capabilities: Sequence[str]) -> None:
+    def __init__(
+        self,
+        missing_capabilities: Sequence[str],
+        *,
+        runtime_evidence: Mapping[str, object] | None = None,
+    ) -> None:
         self.missing_capabilities = tuple(sorted(set(missing_capabilities)))
+        self.runtime_evidence = (
+            None if runtime_evidence is None else dict(runtime_evidence)
+        )
         detail = ", ".join(self.missing_capabilities) or "unknown"
         super().__init__(f"privileged recovery telemetry is incomplete: {detail}")
 
@@ -1455,6 +1463,35 @@ def _issue_phase_receipt(
     return receipt
 
 
+def _tensor_runtime_evidence(value: object) -> Mapping[str, object]:
+    if not isinstance(value, torch.Tensor):
+        return {"status": "unavailable"}
+    raw_bytes = value.detach().contiguous().cpu().numpy().tobytes(order="C")
+    return {
+        "status": "captured",
+        "shape": tuple(value.shape),
+        "dtype": str(value.dtype),
+        "device": str(value.device),
+        "raw_bytes": raw_bytes,
+        "raw_sha256": hashlib.sha256(raw_bytes).hexdigest(),
+    }
+
+
+def _phase_force_runtime_evidence(
+    receipt: ContactCalibrationPhaseReceipt,
+) -> Mapping[str, object]:
+    return {
+        "status": "captured",
+        "phase": receipt.phase,
+        "shape": receipt.force_shape,
+        "dtype": receipt.force_dtype,
+        "device": receipt.force_device,
+        "raw_bytes": receipt.raw_force_bytes,
+        "raw_sha256": receipt.raw_force_sha256,
+        "phase_receipt_digest": receipt.receipt_digest,
+    }
+
+
 def _sensor_receipt_digest(receipt: ContactSensorCalibrationReceipt) -> str:
     return _canonical_json_digest(
         {
@@ -1730,12 +1767,35 @@ def execute_pp_box_contact_calibration(
         for side in ("left", "right"):
             for binding in bindings[side].sensors:
                 phases = []
+                touch_box_state = None
+                touch_body_pose = None
+                touch_net_force = None
                 for phase in ("baseline", "target_touch", "target_removed"):
                     coordinator.restore(
                         source_snapshot,
                         snapshot_digest=source_snapshot_digest,
                     )
                     _write_contact_calibration_phase(env, binding, phase)
+                    if phase == "target_touch":
+                        box = _scene_get(getattr(env, "scene", None), "box")
+                        if box is None:
+                            box = _scene_get(getattr(env, "scene", None), "Box")
+                        touch_box_state = getattr(
+                            getattr(box, "data", None), "root_state_w", None
+                        )
+                        if isinstance(touch_box_state, torch.Tensor):
+                            touch_box_state = touch_box_state.detach().clone()
+                        robot = _scene_get(getattr(env, "scene", None), "robot")
+                        if robot is not None:
+                            touch_body_pose = (
+                                _body_pose_tensor(
+                                    robot,
+                                    binding.sensor_body_name,
+                                    num_envs=int(getattr(env, "num_envs", 0)),
+                                )
+                                .detach()
+                                .clone()
+                            )
                     step_before = _control_step_cursor(env)
                     env.step(fixed_action.detach().clone())  # type: ignore[attr-defined]
                     step_after = _control_step_cursor(env)
@@ -1760,6 +1820,12 @@ def execute_pp_box_contact_calibration(
                         raise RecoveryTelemetryIncompleteError(
                             ("runtime_contact_calibration_step",)
                         )
+                    if phase == "target_touch":
+                        touch_net_force = getattr(
+                            getattr(sensor, "data", None), "net_forces_w", None
+                        )
+                        if isinstance(touch_net_force, torch.Tensor):
+                            touch_net_force = touch_net_force.detach().clone()
                     phases.append(
                         _issue_phase_receipt(
                             phase=phase,
@@ -1810,8 +1876,46 @@ def execute_pp_box_contact_calibration(
                         < EMPIRICAL_CONTACT_TOUCH_MIN_N
                         for force in touch_forces
                     ):
+                        sensor_cfg = getattr(sensor, "cfg", None)
+                        contact_view = getattr(sensor, "contact_physx_view", None)
                         raise RecoveryTelemetryIncompleteError(
-                            ("runtime_contact_calibration_touch",)
+                            ("runtime_contact_calibration_touch",),
+                            runtime_evidence={
+                                "schema": (
+                                    "pp_box_contact_calibration_failure_evidence_v1"
+                                ),
+                                "task_identity": PP_BOX_TASK_IDENTITY,
+                                "sensor_scene_key": binding.sensor_scene_key,
+                                "sensor_body_name": binding.sensor_body_name,
+                                "target_asset_scene_key": target_asset_scene_key,
+                                "target_prim_paths": target_prim_paths,
+                                "source_snapshot_digest": source_snapshot_digest,
+                                "runtime_identity_digest": runtime_identity_digest,
+                                "sensor_identity_digest": sensor_identity_digests[
+                                    binding.sensor_scene_key
+                                ],
+                                "configured_filter_prim_paths_expr": tuple(
+                                    getattr(
+                                        sensor_cfg,
+                                        "filter_prim_paths_expr",
+                                        (),
+                                    )
+                                ),
+                                "contact_filter_count": getattr(
+                                    contact_view, "filter_count", None
+                                ),
+                                "phase_receipts": tuple(phases),
+                                "filtered_force": _phase_force_runtime_evidence(touch),
+                                "net_force_w": _tensor_runtime_evidence(
+                                    touch_net_force
+                                ),
+                                "box_root_state_w": _tensor_runtime_evidence(
+                                    touch_box_state
+                                ),
+                                "sensor_body_pose_w": _tensor_runtime_evidence(
+                                    touch_body_pose
+                                ),
+                            },
                         ) from exc
                     raise
                 sensor_receipts.append(sensor_receipt)

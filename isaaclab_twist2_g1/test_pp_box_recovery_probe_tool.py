@@ -249,6 +249,41 @@ def test_runtime_failure_report_exists_before_native_cleanup(tmp_path: Path) -> 
     assert loaded["failure"]["message"] == "runtime import failed"
 
 
+def test_runtime_failure_report_persists_structured_runtime_evidence(
+    tmp_path: Path,
+) -> None:
+    probe = _load_probe_module()
+    output = tmp_path / "probe-runtime-evidence.json"
+    progress = probe.ProgressRecorder(
+        path=tmp_path / "probe-runtime-evidence.progress.jsonl",
+        run_id="RECOVLA-HA-PPBOX-RUNTIME-EVIDENCE-TEST",
+    )
+    report = probe.initial_report(
+        SimpleNamespace(
+            run_id=progress.run_id,
+            source_sha="a" * 40,
+            source_archive_sha256="b" * 64,
+            seed=20260830,
+            task=probe.TASK_IDENTITY,
+            env_config_yaml="tasks/common_env_config/pickplace_box_sonic.yaml",
+            device="cuda:0",
+        )
+    )
+    error = RuntimeError("contact calibration failed")
+    error.runtime_evidence = {
+        "schema": "pp_box_contact_calibration_failure_evidence_v1",
+        "raw_force_bytes": b"\x00\x01",
+    }
+
+    probe.persist_runtime_failure_report(output, report, progress, error)
+
+    loaded = json.loads(output.read_text(encoding="ascii"))
+    assert loaded["failure"]["runtime_evidence"] == {
+        "schema": "pp_box_contact_calibration_failure_evidence_v1",
+        "raw_force_bytes": {"encoding": "hex", "data": "0001"},
+    }
+
+
 def test_main_does_not_overwrite_pre_persisted_runtime_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

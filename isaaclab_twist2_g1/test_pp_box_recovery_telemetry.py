@@ -2066,6 +2066,19 @@ def test_controlled_contact_executor_rejects_all_zero_claimed_touch_and_publishe
     with pytest.raises(telemetry.RecoveryTelemetryIncompleteError) as exc_info:
         telemetry.execute_pp_box_contact_calibration(env)
     assert "runtime_contact_calibration_touch" in exc_info.value.missing_capabilities
+    evidence = exc_info.value.runtime_evidence
+    assert evidence["schema"] == "pp_box_contact_calibration_failure_evidence_v1"
+    assert evidence["sensor_scene_key"] == "left_box_contact_palm"
+    assert evidence["sensor_body_name"] == "left_hand_palm_link"
+    assert tuple(phase.phase for phase in evidence["phase_receipts"]) == (
+        "baseline",
+        "target_touch",
+        "target_removed",
+    )
+    assert evidence["filtered_force"]["shape"] == (1, 1, 1, 3)
+    assert len(evidence["filtered_force"]["raw_sha256"]) == 64
+    assert evidence["box_root_state_w"]["shape"] == (1, 13)
+    assert evidence["sensor_body_pose_w"]["shape"] == (1, 7)
 
     with pytest.raises(telemetry.RecoveryTelemetryIncompleteError):
         telemetry.validate_runtime_hand_contact_sensors(env)

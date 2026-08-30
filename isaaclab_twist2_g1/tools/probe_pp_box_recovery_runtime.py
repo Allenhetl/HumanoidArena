@@ -175,6 +175,9 @@ def persist_runtime_failure_report(
     }
     if isinstance(exc, SystemExit):
         failure["exit_code"] = _jsonable(exc.code)
+    runtime_evidence = getattr(exc, "runtime_evidence", None)
+    if runtime_evidence is not None:
+        failure["runtime_evidence"] = _jsonable(runtime_evidence)
     report["failure"] = failure
     write_report_exclusive(output, report)
     progress.record("runtime_failure", "persisted_before_cleanup")
