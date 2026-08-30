@@ -16,15 +16,18 @@ import struct
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, fields
+from importlib import import_module
 from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
-from . import recovery_state, rewards
+from . import recovery_state
 from .recovery_telemetry import (
     RECOVERY_TELEMETRY_SCHEMA_VERSION,
     DriverTerminalContext,
     PrivilegedRecoveryTelemetry,
 )
+
+rewards = import_module(".rewards", package=__package__)
 
 PP_BOX_TASK_IDENTITY = recovery_state.PP_BOX_TASK_IDENTITY
 RECOVERY_FAILURE_DESCRIPTOR_SCHEMA_VERSION = 1

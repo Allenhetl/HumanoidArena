@@ -38,6 +38,34 @@ def _load_module(name: str, path: Path):
     return module
 
 
+def test_failure_module_resolves_local_rewards_when_package_attr_is_shadowed() -> None:
+    package_name = f"{PACKAGE_NAME}_shadowed_rewards"
+    package = types.ModuleType(package_name)
+    package.__path__ = [str(MDP_DIR)]
+    package.rewards = types.SimpleNamespace(source="isaaclab.envs.mdp.rewards")
+    sys.modules[package_name] = package
+    try:
+        _load_module(
+            f"{package_name}.recovery_state",
+            MDP_DIR / "recovery_state.py",
+        )
+        _load_module(
+            f"{package_name}.recovery_telemetry",
+            MDP_DIR / "recovery_telemetry.py",
+        )
+        failures = _load_module(
+            f"{package_name}.recovery_failures",
+            MDP_DIR / "recovery_failures.py",
+        )
+
+        assert failures.rewards.__name__ == f"{package_name}.rewards"
+        assert failures.BOX_HALF_EXTENTS_M == (0.105, 0.105, 0.105)
+    finally:
+        for name in tuple(sys.modules):
+            if name == package_name or name.startswith(f"{package_name}."):
+                del sys.modules[name]
+
+
 @pytest.fixture()
 def modules():
     for name in tuple(sys.modules):
