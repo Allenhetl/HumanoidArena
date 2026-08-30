@@ -159,6 +159,27 @@ def write_report_exclusive(path: Path, report: Mapping[str, object]) -> None:
         handle.write("\n")
 
 
+def persist_runtime_failure_report(
+    output: Path,
+    report: dict[str, object],
+    progress: ProgressRecorder,
+    exc: BaseException,
+) -> None:
+    report["status"] = "failed"
+    failure: dict[str, object] = {
+        "type": type(exc).__name__,
+        "message": str(exc),
+        "traceback": "".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        ),
+    }
+    if isinstance(exc, SystemExit):
+        failure["exit_code"] = _jsonable(exc.code)
+    report["failure"] = failure
+    write_report_exclusive(output, report)
+    progress.record("runtime_failure", "persisted_before_cleanup")
+
+
 def _jsonable(value: object) -> object:
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return {
@@ -441,6 +462,11 @@ def run_runtime_probe(
         claims["task_side_privileged_telemetry"] = True
         claims["actor_observation_isolation"] = True
         report["status"] = "passed"
+        progress.record("runtime_body", "completed")
+        write_report_exclusive(args.output, report)
+    except BaseException as exc:
+        persist_runtime_failure_report(args.output, report, progress, exc)
+        raise
     finally:
         if env is not None:
             env.close()
@@ -485,28 +511,18 @@ def main() -> int:
         with _RejectPythonProcessExit():
             run_runtime_probe(args, report, progress)
     except SystemExit as exc:
-        report["status"] = "failed"
-        report["failure"] = {
-            "type": type(exc).__name__,
-            "message": str(exc),
-            "exit_code": _jsonable(exc.code),
-            "traceback": traceback.format_exc(),
-        }
-        write_report_exclusive(args.output, report)
+        if not args.output.exists():
+            persist_runtime_failure_report(args.output, report, progress, exc)
         raise RuntimeError(
             f"PP-box runtime raised SystemExit before completion: {exc.code!r}"
         ) from exc
     except Exception as exc:
-        report["status"] = "failed"
-        report["failure"] = {
-            "type": type(exc).__name__,
-            "message": str(exc),
-            "traceback": traceback.format_exc(),
-        }
-        write_report_exclusive(args.output, report)
+        if not args.output.exists():
+            persist_runtime_failure_report(args.output, report, progress, exc)
         raise
-    progress.record("probe_main", "completed")
-    write_report_exclusive(args.output, report)
+    if not args.output.exists():
+        progress.record("probe_main", "completed")
+        write_report_exclusive(args.output, report)
     return 0
 
 

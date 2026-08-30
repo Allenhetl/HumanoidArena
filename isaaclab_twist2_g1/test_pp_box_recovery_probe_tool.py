@@ -211,3 +211,87 @@ def test_probe_progress_trace_is_append_only_and_sequenced(tmp_path: Path) -> No
     occupied = probe.ProgressRecorder(path=progress_path, run_id="other-run")
     with pytest.raises(FileExistsError):
         occupied.record("probe_main", "entered")
+
+
+def test_runtime_failure_report_exists_before_native_cleanup(tmp_path: Path) -> None:
+    probe = _load_probe_module()
+    output = tmp_path / "probe-runtime-failure.json"
+    progress = probe.ProgressRecorder(
+        path=tmp_path / "probe-runtime-failure.progress.jsonl",
+        run_id="RECOVLA-HA-PPBOX-RUNTIME-FAILURE-TEST",
+    )
+    report = probe.initial_report(
+        SimpleNamespace(
+            run_id=progress.run_id,
+            source_sha="a" * 40,
+            source_archive_sha256="b" * 64,
+            seed=20260830,
+            task=probe.TASK_IDENTITY,
+            env_config_yaml="tasks/common_env_config/pickplace_box_sonic.yaml",
+            device="cuda:0",
+        )
+    )
+    cleanup_observed_report: list[bool] = []
+
+    with pytest.raises(ValueError, match="runtime import failed"):
+        try:
+            raise ValueError("runtime import failed")
+        except BaseException as exc:
+            probe.persist_runtime_failure_report(output, report, progress, exc)
+            raise
+        finally:
+            cleanup_observed_report.append(output.exists())
+
+    assert cleanup_observed_report == [True]
+    loaded = json.loads(output.read_text(encoding="ascii"))
+    assert loaded["status"] == "failed"
+    assert loaded["failure"]["type"] == "ValueError"
+    assert loaded["failure"]["message"] == "runtime import failed"
+
+
+def test_main_does_not_overwrite_pre_persisted_runtime_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = _load_probe_module()
+    output = tmp_path / "probe-pre-persisted.json"
+
+    class FakeAppLauncher:
+        @staticmethod
+        def add_app_launcher_args(parser) -> None:
+            parser.add_argument("--device", default="cpu")
+
+    fake_app = SimpleNamespace(AppLauncher=FakeAppLauncher)
+    monkeypatch.setitem(sys.modules, "isaaclab", SimpleNamespace(app=fake_app))
+    monkeypatch.setitem(sys.modules, "isaaclab.app", fake_app)
+
+    def fail_after_persist(args, report, progress) -> None:
+        try:
+            raise ValueError("persisted before cleanup")
+        except BaseException as exc:
+            probe.persist_runtime_failure_report(args.output, report, progress, exc)
+            raise
+
+    monkeypatch.setattr(probe, "run_runtime_probe", fail_after_persist)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(PROBE_PATH),
+            "--run_id",
+            "RECOVLA-HA-PPBOX-PRE-PERSISTED-TEST",
+            "--source_sha",
+            "a" * 40,
+            "--source_archive_sha256",
+            "b" * 64,
+            "--output",
+            str(output),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="persisted before cleanup"):
+        probe.main()
+
+    report = json.loads(output.read_text(encoding="ascii"))
+    assert report["failure"]["type"] == "ValueError"
+    assert report["failure"]["message"] == "persisted before cleanup"
