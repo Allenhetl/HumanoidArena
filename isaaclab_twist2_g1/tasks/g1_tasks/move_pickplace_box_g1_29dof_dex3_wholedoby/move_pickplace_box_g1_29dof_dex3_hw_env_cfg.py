@@ -25,7 +25,8 @@ def _box_contact_sensor_cfg(body_name: str) -> ContactSensorCfg:
     return ContactSensorCfg(
         prim_path=f"{{ENV_REGEX_NS}}/Robot/{body_name}",
         update_period=0.0,
-        history_length=0,
+        # Preserve every physics sample in one decimated primitive step.
+        history_length=4,
         track_air_time=False,
         filter_prim_paths_expr=["{ENV_REGEX_NS}/Box"],
         debug_vis=False,
