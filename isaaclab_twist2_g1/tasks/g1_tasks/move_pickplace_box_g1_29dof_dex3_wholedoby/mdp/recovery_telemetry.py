@@ -38,8 +38,8 @@ HARD_FALL_UP_ALIGNMENT = math.cos(math.radians(75.0))
 CRITICAL_BODY_CONTACT_THRESHOLD_N = 50.0
 EMPIRICAL_CONTACT_QUIET_MAX_N = 0.05
 EMPIRICAL_CONTACT_TOUCH_MIN_N = 1.0
-EMPIRICAL_CONTACT_TOUCH_GAP_M = 0.005
-EMPIRICAL_CONTACT_TOUCH_PENETRATION_M = 0.001
+EMPIRICAL_CONTACT_INITIAL_PENETRATION_M = 0.005
+EMPIRICAL_CONTACT_TOUCH_ADVANCE_M = 0.001
 
 _HAND_CONTACT_LINK_TOKENS = (
     "palm",
@@ -1541,10 +1541,7 @@ def _contact_calibration_touch_velocity_m_s(env: object) -> float:
     ):
         raise RecoveryTelemetryIncompleteError(("runtime_contact_calibration_cadence",))
     primitive_step_seconds = float(dt) * decimation
-    return (
-        -(EMPIRICAL_CONTACT_TOUCH_GAP_M + EMPIRICAL_CONTACT_TOUCH_PENETRATION_M)
-        / primitive_step_seconds
-    )
+    return -EMPIRICAL_CONTACT_TOUCH_ADVANCE_M / primitive_step_seconds
 
 
 def _contact_calibration_touch_state(
@@ -1592,7 +1589,7 @@ def _contact_calibration_touch_state(
             (
                 0.5 * (body_x_lo + body_x_hi - box_x_lo - box_x_hi),
                 0.5 * (body_y_lo + body_y_hi - box_y_lo - box_y_hi),
-                body_z_hi + EMPIRICAL_CONTACT_TOUCH_GAP_M - box_z_lo,
+                body_z_hi - EMPIRICAL_CONTACT_INITIAL_PENETRATION_M - box_z_lo,
             )
         )
     offsets = torch.tensor(
@@ -2220,6 +2217,10 @@ def execute_pp_box_contact_calibration(
                             "sim_dt_s": sim_dt,
                             "decimation": decimation,
                             "primitive_step_s": sim_dt * decimation,
+                            "initial_penetration_m": (
+                                EMPIRICAL_CONTACT_INITIAL_PENETRATION_M
+                            ),
+                            "advance_m": EMPIRICAL_CONTACT_TOUCH_ADVANCE_M,
                             "velocity_m_s": _contact_calibration_touch_velocity_m_s(
                                 env
                             ),
