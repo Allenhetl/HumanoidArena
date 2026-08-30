@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import traceback
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -41,6 +42,60 @@ ACTION_CONTRACT = {
     ],
     "base_owned_hand_indices": [38, 39],
 }
+
+
+class ProcessExitAttempt(RuntimeError):
+    """Raised when imported runtime code attempts to terminate the probe."""
+
+
+class ProgressRecorder:
+    """Append-only, fsynced probe progress trace for abrupt process exits."""
+
+    def __init__(self, *, path: Path, run_id: str) -> None:
+        self.path = path
+        self.run_id = str(run_id)
+        self._sequence = 0
+
+    def record(self, stage: str, status: str) -> None:
+        event = {
+            "schema": "ha_pp_box_recovery_probe_progress_v1",
+            "run_id": self.run_id,
+            "sequence": self._sequence,
+            "time_ns": time.time_ns(),
+            "stage": str(stage),
+            "status": str(status),
+        }
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        mode = "x" if self._sequence == 0 else "a"
+        with self.path.open(mode, encoding="ascii") as handle:
+            handle.write(
+                json.dumps(
+                    event,
+                    sort_keys=True,
+                    ensure_ascii=True,
+                    allow_nan=False,
+                )
+            )
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        self._sequence += 1
+
+
+class _RejectPythonProcessExit:
+    def __enter__(self) -> None:
+        self._original_exit = os._exit
+
+        def guarded_exit(code: int = 0) -> None:
+            stack = "".join(traceback.format_stack())
+            raise ProcessExitAttempt(
+                f"os._exit({code}) was blocked inside the runtime probe\n{stack}"
+            )
+
+        os._exit = guarded_exit
+
+    def __exit__(self, *_exc_info: object) -> None:
+        os._exit = self._original_exit
 
 
 def build_evaluator_fall_args() -> SimpleNamespace:
@@ -276,13 +331,20 @@ def _run_contact_and_telemetry(
     return contact, telemetry
 
 
-def run_runtime_probe(args: argparse.Namespace, report: dict[str, object]) -> None:
+def run_runtime_probe(
+    args: argparse.Namespace,
+    report: dict[str, object],
+    progress: ProgressRecorder,
+) -> None:
     project_root = Path(__file__).resolve().parents[1]
     os.environ.setdefault("PROJECT_ROOT", str(project_root))
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
 
+    progress.record("app_launcher_import", "entered")
     from isaaclab.app import AppLauncher
+
+    progress.record("app_launcher_import", "completed")
 
     profile_args = SimpleNamespace(
         task=args.task,
@@ -296,23 +358,33 @@ def run_runtime_probe(args: argparse.Namespace, report: dict[str, object]) -> No
     from task_runtime_profiles import apply_task_runtime_profile
 
     apply_task_runtime_profile(profile_args)
+    progress.record("task_runtime_profile", "applied")
     launcher = AppLauncher(args)
     simulation_app = launcher.app
+    progress.record("simulation_app", "started")
     env = None
     try:
         import importlib
 
+        progress.record("runtime_imports", "entered")
         import gymnasium as gym
         import torch
         from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
         from tasks.common_env_config import apply_env_config_yaml
 
+        progress.record("runtime_imports", "completed")
+
+        progress.record("target_task_import", "entered")
         importlib.import_module(TASK_MODULE)
+        progress.record("target_task_import", "completed")
+        progress.record("target_mdp_import", "entered")
         task_module = importlib.import_module(f"{TASK_MODULE}.mdp")
+        progress.record("target_mdp_import", "completed")
         from script.eval_scripts.sonic.sim_eval_vla import (
             _configure_episode_seed_state,
         )
 
+        progress.record("env_config", "entered")
         env_cfg = parse_env_cfg(args.task, device=args.device, num_envs=1)
         env_cfg.env_name = args.task
         env_cfg.recovery_task_identity = args.task
@@ -323,11 +395,16 @@ def run_runtime_probe(args: argparse.Namespace, report: dict[str, object]) -> No
             route_name="sonic",
         )
         _configure_episode_seed_state(env_cfg, args.seed)
+        progress.record("env_config", "completed")
+        progress.record("env_create", "entered")
         env = gym.make(args.task, cfg=env_cfg).unwrapped
+        progress.record("env_create", "completed")
+        progress.record("task_scene_initialize", "entered")
         env_cfg.initialize_task_scene(env, profile_args)
         env.sim.reset()
         env.reset()
         env_cfg.event_manager.trigger("reset_all_self", env)
+        progress.record("task_scene_initialize", "completed")
 
         report["runtime"] = {
             "python": sys.version,
@@ -341,19 +418,23 @@ def run_runtime_probe(args: argparse.Namespace, report: dict[str, object]) -> No
         }
         snapshot = report["snapshot"]
         assert isinstance(snapshot, dict)
+        progress.record("snapshot_roundtrip", "entered")
         snapshot["state_only"] = _state_only_roundtrip(env, task_module)
         snapshot["exact_continuation"] = _exact_continuation_capability(
             env, task_module
         )
+        progress.record("snapshot_roundtrip", "completed")
         claims = report["claims"]
         assert isinstance(claims, dict)
         claims["task_side_state_snapshot_roundtrip"] = True
 
+        progress.record("contact_and_telemetry", "entered")
         contact, telemetry = _run_contact_and_telemetry(
             env,
             task_module,
             max_steps=args.max_steps,
         )
+        progress.record("contact_and_telemetry", "completed")
         report["contact"] = contact
         report["telemetry"] = telemetry
         claims["task_side_contact_mapping"] = True
@@ -364,6 +445,7 @@ def run_runtime_probe(args: argparse.Namespace, report: dict[str, object]) -> No
         if env is not None:
             env.close()
         simulation_app.close()
+        progress.record("runtime_cleanup", "completed")
 
 
 def _base_parser() -> argparse.ArgumentParser:
@@ -393,8 +475,15 @@ def main() -> int:
         parser.error("--seed must be non-negative and --max_steps must be positive")
 
     report = initial_report(args)
+    progress = ProgressRecorder(
+        path=args.output.with_name(f"{args.output.stem}.progress.jsonl"),
+        run_id=args.run_id,
+    )
+    report["diagnostics"] = {"progress_trace": str(progress.path)}
+    progress.record("probe_main", "entered")
     try:
-        run_runtime_probe(args, report)
+        with _RejectPythonProcessExit():
+            run_runtime_probe(args, report, progress)
     except SystemExit as exc:
         report["status"] = "failed"
         report["failure"] = {
@@ -416,6 +505,7 @@ def main() -> int:
         }
         write_report_exclusive(args.output, report)
         raise
+    progress.record("probe_main", "completed")
     write_report_exclusive(args.output, report)
     return 0
 

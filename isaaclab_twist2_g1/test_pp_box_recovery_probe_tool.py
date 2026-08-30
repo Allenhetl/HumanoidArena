@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import math
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -107,7 +108,7 @@ def test_probe_system_exit_before_completion_is_reported_and_fails(
     monkeypatch.setattr(
         probe,
         "run_runtime_probe",
-        lambda _args, _report: (_ for _ in ()).throw(SystemExit(0)),
+        lambda _args, _report, _progress: (_ for _ in ()).throw(SystemExit(0)),
     )
     monkeypatch.setattr(
         sys,
@@ -132,3 +133,81 @@ def test_probe_system_exit_before_completion_is_reported_and_fails(
     assert report["status"] == "failed"
     assert report["failure"]["type"] == "SystemExit"
     assert report["failure"]["exit_code"] == 0
+
+
+def test_probe_python_process_exit_is_intercepted_with_trace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = _load_probe_module()
+    output = tmp_path / "probe-process-exit.json"
+    original_exit_calls: list[int] = []
+
+    class FakeAppLauncher:
+        @staticmethod
+        def add_app_launcher_args(parser) -> None:
+            parser.add_argument("--device", default="cpu")
+
+    fake_app = SimpleNamespace(AppLauncher=FakeAppLauncher)
+    monkeypatch.setitem(sys.modules, "isaaclab", SimpleNamespace(app=fake_app))
+    monkeypatch.setitem(sys.modules, "isaaclab.app", fake_app)
+
+    def original_exit(code: int) -> None:
+        original_exit_calls.append(code)
+        raise AssertionError("the unguarded os._exit implementation was called")
+
+    monkeypatch.setattr(os, "_exit", original_exit)
+    monkeypatch.setattr(
+        probe,
+        "run_runtime_probe",
+        lambda _args, _report, _progress: os._exit(0),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(PROBE_PATH),
+            "--run_id",
+            "RECOVLA-HA-PPBOX-PROCESS-EXIT-TEST",
+            "--source_sha",
+            "a" * 40,
+            "--source_archive_sha256",
+            "b" * 64,
+            "--output",
+            str(output),
+        ],
+    )
+
+    with pytest.raises(probe.ProcessExitAttempt, match=r"os\._exit\(0\)"):
+        probe.main()
+
+    assert original_exit_calls == []
+    assert os._exit is original_exit
+    report = json.loads(output.read_text(encoding="ascii"))
+    assert report["status"] == "failed"
+    assert report["failure"]["type"] == "ProcessExitAttempt"
+    assert "run_runtime_probe" in report["failure"]["traceback"]
+
+
+def test_probe_progress_trace_is_append_only_and_sequenced(tmp_path: Path) -> None:
+    probe = _load_probe_module()
+    progress_path = tmp_path / "probe.progress.jsonl"
+    recorder = probe.ProgressRecorder(
+        path=progress_path,
+        run_id="RECOVLA-HA-PPBOX-PROGRESS-TEST",
+    )
+
+    recorder.record("target_task_import", "entered")
+    recorder.record("target_task_import", "completed")
+
+    events = [
+        json.loads(line)
+        for line in progress_path.read_text(encoding="ascii").splitlines()
+    ]
+    assert [event["sequence"] for event in events] == [0, 1]
+    assert [event["status"] for event in events] == ["entered", "completed"]
+    assert all(event["run_id"] == recorder.run_id for event in events)
+
+    occupied = probe.ProgressRecorder(path=progress_path, run_id="other-run")
+    with pytest.raises(FileExistsError):
+        occupied.record("probe_main", "entered")
