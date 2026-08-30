@@ -39,6 +39,7 @@ CRITICAL_BODY_CONTACT_THRESHOLD_N = 50.0
 EMPIRICAL_CONTACT_QUIET_MAX_N = 0.05
 EMPIRICAL_CONTACT_TOUCH_MIN_N = 1.0
 EMPIRICAL_CONTACT_TOUCH_CENTER_OFFSET_M = 0.095
+EMPIRICAL_CONTACT_TOUCH_VELOCITY_M_S = -1.0
 
 _HAND_CONTACT_LINK_TOKENS = (
     "palm",
@@ -1380,14 +1381,17 @@ def _write_contact_calibration_phase(
     )
     target_state = box_state.detach().clone()
     target_state[:, :3] = body_pose[:, :3]
+    target_state[:, 7:13] = 0.0
     if phase == "target_touch":
         # The fixed 21 cm box uses a shallow 1 cm surface intersection. Placing
         # its center at the link origin leaves the link fully enclosed and
-        # produces no collision surface contact in PhysX.
+        # produces no collision surface contact in PhysX. Sweep the box 2 cm
+        # toward the body during the single primitive step so PhysX observes a
+        # collision crossing rather than only a teleported overlap.
         target_state[:, 2] += EMPIRICAL_CONTACT_TOUCH_CENTER_OFFSET_M
+        target_state[:, 9] = EMPIRICAL_CONTACT_TOUCH_VELOCITY_M_S
     else:
         target_state[:, 2] += 2.0 if phase == "baseline" else 3.0
-    target_state[:, 7:13] = 0.0
     env_ids = torch.arange(
         box_state.shape[0],
         device=torch.device(getattr(env, "device", box_state.device)),

@@ -1894,8 +1894,14 @@ def _install_fake_contact_calibration_runtime(
                     [[0.0, 0.0, telemetry.EMPIRICAL_CONTACT_TOUCH_CENTER_OFFSET_M]],
                     dtype=box_position.dtype,
                 )
-                if emit_touch_force and torch.equal(
-                    box_position, body_position + touch_offset
+                inward_velocity = torch.tensor(
+                    [[0.0, 0.0, telemetry.EMPIRICAL_CONTACT_TOUCH_VELOCITY_M_S]],
+                    dtype=box_position.dtype,
+                )
+                if (
+                    emit_touch_force
+                    and torch.equal(box_position, body_position + touch_offset)
+                    and torch.equal(box.data.root_state_w[:, 7:10], inward_velocity)
                 ):
                     sensor.data.force_matrix_w[:, 0, 0, 2] = 2.0
         return (
@@ -2029,6 +2035,13 @@ def test_contact_calibration_touch_places_box_surface_at_sensor_body(
         dtype=box_position.dtype,
     )
     torch.testing.assert_close(box_position - body_position, expected_offset)
+    torch.testing.assert_close(
+        env.scene["box"].data.root_state_w[:, 7:10],
+        torch.tensor(
+            [[0.0, 0.0, telemetry.EMPIRICAL_CONTACT_TOUCH_VELOCITY_M_S]],
+            dtype=box_position.dtype,
+        ),
+    )
     assert not torch.equal(box_position, body_position)
 
 
