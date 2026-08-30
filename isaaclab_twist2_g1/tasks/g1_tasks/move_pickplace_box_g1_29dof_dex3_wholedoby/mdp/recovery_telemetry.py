@@ -1376,6 +1376,7 @@ def _runtime_collision_local_bounds(
                 UsdGeom.Tokens.default_,
                 UsdGeom.Tokens.render,
                 UsdGeom.Tokens.proxy,
+                UsdGeom.Tokens.guide,
             ],
             useExtentsHint=False,
         )

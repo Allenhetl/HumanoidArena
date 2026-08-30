@@ -381,6 +381,33 @@ def test_env_cfg_declares_exact_one_body_box_filters_without_actor_terms() -> No
     assert actor_terms == {"robot_joint_state", "robot_gipper_state", "camera_image"}
 
 
+def test_runtime_collision_bounds_include_collision_guide_purpose() -> None:
+    tree = ast.parse(RECOVERY_TELEMETRY_PATH.read_text())
+    helper = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_runtime_collision_local_bounds"
+    )
+    bbox_call = next(
+        node
+        for node in ast.walk(helper)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "BBoxCache"
+    )
+    included = next(
+        keyword.value
+        for keyword in bbox_call.keywords
+        if keyword.arg == "includedPurposes"
+    )
+
+    assert isinstance(included, ast.List)
+    assert {
+        element.attr for element in included.elts if isinstance(element, ast.Attribute)
+    } == {"default_", "render", "proxy", "guide"}
+
+
 @pytest.mark.parametrize(
     ("left_contact", "right_contact", "left_pos", "right_pos", "expected"),
     [
