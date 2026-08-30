@@ -38,7 +38,7 @@ HARD_FALL_UP_ALIGNMENT = math.cos(math.radians(75.0))
 CRITICAL_BODY_CONTACT_THRESHOLD_N = 50.0
 EMPIRICAL_CONTACT_QUIET_MAX_N = 0.05
 EMPIRICAL_CONTACT_TOUCH_MIN_N = 1.0
-EMPIRICAL_CONTACT_TOUCH_CENTER_OFFSET_M = 0.095
+EMPIRICAL_CONTACT_TOUCH_GAP_M = 0.005
 EMPIRICAL_CONTACT_TOUCH_VELOCITY_M_S = -1.0
 
 _HAND_CONTACT_LINK_TOKENS = (
@@ -1356,6 +1356,166 @@ def _calibration_fixed_action(env: object) -> torch.Tensor:
     return action.detach().clone()
 
 
+def _runtime_collision_local_bounds(
+    root_prim_paths: Sequence[str],
+) -> tuple[tuple[float, float, float, float, float, float], ...]:
+    try:
+        import omni.usd
+        from pxr import Usd, UsdGeom, UsdPhysics
+    except Exception as exc:
+        raise RecoveryTelemetryIncompleteError(
+            ("runtime_contact_collision_geometry",)
+        ) from exc
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
+        raise RecoveryTelemetryIncompleteError(("runtime_contact_collision_geometry",))
+    try:
+        bbox_cache = UsdGeom.BBoxCache(
+            Usd.TimeCode.Default(),
+            includedPurposes=[
+                UsdGeom.Tokens.default_,
+                UsdGeom.Tokens.render,
+                UsdGeom.Tokens.proxy,
+            ],
+            useExtentsHint=False,
+        )
+    except Exception as exc:
+        raise RecoveryTelemetryIncompleteError(
+            ("runtime_contact_collision_geometry",)
+        ) from exc
+
+    result = []
+    try:
+        for path in root_prim_paths:
+            if type(path) is not str or not path.startswith("/World/envs/env_"):
+                raise ValueError("invalid collision root path")
+            root = stage.GetPrimAtPath(path)
+            if root is None or not root.IsValid() or not root.IsActive():
+                raise ValueError("collision root is unavailable")
+            minima = [math.inf, math.inf, math.inf]
+            maxima = [-math.inf, -math.inf, -math.inf]
+            collision_count = 0
+            predicate = Usd.TraverseInstanceProxies()
+            for prim in Usd.PrimRange(root, predicate):
+                if not prim.HasAPI(UsdPhysics.CollisionAPI):
+                    continue
+                enabled = UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().Get()
+                if enabled is False:
+                    continue
+                aligned = bbox_cache.ComputeRelativeBound(
+                    prim, root
+                ).ComputeAlignedRange()
+                lower = aligned.GetMin()
+                upper = aligned.GetMax()
+                values = tuple(float(lower[index]) for index in range(3)) + tuple(
+                    float(upper[index]) for index in range(3)
+                )
+                if not all(math.isfinite(value) for value in values):
+                    raise ValueError("collision bounds are non-finite")
+                if any(values[index + 3] <= values[index] for index in range(3)):
+                    continue
+                for index in range(3):
+                    minima[index] = min(minima[index], values[index])
+                    maxima[index] = max(maxima[index], values[index + 3])
+                collision_count += 1
+            if collision_count == 0:
+                raise ValueError("collision root has no enabled finite geometry")
+            bounds = (
+                minima[0],
+                maxima[0],
+                minima[1],
+                maxima[1],
+                minima[2],
+                maxima[2],
+            )
+            if not all(math.isfinite(value) for value in bounds):
+                raise ValueError("collision bounds are incomplete")
+            result.append(bounds)
+    except Exception as exc:
+        raise RecoveryTelemetryIncompleteError(
+            ("runtime_contact_collision_geometry",)
+        ) from exc
+    return tuple(result)
+
+
+def _quat_rotate_wxyz(quaternion: torch.Tensor, vector: torch.Tensor) -> torch.Tensor:
+    if quaternion.shape != (*vector.shape[:-1], 4) or vector.shape[-1] != 3:
+        raise RecoveryTelemetryIncompleteError(("runtime_contact_calibration_pose",))
+    norm = torch.linalg.vector_norm(quaternion, dim=-1, keepdim=True)
+    if not bool(torch.isfinite(norm).all()) or bool((norm <= 1.0e-8).any()):
+        raise RecoveryTelemetryIncompleteError(("runtime_contact_calibration_pose",))
+    unit = quaternion / norm
+    xyz = unit[..., 1:]
+    cross = torch.linalg.cross(xyz, vector, dim=-1)
+    return vector + 2.0 * (
+        unit[..., :1] * cross + torch.linalg.cross(xyz, cross, dim=-1)
+    )
+
+
+def _contact_calibration_touch_state(
+    box_state: torch.Tensor,
+    body_pose: torch.Tensor,
+    body_collision_bounds: Sequence[Sequence[float]],
+    box_collision_bounds: Sequence[Sequence[float]],
+) -> torch.Tensor:
+    num_envs = box_state.shape[0]
+    if (
+        body_pose.shape != (num_envs, 7)
+        or len(body_collision_bounds) != num_envs
+        or len(box_collision_bounds) != num_envs
+    ):
+        raise RecoveryTelemetryIncompleteError(("runtime_contact_collision_geometry",))
+    local_offsets = []
+    for body_bounds, box_bounds in zip(
+        body_collision_bounds, box_collision_bounds, strict=True
+    ):
+        if len(body_bounds) != 6 or len(box_bounds) != 6:
+            raise RecoveryTelemetryIncompleteError(
+                ("runtime_contact_collision_geometry",)
+            )
+        values = tuple(float(value) for value in (*body_bounds, *box_bounds))
+        if not all(math.isfinite(value) for value in values):
+            raise RecoveryTelemetryIncompleteError(
+                ("runtime_contact_collision_geometry",)
+            )
+        body_x_lo, body_x_hi, body_y_lo, body_y_hi, body_z_lo, body_z_hi = values[:6]
+        box_x_lo, box_x_hi, box_y_lo, box_y_hi, box_z_lo, box_z_hi = values[6:]
+        if (
+            body_x_hi <= body_x_lo
+            or body_y_hi <= body_y_lo
+            or body_z_hi <= body_z_lo
+            or box_x_hi <= box_x_lo
+            or box_y_hi <= box_y_lo
+            or box_z_hi <= box_z_lo
+        ):
+            raise RecoveryTelemetryIncompleteError(
+                ("runtime_contact_collision_geometry",)
+            )
+        local_offsets.append(
+            (
+                0.5 * (body_x_lo + body_x_hi - box_x_lo - box_x_hi),
+                0.5 * (body_y_lo + body_y_hi - box_y_lo - box_y_hi),
+                body_z_hi + EMPIRICAL_CONTACT_TOUCH_GAP_M - box_z_lo,
+            )
+        )
+    offsets = torch.tensor(
+        local_offsets, device=box_state.device, dtype=box_state.dtype
+    )
+    local_velocity = torch.zeros_like(offsets)
+    local_velocity[:, 2] = EMPIRICAL_CONTACT_TOUCH_VELOCITY_M_S
+    body_quaternion = body_pose[:, 3:7]
+    quaternion_norm = torch.linalg.vector_norm(body_quaternion, dim=-1, keepdim=True)
+    normalized_quaternion = body_quaternion / quaternion_norm
+    target_state = box_state.detach().clone()
+    target_state[:, :3] = body_pose[:, :3] + _quat_rotate_wxyz(
+        normalized_quaternion, offsets
+    )
+    target_state[:, 3:7] = normalized_quaternion
+    target_state[:, 7:10] = _quat_rotate_wxyz(normalized_quaternion, local_velocity)
+    target_state[:, 10:13] = 0.0
+    return target_state
+
+
 def _write_contact_calibration_phase(
     env: object,
     binding: PairwiseContactBinding,
@@ -1383,13 +1543,26 @@ def _write_contact_calibration_phase(
     target_state[:, :3] = body_pose[:, :3]
     target_state[:, 7:13] = 0.0
     if phase == "target_touch":
-        # The fixed 21 cm box uses a shallow 1 cm surface intersection. Placing
-        # its center at the link origin leaves the link fully enclosed and
-        # produces no collision surface contact in PhysX. Sweep the box 2 cm
-        # toward the body during the single primitive step so PhysX observes a
-        # collision crossing rather than only a teleported overlap.
-        target_state[:, 2] += EMPIRICAL_CONTACT_TOUCH_CENTER_OFFSET_M
-        target_state[:, 9] = EMPIRICAL_CONTACT_TOUCH_VELOCITY_M_S
+        sensor = _scene_get(scene, binding.sensor_scene_key)
+        body_prim_paths = tuple(
+            getattr(getattr(sensor, "body_physx_view", None), "prim_paths", ())
+        )
+        box_prim_paths = tuple(
+            getattr(getattr(box, "root_physx_view", None), "prim_paths", ())
+        )
+        if (
+            len(body_prim_paths) != box_state.shape[0]
+            or len(box_prim_paths) != box_state.shape[0]
+        ):
+            raise RecoveryTelemetryIncompleteError(
+                ("runtime_contact_collision_geometry",)
+            )
+        target_state = _contact_calibration_touch_state(
+            box_state,
+            body_pose,
+            _runtime_collision_local_bounds(body_prim_paths),
+            _runtime_collision_local_bounds(box_prim_paths),
+        )
     else:
         target_state[:, 2] += 2.0 if phase == "baseline" else 3.0
     env_ids = torch.arange(

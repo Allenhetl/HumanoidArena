@@ -1878,6 +1878,17 @@ def _install_fake_contact_calibration_runtime(
 
     box.write_root_state_to_sim = write_root_state_to_sim
 
+    body_collision_bounds = (-0.02, 0.02, -0.03, 0.03, -0.01, 0.04)
+    box_collision_bounds = (-0.105, 0.105, -0.105, 0.105, -0.105, 0.105)
+
+    def collision_local_bounds(root_prim_paths):
+        assert len(root_prim_paths) == 1
+        if root_prim_paths[0].endswith("/Box"):
+            return (box_collision_bounds,)
+        return (body_collision_bounds,)
+
+    telemetry._runtime_collision_local_bounds = collision_local_bounds
+
     def step(action):
         torch.testing.assert_close(action, env.action_manager._action)
         env.common_step_counter += 1
@@ -1891,7 +1902,7 @@ def _install_fake_contact_calibration_runtime(
                 body_index = robot.data.body_names.index(binding.sensor_body_name)
                 body_position = robot.data.body_state_w[:, body_index, :3]
                 touch_offset = torch.tensor(
-                    [[0.0, 0.0, telemetry.EMPIRICAL_CONTACT_TOUCH_CENTER_OFFSET_M]],
+                    [[0.0, 0.0, 0.04 + 0.005 + 0.105]],
                     dtype=box_position.dtype,
                 )
                 inward_velocity = torch.tensor(
@@ -2030,11 +2041,12 @@ def test_contact_calibration_touch_places_box_surface_at_sensor_body(
     telemetry._write_contact_calibration_phase(env, binding, "target_touch")
 
     box_position = env.scene["box"].data.root_state_w[:, :3]
-    expected_offset = torch.tensor(
-        [[0.0, 0.0, telemetry.EMPIRICAL_CONTACT_TOUCH_CENTER_OFFSET_M]],
-        dtype=box_position.dtype,
-    )
+    expected_offset = torch.tensor([[0.0, 0.0, 0.15]], dtype=box_position.dtype)
     torch.testing.assert_close(box_position - body_position, expected_offset)
+    torch.testing.assert_close(
+        env.scene["box"].data.root_state_w[:, 3:7],
+        robot.data.body_state_w[:, body_index, 3:7],
+    )
     torch.testing.assert_close(
         env.scene["box"].data.root_state_w[:, 7:10],
         torch.tensor(
@@ -2043,6 +2055,32 @@ def test_contact_calibration_touch_places_box_surface_at_sensor_body(
         ),
     )
     assert not torch.equal(box_position, body_position)
+
+
+def test_contact_calibration_touch_follows_live_body_orientation(telemetry) -> None:
+    box_state = torch.zeros(1, 13, dtype=torch.float64)
+    box_state[:, 3] = 1.0
+    body_pose = torch.tensor(
+        [[1.0, 2.0, 3.0, math.sqrt(0.5), 0.0, math.sqrt(0.5), 0.0]],
+        dtype=torch.float64,
+    )
+    body_bounds = ((-0.02, 0.02, -0.03, 0.03, -0.01, 0.04),)
+    box_bounds = ((-0.105, 0.105, -0.105, 0.105, -0.105, 0.105),)
+
+    target = telemetry._contact_calibration_touch_state(
+        box_state,
+        body_pose,
+        body_bounds,
+        box_bounds,
+    )
+
+    torch.testing.assert_close(
+        target[:, :3], torch.tensor([[1.15, 2.0, 3.0]], dtype=torch.float64)
+    )
+    torch.testing.assert_close(
+        target[:, 7:10], torch.tensor([[-1.0, 0.0, 0.0]], dtype=torch.float64)
+    )
+    torch.testing.assert_close(target[:, 3:7], body_pose[:, 3:7])
 
 
 def test_contact_calibration_receipt_binds_coordinator_and_state_only_fidelity(
